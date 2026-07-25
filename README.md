@@ -8,3 +8,6 @@ Core workspace repository for the AudioLIT project.
 - `/gateway` - API Gateway handling client routing.
 - `/config` - Global application configurations.
 - `/shared` - Common utilities shared across services.
+
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
