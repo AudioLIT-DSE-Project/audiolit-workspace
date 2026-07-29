@@ -3,8 +3,15 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.schemas.responses import ErrorResponse
+
+
+def _serialize_model(model: BaseModel) -> dict:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
 
 
 async def request_validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -14,7 +21,7 @@ async def request_validation_error_handler(request: Request, exc: RequestValidat
         path=str(request.url.path),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
-    return JSONResponse(status_code=422, content=payload.model_dump())
+    return JSONResponse(status_code=422, content=_serialize_model(payload))
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
@@ -25,7 +32,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         path=str(request.url.path),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
-    return JSONResponse(status_code=exc.status_code, content=payload.model_dump())
+    return JSONResponse(status_code=exc.status_code, content=_serialize_model(payload))
 
 
 async def unexpected_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -35,4 +42,4 @@ async def unexpected_exception_handler(request: Request, exc: Exception) -> JSON
         path=str(request.url.path),
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
-    return JSONResponse(status_code=500, content=payload.model_dump())
+    return JSONResponse(status_code=500, content=_serialize_model(payload))

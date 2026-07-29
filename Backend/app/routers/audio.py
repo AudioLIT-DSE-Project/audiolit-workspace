@@ -52,7 +52,7 @@ def _validate_magic_bytes(path: Path, extension: str) -> None:
 
 def _load_audio_metadata(path: Path) -> tuple[int, int, float]:
     info = sf.info(str(path))
-    duration = librosa.get_duration(filename=str(path))
+    duration = librosa.get_duration(path=str(path))
     return info.samplerate, info.channels, duration
 
 
@@ -78,22 +78,30 @@ async def _extract_audio_metadata(path: Path, extension: str) -> AudioConfig:
 
 async def _write_upload_to_disk(upload_file: UploadFile, destination: Path) -> int:
     total_bytes = 0
-    async with upload_file:
+    file_handle = upload_file.file
+    try:
         async with aiofiles.open(destination, "wb") as out_file:
-            async for chunk in upload_file.stream():
+            while True:
+                chunk = await asyncio.to_thread(file_handle.read, CHUNK_SIZE)
                 if not chunk:
-                    continue
+                    break
                 total_bytes += len(chunk)
                 if total_bytes > MAX_FILE_SIZE:
                     raise HTTPException(status_code=413, detail="Uploaded payload exceeds 100MB limit.")
                 await out_file.write(chunk)
+    finally:
+        file_handle.close()
     return total_bytes
 
 
 @router.post("/audio/upload", response_model=UploadResponse)
 async def upload_audio(file: UploadFile = File(...)) -> UploadResponse:
+    if file.filename is None:
+        raise HTTPException(status_code=422, detail="Missing filename.")
+
     extension = _validate_extension(file.filename)
-    _validate_content_type(file.content_type)
+    content_type = file.content_type or ""
+    _validate_content_type(content_type)
 
     transaction_token = f"aud_{uuid.uuid4().hex}"
     temp_file = tempfile.NamedTemporaryFile(prefix=transaction_token + "_", suffix=".tmp", dir=UPLOAD_DIR, delete=False)
