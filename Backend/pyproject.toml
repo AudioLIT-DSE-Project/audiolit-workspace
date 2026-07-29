@@ -10,6 +10,7 @@ fastapi = "^0.100.0"
 librosa = "^0.10.0"
 pydantic = "^2.0"
 python = "^3.11"
+python-multipart = "^0.0.6"
 soundfile = "^0.12.1"
 uvicorn = {extras = ["standard"], version = "^0.23.0"}
 
