@@ -1,0 +1,17 @@
+[tool.poetry]
+authors = ["AudioLIT Team <team@example.com>"]
+description = "AudioLIT FastAPI microservice"
+name = "audiolit-api"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+aiofiles = "^23.0.0"
+fastapi = "^0.100.0"
+librosa = "^0.10.0"
+pydantic = "^2.0"
+python = "^3.11"
+soundfile = "^0.12.1"
+uvicorn = {extras = ["standard"], version = "^0.23.0"}
+
+[tool.poetry.scripts]
+start = "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
