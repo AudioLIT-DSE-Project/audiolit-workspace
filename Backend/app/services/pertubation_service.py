@@ -1,5 +1,5 @@
 import torch
-import torchaudio
+import soundfile as sf
 import os
 import uuid
 import librosa
@@ -7,6 +7,22 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from .dataset_service import resolve_file
+
+def _load_waveform(path: str) -> Tuple[torch.Tensor, int]:
+    """
+    Load audio via soundfile, returning the same (channels, time) float32
+    tensor contract torchaudio.load() used to provide. soundfile reads as
+    (frames, channels) (or (frames,) for mono); always_2d=True keeps mono
+    files 2D so the transpose below is uniform for any channel count.
+    """
+    data, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+    waveform = torch.from_numpy(data.T.copy())
+    return waveform, sample_rate
+
+def _save_waveform(path: str, waveform: torch.Tensor, sample_rate: int) -> None:
+    """Save a (channels, time) float32 tensor via soundfile."""
+    data = waveform.detach().cpu().numpy().T
+    sf.write(path, data, sample_rate)
 
 def add_gaussian_noise(waveform, noise_level=0.005):
     """
@@ -280,7 +296,7 @@ def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output
     
     # Load the audio file
     try:
-        waveform, sample_rate = torchaudio.load(str(resolved_path))
+        waveform, sample_rate = _load_waveform(str(resolved_path))
     except Exception as e:
         return {
             "original_file": file_path,
@@ -305,7 +321,7 @@ def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     # Save the perturbed audio
-    torchaudio.save(str(output_path), perturbed_waveform, sample_rate)
+    _save_waveform(str(output_path), perturbed_waveform, sample_rate)
     
     # Calculate duration
     duration_ms = int(perturbed_waveform.shape[-1] / sample_rate * 1000)
