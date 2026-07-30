@@ -196,7 +196,7 @@ export const PredictionPanel = ({ selectedFile, selectedEmbeddingFile, model, da
       setError(null);
 
       try {
-        let requestBody: any = {};
+        const requestBody: any = {};
         
         if (selectedFile) {
           // Check if this is an uploaded file - more precise detection
@@ -283,7 +283,7 @@ export const PredictionPanel = ({ selectedFile, selectedEmbeddingFile, model, da
 
   // Fetch whisper prediction when model includes whisper and file is selected
   useEffect(() => {
-    let isMounted = true;
+    const isMounted = true;
     
     const fetchWhisperPrediction = async () => {
       if (!model?.includes("whisper") || (!selectedFile && !selectedEmbeddingFile)) {
@@ -299,7 +299,7 @@ export const PredictionPanel = ({ selectedFile, selectedEmbeddingFile, model, da
       setError(null);
 
       try {
-        let requestBody: any = {
+        const requestBody: any = {
           model: model
         };
         
