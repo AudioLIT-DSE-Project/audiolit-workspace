@@ -1,0 +1,144 @@
+# AudioLIT — Project Documents & Conventions
+
+This directory holds the **authoritative planning documents** for AudioLIT, an
+interpretability workbench for Automatic Speech Recognition (ASR), Speech Emotion
+Recognition (SER), and Audio Deepfake Detection (ADD), extending the ECHO 1.0
+baseline.
+
+Anyone (human or agent) working in this repository should read this file first,
+then the SAD and SRS, before making architectural or scope decisions.
+
+---
+
+## Documents in this directory
+
+| File | What it is | Status |
+|------|------------|--------|
+| `SAD.md` | Software Architecture Document (v1.0) | **Final — authoritative** |
+| `SRS.md` | Software Requirements Specification (v1.0) | **Final — authoritative** |
+| `README.md` | This file — conventions and errata | Living |
+
+> Export both from Google Docs as Markdown and commit them here as `SAD.md` and
+> `SRS.md`. If a figure is essential (e.g. the SAD migration or layered-view
+> diagrams), export it as PNG into `docs/assets/` and reference it, since Docs'
+> Markdown export does not embed images reliably.
+
+---
+
+## Authoritative source order
+
+When two sources disagree, the one higher in this list wins:
+
+1. **SAD** (`docs/SAD.md`) — architecture of record
+2. **SRS** (`docs/SRS.md`) — committed requirements (FRs, NFRs, scope)
+3. **Linear issue LIT-228** — the Claude Code convention / bootstrapping doc
+   (repo layout, FR→issue map, SAD component map, per-FR acceptance criteria)
+4. **Other Linear issues** — implementation work orders
+
+If an existing Linear issue body or existing code conflicts with the SAD/SRS,
+the SAD/SRS wins. Flag the conflict; do not silently conform to the stale source.
+
+> Note on history: the SRS was finalized **before** the SAD. Several early Linear
+> issues (including some marked Done) reflect pre-SAD assumptions and were later
+> corrected. The errata below capture the cases where the finalized SAD/SRS
+> superseded earlier decisions.
+
+---
+
+## Errata — decisions that supersede stale text in the source documents
+
+These are known points where the documents (or early issues) contain outdated
+statements. The **decision** column is authoritative.
+
+| # | Topic | Stale text / assumption | Decision (authoritative) |
+|---|-------|-------------------------|--------------------------|
+| E1 | **Repository topology** | SAD §8.3 / Figure 21 describe **two repos** (`audiolit-workspace` + `audiolit-ds-engine`). | **Single monorepo: `audiolit-workspace`.** ECHO 1.0 is cloned and extended in place; frontend and backend live in one tree. The two-repo diagram is superseded. |
+| E2 | **Async task fabric** | SRS §3.6.1 / §3.9.3 / §3.10 mention **"Celery/RQ"** or a Celery broker. | **RQ + Redis only.** Celery is removed project-wide (lighter setup, simpler single-host operation). Never reintroduce Celery. The SAD already commits to RQ; the SRS text is the stale side. |
+| E3 | **Audio I/O library** | ECHO baseline and some early issues use **torchaudio**. | **soundfile** is the standard for all audio load/save (SAD §3.3, tracked by LIT-226). torchaudio is on a discontinuation path and is removed. Never reintroduce it. |
+
+Add new errata here as they are discovered, rather than editing the source
+documents mid-stream.
+
+---
+
+## Repository layout (target, per SAD)
+
+Single monorepo, organized into the five logical layers from the SAD:
+
+```
+audiolit-workspace/
+├── docs/                    # this directory (SAD, SRS, README)
+├── backend/
+│   └── app/
+│       ├── api/             # FastAPI gateway: routes, CORS, enqueue, WebSocket relay   (SAD §5.2.1)
+│       ├── orchestration/   # RQ workers, fan-out/fan-in orchestrator, per-family queues (SAD §5.2.2 / §6.2)
+│       ├── domain/          # framework-free: ModelRegistry, HookManager, attribution,   (SAD §5.2.3)
+│       │                    #   MutationEngine, acoustic estimators
+│       └── infrastructure/  # SHA-256 content-addressed cache, Redis tensor serialisation, MongoDB (SAD §5.2.4)
+└── frontend/
+    └── src/                 # React 18 workspace, HTML5 canvas, Plotly projection, spectrogram overlays (SAD §5.2.5)
+```
+
+> The ECHO 1.0 clone may still be in its inherited `Backend/` / `Frontend/`
+> shape until the layered migration (LIT-227) completes. Verify the actual tree
+> before assuming the structure above exists.
+
+---
+
+## Branch model
+
+- **`main`** — production. Never receive a PR directly from a feature branch.
+- **`develop`** — integration branch. All feature work branches off `develop`;
+  PRs merge **into `develop`**.
+- **`develop` → `main`** only after a full audit.
+- **One feature branch per Linear issue** (`feature/lit-xxx-...`), **one PR per
+  issue**, referencing the LIT-id. CI (pytest + Jest, ruff/Black,
+  ESLint/Prettier) green before merge.
+
+---
+
+## Scope discipline
+
+The SRS separates **committed** functional requirements from **non-committed
+(stretch)** scope (SRS §4.4). Committed features must ship within their phase;
+nothing non-committed may displace committed work.
+
+**Non-committed / stretch (SRS §4.4) — do not build as committed scope:**
+ADDSegDiff diffusion-based artefact localization, multi-class generator
+fingerprinting, multi-model side-by-side comparison, per-demographic confusion
+matrices, cross-lingual disparity, insertion-score / deletion-insertion AUC,
+IoU-against-ground-truth-mask validation.
+
+Stretch issues must carry a ⚠ STRETCH banner and a "do not start until committed
+work is merged" gate. Never promote a stretch item to a committed FR.
+
+> There is deliberately **no FR5, FR13, or FR14** in the reconciled SRS. Do not
+> invent them.
+
+---
+
+## Committed functional requirements (quick index)
+
+Full specifications live in `SRS.md`; this is a pointer index.
+
+| FR | Capability |
+|----|------------|
+| FR1 | Dynamic Hugging Face model ingestion (supported-family registry) |
+| FR2 | Benchmark dataset management |
+| FR3 | Asynchronous multi-task inference (RQ) |
+| FR4 | SHA-256 cache-by-hash |
+| FR6 | Speech Emotion Recognition |
+| FR7 | Audio Deepfake Detection (binary) |
+| FR8 | Spectrogram attribution + Grad-CAM |
+| FR9 | Integrated Gradients |
+| FR10 | Acoustic wave profiling |
+| FR11 | Latent projection (committed lasso/linking) |
+| FR12 | Canvas-driven mutation |
+| FR15 | Accent bias profiling |
+| FR16 | Faithfulness auditing (deletion score) |
+| FR17 | Faithful attention extraction |
+
+---
+
+*Keep this file current. When a decision changes the architecture or scope,
+record it here as an erratum before propagating it into issues or code.*
