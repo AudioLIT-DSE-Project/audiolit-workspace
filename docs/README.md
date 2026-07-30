@@ -70,14 +70,28 @@ audiolit-workspace/
 ├── docs/                    # this directory (SAD, SRS, README)
 ├── backend/
 │   └── app/
-│       ├── api/             # FastAPI gateway: routes, CORS, enqueue, WebSocket relay   (SAD §5.2.1)
-│       ├── orchestration/   # RQ workers, fan-out/fan-in orchestrator, per-family queues (SAD §5.2.2 / §6.2)
-│       ├── domain/          # framework-free: ModelRegistry, HookManager, attribution,   (SAD §5.2.3)
-│       │                    #   MutationEngine, acoustic estimators
-│       └── infrastructure/  # SHA-256 content-addressed cache, Redis tensor serialisation, MongoDB (SAD §5.2.4)
+│       ├── api/             # FastAPI gateway (the "application layer"): routes, CORS,   (SAD §5.1, application layer)
+│       │                    #   enqueue, WebSocket relay — deliberately contains no AI code
+│       ├── orchestration/   # RQ/Redis per-model workers, Task Orchestrator fan-out/fan-in (SAD §5.1 orchestration layer; §6.1 worker design; §5.2 Task Orchestrator)
+│       ├── domain/          # framework-free: Model Registry, Explanation Strategies       (SAD §5.1 domain layer; §5.2 component table)
+│       │                    #   (IG/LIME/SHAP/Grad-CAM), Mutation Engine, Acoustic Profiler,
+│       │                    #   Bias Profiler and Faithfulness Auditor
+│       └── infrastructure/  # Cache Manager (Redis, fingerprint-keyed), MongoDB,           (SAD §5.1 infrastructure layer; §5.2 Cache Manager)
+│                            #   dataset-reading tools, activity logging
 └── frontend/
-    └── src/                 # React 18 workspace, HTML5 canvas, Plotly projection, spectrogram overlays (SAD §5.2.5)
+    └── src/                 # React 18 Workspace (shared interface state), HTML5 canvas,   (SAD §5.1 presentation layer; §3.3 Plotly)
+                             #   Plotly projection, spectrogram overlays
 ```
+
+> Note on SAD citations above: `docs/SAD.md` describes the five layers in prose in §5.1
+> and lists components in a single flat table in §5.2 — it does **not** have numbered
+> per-layer subsections (`§5.2.1`...`§5.2.5`), and its component names are plain
+> (`Model Registry`, `Explanation Strategies`, `Cache Manager`, `Mutation Engine`,
+> `Acoustic Profiler`, `Bias Profiler and Faithfulness Auditor`, `Task Orchestrator`,
+> `Workspace`) rather than class-style names like `HookManager`/`CacheGateway`/`TensorCodec`.
+> An earlier pass (LIT-228) cited fine-grained section numbers and class names that were
+> never verified against the actual document; both LIT-228 and downstream Tier-C-stamped
+> issues have been corrected to match the real SAD.md structure above.
 
 > The ECHO 1.0 clone may still be in its inherited `Backend/` / `Frontend/`
 > shape until the layered migration (LIT-227) completes. Verify the actual tree
