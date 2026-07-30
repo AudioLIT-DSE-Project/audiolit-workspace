@@ -37,7 +37,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 | LIT-207 | Dynamic HF model ingestion (Model Registry) | FR1 | Rahim | 🟢 | none | Also satisfies LIT-227's "model-loading reorganised" migration step — same work, don't duplicate. |
 | LIT-210 | Model ID resolver / safetensors / cache | FR1 | Rahim | 🟢 | none | Sub-task of LIT-207; can run in parallel with it. |
 | LIT-211 | Forward/attention hook registration | FR1 | Tharusha | 🟢 | LIT-207 (loose — same PR is fine) | Unlocks all attribution work (FR8/FR9/FR17). |
-| LIT-226 | Remove torchaudio, standardise on soundfile | infra | — | 🟢 | none | Touches `pertubation_service.py` — do before LIT-165 to avoid rework on the same file. |
+| LIT-226 | Remove torchaudio, standardise on soundfile | infra | Tharusha | ✅ Done | none | **Merged via PR #9.** Touches `pertubation_service.py` — was done before LIT-165 to avoid rework on the same file. |
 | LIT-227 | Layered migration (restructure ECHO code) | infra | — | 🟢 | none | Incremental per SAD §8.2 — infra → registry → explanation code → orchestration → new features, system kept working at each step. Coordinate with LIT-207 (same registry work). |
 | LIT-123 | Multi-task dataset ingestion core | FR2 | Ravindu | 🟢 | none | Parent of 141/142/208/181 below. |
 | LIT-125 | Librosa DSP extraction pipeline (STFT/pYIN/RMS) | FR10 | Ravindu | 🟢 | none | Fully independent — no model or async-fabric dependency. |
