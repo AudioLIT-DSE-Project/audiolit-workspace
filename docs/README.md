@@ -52,7 +52,7 @@ statements. The **decision** column is authoritative.
 
 | # | Topic | Stale text / assumption | Decision (authoritative) |
 |---|-------|-------------------------|--------------------------|
-| E1 | **Repository topology** | SAD §8.3 / Figure 21 describe **two repos** (`audiolit-workspace` + `audiolit-ds-engine`). | **Single monorepo: `audiolit-workspace`.** ECHO 1.0 is cloned and extended in place; frontend and backend live in one tree. The two-repo diagram is superseded. |
+| E1 | **Repository topology** | SAD §8.2 / Figure 11 describe **two repos** (Repository 1 - Frontend & Backend, Repository 2 - Machine Learning). | **Single monorepo: `audiolit-workspace`.** ECHO 1.0 is cloned and extended in place; frontend and backend live in one tree. The two-repo diagram is superseded. (Corrected citation: the real SAD has no §8.3 or Figure 21 - it tops out at §12/Figure 14. This erratum's own citation was never checked against the source and is exactly the kind of fabrication LIT-228 was corrected for; verified against `docs/SAD.md` directly on 2026-07-30.) |
 | E2 | **Async task fabric** | SRS §3.6.1 / §3.9.3 / §3.10 mention **"Celery/RQ"** or a Celery broker. | **RQ + Redis only.** Celery is removed project-wide (lighter setup, simpler single-host operation). Never reintroduce Celery. The SAD already commits to RQ; the SRS text is the stale side. |
 | E3 | **Audio I/O library** | ECHO baseline and some early issues use **torchaudio**. | **soundfile** is the standard for all audio load/save (SAD §3.3, tracked by LIT-226). torchaudio is on a discontinuation path and is removed. Never reintroduce it. |
 
