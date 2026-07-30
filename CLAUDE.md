@@ -113,12 +113,19 @@ everything else. Don't assume the target paths exist; check the actual tree.
    version drift (see PR #7 history).
 6. **Push, open the PR into `develop`**, title/body referencing the LIT-id.
 7. **Wait for `gh pr checks <n>` to report an actual terminal pass/fail for
-   every check** before treating the PR as done — "opened" is not "green."
+   every check** before treating CI as verified — "opened" is not "green."
    If a check fails, diagnose and fix the root cause (don't disable the
    check, don't skip hooks, don't force-merge).
-8. **Update `docs/ISSUE_PLAN.md`'s status column** for the issue (and any
+8. **Stop there. Do not merge the PR yourself.** Every PR needs at least one
+   approving review from a different team member before merging into
+   `develop` — this is mandatory on this project regardless of CI status.
+   Opening the PR already moved the Linear issue to **In Review**
+   automatically (LIT-134's automation) — that's the correct, expected
+   state; don't try to advance it further. Only merge if a human explicitly
+   asks you to merge that specific PR.
+9. **Update `docs/ISSUE_PLAN.md`'s status column** for the issue (and any
    issue it unblocks) so the next session/developer sees accurate state.
-9. If you find a conflict along the way (issue body contradicts SAD/SRS, a
+10. If you find a conflict along the way (issue body contradicts SAD/SRS, a
    mapping in LIT-228 points at the wrong thing, an issue marked Done with
    no evidence in the repo) — **flag it in a Linear comment and to the
    user, don't silently resolve it** by guessing which side is right.

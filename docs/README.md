@@ -108,6 +108,17 @@ audiolit-workspace/
 - **One feature branch per Linear issue** (`feature/lit-xxx-...`), **one PR per
   issue**, referencing the LIT-id. CI (pytest + Jest, ruff/Black,
   ESLint/Prettier) green before merge.
+- **Every PR requires at least one approving review from a different team
+  member before merging** — this is mandatory, not optional, even when CI is
+  green. With 3 people on this project, self-merging is exactly how scope
+  drifts and mistakes go unnoticed. Opening a PR automatically moves the
+  linked Linear issue to **In Review** (LIT-134's GitHub↔Linear automation)
+  — that's expected and not something to "fix"; it reflects the PR waiting
+  on a human reviewer, not on more work.
+- **Claude Code sessions must not self-merge PRs.** Open the PR, verify CI is
+  green (`gh pr checks <n>`, waiting for an actual terminal result — see
+  below), then stop and hand off for review. Only merge if a human
+  explicitly instructs it for that specific PR.
 
 ---
 
