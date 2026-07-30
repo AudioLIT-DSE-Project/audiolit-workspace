@@ -264,6 +264,69 @@ AudioLIT is a follow-on product built directly on the ECHO 1.0 baseline; it is n
 
 ![][image1]
 
+**Figure (SRS §2.1). The AudioLIT platform: inherited ECHO 1.0 components alongside AudioLIT's extension components.** *(This diagram has no caption text of its own in the source document — unlike the SAD's figures, the SRS embeds it without a "Diagram type"/"Description" pair. The description below was written from the rendered figure to make it text-readable.)*
+
+**Description:** The diagram shows a Browser Client (React/TypeScript UI) talking to a React Frontend, which talks to a FastAPI Backend. The backend fans out to two groups. In the **Inherited ECHO 1.0 Components** group, the backend connects directly to Audio Upload & Preprocessing, Dataset Management, the Redis Cache, and ASR (Whisper) / SER (Wav2Vec2) inference (these four are siblings, not a chain); ASR/SER inference in turn feeds Captum Explanations (IG, LIME, SHAP), Attention Visualization, PCA/t-SNE/UMAP projection, and Waveform Perturbation. In the **AudioLIT Extension Components** group, the backend connects to both the Dynamic Hugging Face Model Loader and the Celery/RQ Async Workers (which are wired to each other); the Async Workers drive Audio Deepfake Detection, Acoustic Wave Profiling, True Grad-CAM, Corrected Integrated Gradients, Accent Bias Profiling, Faithfulness Auditing, the SHA-256 Content-Addressed Cache, and the MongoDB Metadata Store. Two external boxes sit outside the platform: the Hugging Face Hub (feeding the Dynamic HF Model Loader) and the Free Cloud GPU Tier — Google Colab / Kaggle / HF Space (connected to the Celery/RQ Async Workers).
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TB
+    User(["User"])
+    Browser["Browser Client (React / TypeScript UI)"]
+    Frontend["React Frontend"]
+    Backend["FastAPI Backend"]
+
+    subgraph Inherited["Inherited ECHO 1.0 Components"]
+        Upload["Audio Upload & Preprocessing"]
+        Dataset["Dataset Management"]
+        RedisCache["Redis Cache"]
+        ASRSER["ASR (Whisper) / SER (Wav2Vec2)"]
+        Captum["Captum Explanations\nIG • LIME • SHAP"]
+        Attention["Attention Visualization"]
+        Proj["PCA / t-SNE / UMAP"]
+        Perturb["Waveform Perturbation"]
+    end
+
+    subgraph Extension["AudioLIT Extension Components"]
+        HFLoader["Dynamic Hugging Face Model Loader"]
+        Workers["Celery / RQ Async Workers"]
+        ADD["Audio Deepfake Detection"]
+        Acoustic["Acoustic Wave Profiling"]
+        GradCAM["True Grad-CAM"]
+        IGFixed["Corrected Integrated Gradients"]
+        BiasProf["Accent Bias Profiling"]
+        Faithful["Faithfulness Auditing"]
+        SHA256["SHA-256 Content-Addressed Cache"]
+        Mongo[("MongoDB Metadata Store")]
+    end
+
+    HFHub["Hugging Face Hub"]
+    CloudGPU["Free Cloud GPU Tier\n(Colab / Kaggle / HF Space)"]
+
+    User --> Browser --> Frontend --> Backend
+    Backend --> Upload
+    Backend --> Dataset
+    Backend --> RedisCache
+    Backend --> ASRSER --> Captum
+    ASRSER --> Attention
+    ASRSER --> Proj
+    ASRSER --> Perturb
+
+    Backend --> HFLoader <--> Workers
+    Workers --> ADD
+    Workers --> Acoustic
+    Workers --> GradCAM
+    Workers --> IGFixed
+    Workers --> BiasProf
+    Workers --> Faithful
+    Workers --> SHA256
+    Workers --> Mongo
+
+    HFHub --> HFLoader
+    CloudGPU <--> Workers
+```
+
 ## **2.2 Product Functions**
 
 At a high level, AudioLIT (baseline plus committed extensions) enables a user to:
@@ -287,6 +350,54 @@ At a high level, AudioLIT (baseline plus committed extensions) enables a user to
 * Retrieve any previously computed result instantly from a deterministic content-addressed cache.
 
 ![][image2]
+
+**Figure (SRS §2.2). The inherited ECHO 1.0 pipeline alongside AudioLIT's extensions.** *(No caption text in the source document — description and Mermaid recreation added below.)*
+
+**Description:** The diagram shows a User performing Audio Upload, then Audio Preprocessing. From there, the **Inherited ECHO 1.0 Pipeline** runs ASR/SER Inference, feeding Integrated Gradients / LIME / SHAP, then Attention Extraction, then Embedding Projection (PCA/t-SNE/UMAP) - alongside the Waveform & Log-Mel Spectrogram view and the Result Cache, which the whole pipeline reads from and writes to. An optional path (dashed in the source) leads into the **AudioLIT Extensions** group: Dynamic Hugging Face Model Ingestion feeds Audio Deepfake Detection, which runs through the Async Task Queue (Celery/RQ); from there, Counterfactual Signal Mutation, Faithfulness Auditing (Deletion Score), and Accent Bias Profiling (Group WER) all connect to the SHA-256 Content-Addressed Cache, alongside True Grad-CAM and the Corrected Integrated Gradients.
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TB
+    User(["User"])
+    Upload["Audio Upload"]
+    Preprocess["Audio Preprocessing"]
+
+    subgraph InheritedPipeline["Inherited ECHO 1.0 Pipeline"]
+        ASRSER["ASR / SER Inference"]
+        IGLimeShap["Integrated Gradients\nLIME / SHAP"]
+        AttnExtract["Attention Extraction"]
+        EmbedProj["Embedding Projection\n(PCA / t-SNE / UMAP)"]
+        WaveSpec["Waveform & Log-Mel Spectrogram"]
+        ResultCache[("Result Cache")]
+    end
+
+    subgraph Extensions["AudioLIT Extensions"]
+        HFIngest["Dynamic Hugging Face Model Ingestion"]
+        ADD["Audio Deepfake Detection"]
+        AsyncQueue["Async Task Queue (Celery / RQ)"]
+        Mutation["Counterfactual Signal Mutation"]
+        Faithfulness["Faithfulness Auditing (Deletion Score)"]
+        BiasProf["Accent Bias Profiling (Group WER)"]
+        SHA256[("SHA-256 Content-Addressed Cache")]
+        GradCAM["True Grad-CAM"]
+        IGFixed["Corrected Integrated Gradients"]
+    end
+
+    User --> Upload --> Preprocess --> ASRSER
+    ASRSER --> IGLimeShap --> AttnExtract --> EmbedProj
+    ASRSER -.-> WaveSpec
+    WaveSpec <--> ResultCache
+    IGLimeShap <--> ResultCache
+    EmbedProj <--> ResultCache
+
+    Preprocess -.->|optional| HFIngest --> ADD --> AsyncQueue
+    AsyncQueue --> Mutation --> SHA256
+    AsyncQueue --> Faithfulness --> SHA256
+    AsyncQueue --> BiasProf --> SHA256
+    AsyncQueue --> GradCAM --> SHA256
+    AsyncQueue --> IGFixed --> SHA256
+```
 
 ## **2.3 User Classes and Characteristics**
 
@@ -851,6 +962,51 @@ The user interface extends ECHO 1.0's multi-pane workspace (constraint C7). Inhe
 
 ![][image3]
 
+**Figure (SRS §3.9.1). The AudioLIT multi-pane workspace layout.** *(No caption text in the source document — verified by decoding the embedded image directly; description and Mermaid recreation added below.)*
+
+**Description:** A top-level Navigation Bar (Upload Audio, Dataset Manager, Hugging Face Model Selector, Hook Registration Status, Layer Selector) sits above the Main Workspace. Inside the Main Workspace: a Control Sidebar (Upload Audio, Dataset Browser, Model Selection for Whisper/Wav2Vec2/Deepfake/HF Models, Task Selection for ASR/SER/ADD, Canvas Mutation Controls) sits above an Analysis Workspace (Waveform Viewer [ECHO], Interactive Log-Mel Spectrogram [ECHO], Annotation & Region Selection Canvas [AudioLIT extension]), which sits above an Analysis & Explainability row (Prediction Results: Transcript/Emotion/Deepfake; Saliency/IG/LIME/SHAP [ECHO]; Grad-CAM [AudioLIT]; Attention Visualization [ECHO]; Acoustic Wave Profiler: STFT/pYIN/RMS [AudioLIT]; Embedding Projection: PCA/t-SNE/UMAP [ECHO]; Accent Bias Dashboard [AudioLIT]; Faithfulness Audit / Deletion Score [AudioLIT]). A Status Bar (Task Queue/Cache Status, GPU/CPU status, Processing Progress) runs along the bottom.
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TB
+    Nav["Navigation Bar\n• Upload Audio • Dataset Manager\n• Hugging Face Model Selector\n• Hook Registration Status • Layer Selector"]
+
+    subgraph Main["Main Workspace"]
+        subgraph Sidebar["Control Sidebar"]
+            UploadAudio["Upload Audio"]
+            DatasetBrowser["Dataset Browser"]
+            ModelSel["Model Selection\n(Whisper / Wav2Vec2 / Deepfake / HF Models)"]
+            TaskSel["Task Selection\n(ASR / SER / ADD)"]
+            CanvasCtrl["Canvas Mutation Controls"]
+        end
+
+        subgraph AnalysisWS["Analysis Workspace"]
+            WaveViewer["Waveform Viewer (ECHO)"]
+            Spectrogram["Interactive Log-Mel Spectrogram (ECHO)"]
+            AnnoCanvas["Annotation & Region Selection Canvas (AudioLIT)"]
+        end
+
+        subgraph Explain["Analysis & Explainability"]
+            Predictions["Prediction Results\nTranscript / Emotion / Deepfake"]
+            Saliency["Saliency: IG / LIME / SHAP (ECHO)"]
+            GradCAM["Grad-CAM (AudioLIT)"]
+            Attention["Attention Visualization (ECHO)"]
+            Acoustic["Acoustic Wave Profiler:\nSTFT / pYIN / RMS (AudioLIT)"]
+            Embedding["Embedding Projection:\nPCA / t-SNE / UMAP (ECHO)"]
+            BiasDash["Accent Bias Dashboard (AudioLIT)"]
+            Faithful["Faithfulness Audit:\nDeletion Score (AudioLIT)"]
+        end
+    end
+
+    StatusBar["Status Bar\n• Task Queue / Cache Status\n• GPU / CPU Status\n• Processing Progress"]
+
+    Nav --> Main
+    Sidebar --> AnalysisWS --> Explain --> StatusBar
+```
+
+**Still missing (not recoverable from this document — flagging rather than fabricating):** the SRS PDF's pages 27-28 additionally show two full-fidelity **rendered UI mockup screenshots** of this layout in use (one on the Saliency/Attention tab showing a Grad-CAM heatmap over a spectrogram with a datapoint editor and audio-dataset table; one on the Acoustic Profile/Faithfulness tab showing an accent-bias disparity bar chart and pYIN/RMS plots, plus an activity-log console). Those two screenshots were never embedded in this `.md` export at all (unlike the box diagram above, which decodes cleanly) — most likely a Google-Docs-export limitation on that particular image type, per this file's own placeholder note below. If pixel-accurate mockups are needed, they exist in the original SRS PDF / design artefacts, not in this repo.
+
 | \[ DIAGRAM PLACEHOLDER \] Actual User Interface \- Still Implementing |
 | :---: |
 
@@ -898,7 +1054,40 @@ AudioLIT introduces a MongoDB 6.0+ metadata tier (new; ECHO 1.0 is Redis-only) t
 
 * Content-addressed tensor entries under a 24-hour TTL; a short-lived deduplication lock to prevent cache stampedes; task-metadata and Pub/Sub channels for progress; and the FIFO task queues used by the broker. allkeys-lru eviction under a configurable memory cap, with persistence disabled since every entry is recomputable.
 
-## **![][image4]**
+## ![][image4]
+
+**Figure (SRS §3.10). Redis 7+ keyspace and MongoDB 6.0+ metadata store, and the privacy boundary between them.** *(No caption text in the source document — verified by decoding the embedded image directly; description and Mermaid recreation added below.)*
+
+**Description:** Uploaded Audio Files are stored only on the temporary filesystem — explicitly **not** persisted in MongoDB or Redis ("NO AUDIO BYTES" is called out twice on the arrows leaving this box). The Redis 7+ Keyspace holds Task Metadata & Pub/Sub Channels, Celery Task Queues (FIFO), Deduplication Locks, and the SHA-256 Tensor Cache (24h TTL) — the cache "stores tensor key only". The MongoDB 6.0+ Metadata Store holds four collections: `audio_samples` (sample_id, filename, duration, sample_rate, file_path_reference, uploaded_at), `models` (model_id, name, architecture, revision, weight_digest, hf_model_id), `analysis_results` (analysis_id, sample_id, model_id, task, prediction, redis_tensor_key, created_at with 24h TTL), and `bias_reports` (report_id, model_id, cohort, WER, disparity_metrics, created_at). Arrows connect `audio_samples` and `models` into `analysis_results` and `bias_reports`, and the uploaded-audio box connects to `audio_samples` via a "file_path_reference only" label — reinforcing that only a reference is stored, never the bytes.
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TB
+    Upload["Uploaded Audio Files\nStored only on temporary filesystem\nNOT persisted in MongoDB or Redis"]
+
+    subgraph RedisKS["Redis 7+ Keyspace"]
+        TaskMeta["Task Metadata & Pub/Sub Channels"]
+        CeleryQ["Celery Task Queues (FIFO)"]
+        DedupLocks["Deduplication Locks"]
+        SHA256["SHA-256 Tensor Cache\n24h TTL"]
+    end
+
+    subgraph MongoStore["MongoDB 6.0+ Metadata Store"]
+        AudioSamples["audio_samples\n• sample_id • filename • duration\n• sample_rate • file_path_reference • uploaded_at"]
+        Models["models\n• model_id • name • architecture\n• revision • weight_digest • hf_model_id"]
+        AnalysisResults["analysis_results\n• analysis_id • sample_id • model_id • task\n• prediction • redis_tensor_key\n• created_at (TTL 24h)"]
+        BiasReports["bias_reports\n• report_id • model_id • cohort • WER\n• disparity_metrics • created_at"]
+    end
+
+    Upload -->|"file_path_reference only\n(NO AUDIO BYTES)"| AudioSamples
+    AudioSamples --> AnalysisResults
+    AudioSamples --> BiasReports
+    Models --> AnalysisResults
+    Models --> BiasReports
+    DedupLocks --> SHA256
+    AnalysisResults -->|stores tensor key only| SHA256
+```
 
 ## **3.11 Licensing, Legal, Copyright, and Other Notices**
 
