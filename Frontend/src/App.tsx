@@ -1,22 +1,27 @@
-import React from 'react';
-import { AudioProvider } from './contexts/AudioContext';
-import { Navbar } from './components/layout/Navbar';
-import { Sidebar } from './components/layout/Sidebar';
-import { MainViewport } from './components/layout/MainViewport';
+import { Toaster } from "@/components/ui/toaster";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Index from "./pages/Index";
+import NotFound from "./pages/NotFound";
 
-const App: React.FC = () => {
-  return (
-      <AudioProvider>
-            <div className="flex flex-col h-screen w-screen overflow-hidden bg-background text-gray-100">
-                    <Navbar />
-                            <div className="flex flex-1 overflow-hidden">
-                                      <Sidebar />
-                                                <MainViewport />
-                                                        </div>
-                                                              </div>
-                                                                  </AudioProvider>
-                                                                    );
-                                                                    };
+const queryClient = new QueryClient();
 
-                                                                    export default App;
-                                                                    
+const App = () => (
+  <QueryClientProvider client={queryClient}>
+    <TooltipProvider>
+      <Toaster />
+      <Sonner />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Index />} />
+          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </BrowserRouter>
+    </TooltipProvider>
+  </QueryClientProvider>
+);
+
+export default App;
