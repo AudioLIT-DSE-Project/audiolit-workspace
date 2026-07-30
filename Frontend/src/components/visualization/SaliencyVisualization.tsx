@@ -282,7 +282,9 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
         try {
           const err = await response.json();
           detail = err?.detail || '';
-        } catch {}
+        } catch {
+          // response body isn't JSON — fall back to the status-based message below
+        }
         throw new Error(detail || `HTTP error! status: ${response.status}`);
       }
 
