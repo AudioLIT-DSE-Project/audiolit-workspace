@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, Body
-from ...core import redis as r
+from ...infrastructure import redis as r
 from ...services.queue_service import add_item, set_progress
 
 router = APIRouter()
