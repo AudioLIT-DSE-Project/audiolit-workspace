@@ -1,4 +1,4 @@
-from ..core import redis as r
+from ..infrastructure import redis as r
 
 async def add_item(sid: str, item: dict):
     s = await r.get_queue(sid)
