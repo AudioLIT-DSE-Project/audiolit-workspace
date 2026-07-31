@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
-from ...core.redis import redis
+from ...infrastructure.redis import redis
 
 router = APIRouter()
 

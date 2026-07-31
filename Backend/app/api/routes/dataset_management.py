@@ -1,26 +1,19 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request, Depends
 from fastapi.responses import JSONResponse, FileResponse
-from typing import List, Optional
+from typing import List
 import logging
 from pathlib import Path
 import json
 
 from app.services.custom_dataset_service import (
-    get_custom_dataset_manager, 
+    get_custom_dataset_manager,
     format_custom_dataset_name,
     cleanup_session_datasets
 )
+from app.api.dependencies import require_session_id as get_session_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def get_session_id(request: Request) -> str:
-    """Extract session ID from request"""
-    session_id = getattr(request.state, 'sid', None)
-    if not session_id:
-        raise HTTPException(status_code=400, detail="No session ID found")
-    return session_id
 
 
 @router.post("/dataset/create")
