@@ -144,6 +144,13 @@ everything else. Don't assume the target paths exist; check the actual tree.
 - `PredictionPanel.tsx`'s second `useEffect` (whisper prediction fetch) is
   missing its unmount-cleanup function — pre-existing ECHO bug, not yet
   filed as its own issue.
+- **LIT-229** — `Backend/app/api/routes/health.py` imports the redis client
+  by direct name (`from ...core.redis import redis`), bypassing the
+  `fake_redis` test fixture. Harmless today (no test run has a real Redis
+  reachable), but adding a real Redis to CI/local test runs before this is
+  fixed will break 7 unrelated tests with `RuntimeError: Event loop is
+  closed`. Don't add a Redis service container to CI until this is
+  resolved.
 
 ---
 
