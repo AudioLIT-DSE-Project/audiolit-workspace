@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from typing import List
 import os
-from app.services.dataset_service import (
+from app.infrastructure.dataset_service import (
     load_metadata,
     resolve_file,
     media_type_for,

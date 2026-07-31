@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from app.services.hook_manager_service import (
+from app.domain.hook_manager_service import (
     UNSUPPORTED_ARCHITECTURE,
     HookManager,
     HookRegistrationError,
