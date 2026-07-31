@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException, Body, Request
-import inspect
 import asyncio
 import logging
 import hashlib
@@ -11,11 +10,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from app.services.model_loader_service import (
-    transcribe_whisper_base,
-    transcribe_whisper_large,
-    wave2vec,
-    extract_whisper_embeddings,
-    extract_wav2vec2_embeddings,
     reduce_dimensions,
     predict_emotion_wave2vec,
     extract_audio_frequency_features,
@@ -23,9 +17,13 @@ from app.services.model_loader_service import (
     predict_emotion_wave2vec_with_attention,
     transcribe_whisper_with_timestamps,
     extract_whisper_attention_pairs,
+    extract_whisper_embeddings,
+    extract_wav2vec2_embeddings,
 )
 from app.services.dataset_service import resolve_file
-from app.core.redis import get_result, cache_result
+from app.services.inference_service import run_inference, extract_single_embedding
+from app.infrastructure.redis import get_result, cache_result
+from app.api.dependencies import get_session_id
 
 router = APIRouter()
 
@@ -39,18 +37,6 @@ DATASET_DIRS = {
     "ravdess": DATA_DIR / "ravdess_subset",
 }
 logger = logging.getLogger(__name__)
-
-
-def get_session_id(request: Request) -> Optional[str]:
-    """Extract session ID from request (optional for backwards compatibility)"""
-    return getattr(request.state, 'sid', None)
-
-
-MODEL_FUNCTIONS = {
-    "whisper-base": transcribe_whisper_base,
-    "whisper-large": transcribe_whisper_large,
-    "wav2vec2": wave2vec,
-}
 
 
 @router.post("/inferences/run")
@@ -123,72 +109,6 @@ async def check_batch_cache(
         "missing_files": missing_files,
         "cache_hit_rate": len(cached_results) / len(files) if files else 0
     }
-
-
-async def run_inference(
-    model: str,
-    file_path: Optional[str] = None,
-    dataset: Optional[str] = None,
-    dataset_file: Optional[str] = None,
-    session_id: Optional[str] = None,
-):
-    """Internal function for running inference - can be called directly or via HTTP endpoint"""
-    logger.info(
-        "inferences.run model=%s file_path=%s dataset=%s dataset_file=%s session_id=%s",
-        model,
-        file_path,
-        dataset,
-        dataset_file,
-        session_id,
-    )
-
-    func = MODEL_FUNCTIONS.get(model)
-    if not func:
-        raise HTTPException(status_code=400, detail=f"Invalid model: {model}")
-
-    resolved_path: Optional[Path] = None
-
-    if file_path:
-        resolved_path = Path(file_path)
-    elif dataset and dataset_file:
-        try:
-            # Resolve using service (enforces allowed datasets and basename-only)
-            resolved_path = resolve_file(dataset, dataset_file, session_id)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except ValueError as e:
-            # Unknown dataset or other
-            raise HTTPException(status_code=404, detail=str(e))
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing audio reference. Provide either 'file_path' or 'dataset' + 'dataset_file'.",
-        )
-
-    if not resolved_path.exists():
-        raise HTTPException(status_code=404, detail=f"Audio file not found: {resolved_path}")
-
-    # Create cache key based on model and file path
-    file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-    cache_key = f"{model}_{file_content_hash}"
-    
-    # Check if result is cached
-    cached_result = await get_result(model, cache_key)
-    if cached_result is not None:
-        logger.info(f"Returning cached result for {resolved_path}")
-        return cached_result.get("prediction", cached_result)
-
-    # Detect if function is async or sync and call appropriately
-    if inspect.iscoroutinefunction(func):
-        prediction = await func(str(resolved_path))
-    else:
-        prediction = await asyncio.to_thread(func, str(resolved_path))
-
-    # Cache the result for future use (6 hours TTL)
-    await cache_result(model, cache_key, {"prediction": prediction}, ttl=6*60*60)
-    logger.info(f"Cached prediction for {resolved_path}")
-
-    return prediction
 
 
 @router.post("/inferences/whisper-batch")
@@ -941,68 +861,18 @@ async def extract_single_embedding_endpoint(
 ):
     """Extract embeddings from a single audio file"""
     model = request.get("model")
-    file_path = request.get("file_path")
-    dataset = request.get("dataset")
-    dataset_file = request.get("dataset_file")
-    
     if not model:
         raise HTTPException(status_code=400, detail="Model is required")
-    
+
     session_id = get_session_id(http_request)
-    
-    # Resolve file path
-    resolved_path = None
-    if file_path:
-        resolved_path = Path(file_path)
-    elif dataset and dataset_file:
-        try:
-            resolved_path = resolve_file(dataset, dataset_file, session_id)
-        except (FileNotFoundError, ValueError) as e:
-            raise HTTPException(status_code=404, detail=str(e))
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing audio reference. Provide either 'file_path' or 'dataset' + 'dataset_file'."
-        )
-    
-    if not resolved_path.exists():
-        raise HTTPException(status_code=404, detail=f"Audio file not found: {resolved_path}")
-    
-    # Create cache key for embeddings
-    file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-    cache_key = f"{model}_embeddings_{file_content_hash}"
-    
-    # Check if embeddings are cached
-    cached_embeddings = await get_result(model, cache_key)
-    
-    if cached_embeddings is not None:
-        embedding = cached_embeddings.get("embedding")
-        logger.info(f"Using cached embeddings for {resolved_path}")
-    else:
-        # Extract embeddings based on model type
-        if model.startswith("whisper"):
-            model_size = "base" if "base" in model else "large"
-            embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model_size)
-        elif model == "wav2vec2":
-            embedding = await asyncio.to_thread(extract_wav2vec2_embeddings, str(resolved_path))
-        else:
-            raise HTTPException(status_code=400, detail=f"Embedding extraction not supported for model: {model}")
-        
-        # Cache the embeddings (24 hours TTL)
-        await cache_result(model, cache_key, {"embedding": embedding.tolist()}, ttl=24*60*60)
-        logger.info(f"Cached embeddings for {resolved_path}")
-    
-    # Convert back to numpy array if it was cached as list
-    if isinstance(embedding, list):
-        embedding = np.array(embedding)
-    
-    return {
-        "model": model,
-        "file_path": str(resolved_path),
-        "embedding": embedding.tolist(),
-        "embedding_dim": len(embedding)
-    }
-    
+    return await extract_single_embedding(
+        model,
+        file_path=request.get("file_path"),
+        dataset=request.get("dataset"),
+        dataset_file=request.get("dataset_file"),
+        session_id=session_id,
+    )
+
 @router.post("/inferences/audio-frequency-batch")
 async def batch_audio_frequency_analysis(request: Request):
     """

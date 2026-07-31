@@ -6,7 +6,8 @@ from pathlib import Path
 from pydantic import BaseModel
 from app.services.saliency_service import generate_saliency
 from app.services.dataset_service import resolve_file
-from app.core.redis import get_result, cache_result
+from app.infrastructure.redis import get_result, cache_result
+from app.api.dependencies import get_session_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -29,10 +30,6 @@ class SaliencyResponse(BaseModel):
     total_duration: float
     emotion: Optional[str] = None
     series: Optional[list] = None
-
-def get_session_id(request: Request) -> Optional[str]:
-    """Extract session ID from request (optional for backwards compatibility)"""
-    return getattr(request.state, 'sid', None)
 
 @router.post("/saliency/generate", response_model=SaliencyResponse)
 async def generate_saliency_endpoint(http_request: Request, request: SaliencyRequest):
