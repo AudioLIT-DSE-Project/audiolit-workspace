@@ -3,15 +3,12 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import logging
-from app.services.pertubation_service import perturb_and_save
+from app.services.perturbation_service import perturb_and_save
+from app.api.dependencies import get_session_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-
-def get_session_id(request: Request) -> Optional[str]:
-    """Extract session ID from request (optional for backwards compatibility)"""
-    return getattr(request.state, 'sid', None)
 
 class Perturbation(BaseModel):
     type: str
