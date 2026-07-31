@@ -7,7 +7,7 @@ import uuid
 import librosa
 import soundfile as sf
 import requests
-from app.services.inference_service import run_inference, extract_single_embedding
+from app.orchestration.inference_service import run_inference, extract_single_embedding
 router = APIRouter()
 
 # Ensure uploads directory exists
