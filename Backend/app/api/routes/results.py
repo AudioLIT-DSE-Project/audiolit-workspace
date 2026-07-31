@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Body
-from ...core.redis import get_result, cache_result
+from ...infrastructure.redis import get_result, cache_result
 
 router = APIRouter()
 

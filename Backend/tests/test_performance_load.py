@@ -69,7 +69,7 @@ class TestPerformanceProfiling:
     @pytest.mark.asyncio
     async def test_cache_retrieval_performance(self, fake_redis):
         """Test cache retrieval performance under normal conditions."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         # Pre-populate cache
@@ -144,7 +144,7 @@ class TestLoadTesting:
     @pytest.mark.asyncio
     async def test_cache_performance_under_load(self, fake_redis):
         """Test cache performance under concurrent access."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         async def cache_operation(worker_id):
@@ -203,7 +203,7 @@ class TestResourceConstraints:
     @pytest.mark.asyncio
     async def test_cache_eviction_under_pressure(self, fake_redis):
         """Test cache behavior when approaching memory limits."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         # Fill cache with test data

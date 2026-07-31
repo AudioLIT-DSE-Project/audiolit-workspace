@@ -13,7 +13,7 @@ from fakeredis.aioredis import FakeRedis
 
 # Make app importable
 from app.main import app
-from app.core import redis as redis_module
+from app.infrastructure import redis as redis_module
 
 @pytest.fixture(autouse=True, scope="function")
 async def fake_redis(monkeypatch):

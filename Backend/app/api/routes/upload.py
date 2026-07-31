@@ -7,7 +7,7 @@ import uuid
 import librosa
 import soundfile as sf
 import requests
-from .inferences import run_inference
+from app.services.inference_service import run_inference, extract_single_embedding
 router = APIRouter()
 
 # Ensure uploads directory exists
@@ -66,12 +66,7 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
         
         # Generate embeddings for the uploaded file
         try:
-            from app.api.routes.inferences import extract_single_embedding_endpoint
-            embedding_request = {
-                "model": model,
-                "file_path": str(file_path)
-            }
-            embedding_result = await extract_single_embedding_endpoint(embedding_request)
+            embedding_result = await extract_single_embedding(model, file_path=str(file_path))
             print(f"Generated embeddings for {file.filename}")
         except Exception as e:
             print(f"Embedding generation failed for {file.filename}:", e)
