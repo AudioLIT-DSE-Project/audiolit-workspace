@@ -15,10 +15,8 @@ from app.services.model_loader_service import (
     predict_emotion_wave2vec,
     get_whisper_base_models,
     get_whisper_large_models,
-    feature_extractor,
-    emo_model,
-    emo_device
 )
+import app.services.model_loader_service as model_loader_service
 
 logger = logging.getLogger(__name__)
 MAX_SALIENCY_SECONDS = int(os.getenv("MAX_SALIENCY_SECONDS", "12"))  # cap analysis window
@@ -311,27 +309,28 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
 ################################################################################################################
 
 def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
+    model_loader_service.ensure_emo_model_loaded()
     audio, rate = librosa.load(audio_file_path, sr=16000)
     # Crop to safe max duration to bound memory
     max_seconds = MAX_SALIENCY_SECONDS_SHAP if method == "shap" else MAX_SALIENCY_SECONDS
     max_len = int(max_seconds * rate)
     if len(audio) > max_len:
         audio = audio[:max_len]
-    inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    inputs = model_loader_service.feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
     
-    input_values = inputs.input_values.to(emo_device)
-    attention_mask = inputs.attention_mask.to(emo_device) if "attention_mask" in inputs else None
+    input_values = inputs.input_values.to(model_loader_service.emo_device)
+    attention_mask = inputs.attention_mask.to(model_loader_service.emo_device) if "attention_mask" in inputs else None
     
     input_values.requires_grad_(True)
     
     # Determine class to attribute (predicted emotion)
     with torch.no_grad():
-        tmp_out = emo_model(input_values=input_values, attention_mask=attention_mask)
+        tmp_out = model_loader_service.emo_model(input_values=input_values, attention_mask=attention_mask)
         tmp_probs = torch.nn.functional.softmax(tmp_out.logits, dim=-1)
         target_idx = int(torch.argmax(tmp_probs, dim=-1).item())
 
     def model_forward(inputs, mask=None, cls_idx: int = 0):
-        outputs = emo_model(input_values=inputs, attention_mask=mask)
+        outputs = model_loader_service.emo_model(input_values=inputs, attention_mask=mask)
         return outputs.logits[:, cls_idx]
     
     if method == "gradcam":
@@ -351,8 +350,8 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
                         torch.cuda.empty_cache()
                     cpu_device = torch.device("cpu")
                     # Move model and inputs to CPU
-                    if hasattr(emo_model, 'to'):
-                        emo_model.to(cpu_device)
+                    if hasattr(model_loader_service.emo_model, 'to'):
+                        model_loader_service.emo_model.to(cpu_device)
                     input_values_cpu = input_values.detach().to(cpu_device)
                     input_values_cpu.requires_grad_(True)
                     attention_mask_cpu = attention_mask.detach().to(cpu_device) if attention_mask is not None else None
@@ -420,7 +419,7 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
     if saliency_scores.size == 0 or (np.max(saliency_scores) - np.min(saliency_scores) if saliency_scores.size > 0 else 0.0) < 1e-6:
         logger.info("Using Wav2Vec2 energy-map fallback for saliency")
         with torch.no_grad():
-            hs = emo_model.wav2vec2(input_values=input_values, attention_mask=attention_mask).last_hidden_state  # [B,T,H]
+            hs = model_loader_service.emo_model.wav2vec2(input_values=input_values, attention_mask=attention_mask).last_hidden_state  # [B,T,H]
             energy = hs.abs().mean(dim=2).squeeze(0).detach().cpu().numpy()
         if energy.size > 0:
             e_min, e_ptp = float(np.min(energy)), float(np.ptp(energy))
@@ -443,13 +442,13 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
         series = (series - smin) / (smax - smin + 1e-9)
     
     with torch.no_grad():
-        model_device = next(emo_model.parameters()).device
+        model_device = next(model_loader_service.emo_model.parameters()).device
         iv = input_values.to(model_device)
         am = attention_mask.to(model_device) if attention_mask is not None else None
-        outputs = emo_model(input_values=iv, attention_mask=am)
+        outputs = model_loader_service.emo_model(input_values=iv, attention_mask=am)
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
         predicted_emotion = torch.argmax(probs, dim=-1).item()
-        id2label = emo_model.config.id2label
+        id2label = model_loader_service.emo_model.config.id2label
         emotion = id2label.get(predicted_emotion, str(predicted_emotion))
     
     segment_duration = len(audio) / 16000
