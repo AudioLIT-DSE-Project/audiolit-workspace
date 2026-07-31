@@ -1,6 +1,6 @@
 """
 Tests for the LIT-225 RQ fan-out/fan-in prototype
-(app.services.fanout_orchestrator_service).
+(app.orchestration.fanout_orchestrator_service).
 
 Success/failure/progress cases run against fakeredis - fast, no external
 service. The killed-worker recovery case needs a *real* Redis instance,
@@ -26,7 +26,7 @@ from redis.exceptions import RedisError
 from rq import Queue, SimpleWorker, Worker
 from rq.job import Job, JobStatus
 
-from app.services import fanout_orchestrator_service as fanout
+from app.orchestration import fanout_orchestrator_service as fanout
 
 REAL_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/0")
 
