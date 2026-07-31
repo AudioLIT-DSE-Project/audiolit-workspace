@@ -11,16 +11,9 @@ from app.services.dataset_service import (
     resolve_file,
     media_type_for,
 )
+from app.api.dependencies import get_session_id
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def get_session_id(request: Request) -> str:
-    """Extract session ID from request (optional for backwards compatibility)"""
-    session_id = getattr(request.state, 'sid', None)
-    logger.info(f"get_session_id: extracted session_id='{session_id}' from request.state")
-    logger.info(f"get_session_id: request.cookies = {dict(request.cookies)}")
-    return session_id
 
 
 @router.get("/{dataset}/metadata")
