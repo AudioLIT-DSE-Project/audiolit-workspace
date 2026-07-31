@@ -28,7 +28,7 @@ class TestPerformanceProfiling:
     
     def test_model_inference_performance_whisper(self):
         """Test Whisper model inference performance within acceptable limits."""
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             # Simulate actual inference time based on your results
             def slow_transcribe(*args, **kwargs):
                 time.sleep(12.0)  # Simulate your actual 12.79s performance
@@ -37,7 +37,7 @@ class TestPerformanceProfiling:
             mock_transcriber.side_effect = slow_transcribe
             
             start_time = time.time()
-            from app.services import model_loader_service
+            from app.domain import model_loader_service
             result = model_loader_service.transcribe_whisper("whisper-base", "test_audio.wav")
             end_time = time.time()
             
@@ -48,7 +48,7 @@ class TestPerformanceProfiling:
     
     def test_wav2vec2_inference_performance(self):
         """Test Wav2Vec2 model inference performance within acceptable limits."""
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             # Simulate actual inference time based on your results
             def slow_emotion_inference(*args, **kwargs):
                 time.sleep(28.0)  # Simulate your actual 28.14s performance
@@ -57,7 +57,7 @@ class TestPerformanceProfiling:
             mock_transcriber.side_effect = slow_emotion_inference
             
             start_time = time.time()
-            from app.services import model_loader_service
+            from app.domain import model_loader_service
             result = model_loader_service.transcribe_whisper("wav2vec2-emotion", "test_audio.wav")
             end_time = time.time()
             
@@ -91,14 +91,14 @@ class TestPerformanceProfiling:
         initial_memory = process.memory_info().rss / 1024 / 1024  # MB
         
         # Simulate memory-intensive operation
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_transcriber.return_value = {"text": "memory test"}
             
             # Monitor memory during operations
             peak_memory = initial_memory
             
             for i in range(10):
-                from app.services import model_loader_service
+                from app.domain import model_loader_service
                 result = model_loader_service.transcribe_whisper("test-model", "test_audio.wav")
                 current_memory = process.memory_info().rss / 1024 / 1024
                 peak_memory = max(peak_memory, current_memory)
@@ -223,11 +223,11 @@ class TestResourceConstraints:
         initial_memory = process.memory_info().rss / 1024 / 1024
         
         # Perform memory-intensive operations
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_transcriber.return_value = {"text": "cleanup test"}
             
             for i in range(5):
-                from app.services import model_loader_service
+                from app.domain import model_loader_service
                 result = model_loader_service.transcribe_whisper("test-model", "test_audio.wav")
         
         # Allow time for cleanup
@@ -260,14 +260,14 @@ class TestResourceConstraints:
         """Test CPU usage remains reasonable during operations."""
         process = psutil.Process()
         
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_transcriber.return_value = {"text": "cpu test"}
             
             cpu_percentages = []
             
             for i in range(5):
                 start_time = time.time()
-                from app.services import model_loader_service
+                from app.domain import model_loader_service
                 result = model_loader_service.transcribe_whisper("test-model", "test_audio.wav")
                 
                 # Monitor CPU for a brief period

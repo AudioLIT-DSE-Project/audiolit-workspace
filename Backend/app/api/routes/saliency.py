@@ -4,8 +4,8 @@ import logging
 from typing import Optional, Dict, Any
 from pathlib import Path
 from pydantic import BaseModel
-from app.services.saliency_service import generate_saliency
-from app.services.dataset_service import resolve_file
+from app.domain.saliency_service import generate_saliency
+from app.infrastructure.dataset_service import resolve_file
 from app.infrastructure.redis import get_result, cache_result
 from app.api.dependencies import get_session_id
 

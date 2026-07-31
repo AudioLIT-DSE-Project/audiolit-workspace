@@ -6,7 +6,7 @@ import librosa
 from typing import Dict, List, Tuple, Optional, Union
 from pathlib import Path
 from captum.attr import IntegratedGradients, GradientShap, Lime
-from app.services.model_loader_service import (
+from app.domain.model_loader_service import (
     transcribe_whisper_base,
     transcribe_whisper_large,
     transcribe_whisper_with_timestamps,
@@ -14,7 +14,7 @@ from app.services.model_loader_service import (
     get_whisper_base_models,
     get_whisper_large_models,
 )
-import app.services.model_loader_service as model_loader_service
+import app.domain.model_loader_service as model_loader_service
 
 logger = logging.getLogger(__name__)
 MAX_SALIENCY_SECONDS = int(os.getenv("MAX_SALIENCY_SECONDS", "12"))  # cap analysis window

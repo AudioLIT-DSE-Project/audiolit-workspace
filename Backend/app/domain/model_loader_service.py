@@ -18,7 +18,7 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import umap
 
-from app.services.model_registry_service import registry as _model_registry
+from app.domain.model_registry_service import registry as _model_registry
 
 logger = logging.getLogger(__name__)
 
