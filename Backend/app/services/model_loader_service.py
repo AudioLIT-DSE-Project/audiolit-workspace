@@ -18,6 +18,8 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import umap
 
+from app.services.model_registry_service import registry as _model_registry
+
 logger = logging.getLogger(__name__)
 
 
@@ -384,12 +386,35 @@ def predict_emotion_wave2vec_with_attention(audio_path):
 
 
 _EMO_MODEL_ID = "r-f/wav2vec-english-speech-emotion-recognition"
-feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(_EMO_MODEL_ID)
-emo_model = Wav2Vec2ForSequenceClassification.from_pretrained(_EMO_MODEL_ID)
 emo_device = "cuda:0" if torch.cuda.is_available() else "cpu"
-emo_model = emo_model.to(emo_device)
+feature_extractor = None
+emo_model = None
+
+
+def ensure_emo_model_loaded():
+    """Lazily load the emotion model + feature extractor via the ModelRegistry (LIT-207).
+
+    Replaces the old eager `feature_extractor = ...` / `emo_model = ...`
+    import-time singletons. Call this at the top of every entry point that
+    touches `emo_model`/`feature_extractor` (predict_emotion_wave2vec,
+    extract_wav2vec2_embeddings) so nothing loads until actually used.
+
+    Other modules must go through this function (or the module, e.g.
+    `model_loader_service.emo_model`) rather than `from ... import emo_model`
+    -- a bare name import binds a snapshot at the importer's own import time
+    and would permanently see the pre-load None value once these globals are
+    reassigned here.
+    """
+    global feature_extractor, emo_model
+    if emo_model is None:
+        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(_EMO_MODEL_ID)
+        loaded = _model_registry.get(_EMO_MODEL_ID, model_class=Wav2Vec2ForSequenceClassification)
+        emo_model = loaded.model
+    return feature_extractor, emo_model, emo_device
+
 
 def predict_emotion_wave2vec(audio_path, return_attention=False):
+    ensure_emo_model_loaded()
     audio, rate = librosa.load(audio_path, sr=16000)
     inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
 
@@ -795,18 +820,21 @@ def wave2vec(audio_file_path: str, return_probabilities: bool = False):
 
 # Whisper embeddings - Load models for embedding extraction
 _whisper_processor_base = None
-_whisper_model_base = None
 _whisper_processor_large = None
 _whisper_model_large = None
 
 def get_whisper_base_models():
-    global _whisper_processor_base, _whisper_model_base
+    """Whisper-base (processor + model), model loaded lazily via the ModelRegistry (LIT-207).
+
+    whisper-large is not yet routed through the registry -- its float16/meta-tensor
+    CUDA fallback (below) needs verifying on a GPU box before that migration, which
+    this CPU-only dev sandbox can't do safely.
+    """
+    global _whisper_processor_base
     if _whisper_processor_base is None:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
         _whisper_processor_base = WhisperProcessor.from_pretrained("openai/whisper-base")
-        _whisper_model_base = WhisperModel.from_pretrained("openai/whisper-base")
-        _whisper_model_base = _whisper_model_base.to(device)
-    return _whisper_processor_base, _whisper_model_base
+    loaded = _model_registry.get("openai/whisper-base")
+    return _whisper_processor_base, loaded.model
 
 def get_whisper_large_models():
     global _whisper_processor_large, _whisper_model_large
@@ -882,9 +910,10 @@ def extract_wav2vec2_embeddings(audio_file_path: str) -> np.ndarray:
     Returns:
         numpy array of embeddings
     """
+    ensure_emo_model_loaded()
     # Load audio
     audio, rate = librosa.load(audio_file_path, sr=16000)
-    
+
     # Use the same feature extractor as emotion model
     inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
     
