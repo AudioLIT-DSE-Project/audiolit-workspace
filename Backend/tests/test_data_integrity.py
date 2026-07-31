@@ -21,7 +21,7 @@ class TestRedisCacheIntegrity:
         """Test basic Redis SET, GET, DEL operations with various data types."""
         # The fake_redis fixture from conftest.py doesn't return the client directly
         # We need to access the redis module that was patched
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         # Test string data
@@ -43,7 +43,7 @@ class TestRedisCacheIntegrity:
     @pytest.mark.asyncio
     async def test_cache_expiration_handling(self, fake_redis):
         """Test cache TTL and expiration behavior."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         # Set with expiration
@@ -60,7 +60,7 @@ class TestRedisCacheIntegrity:
     @pytest.mark.asyncio
     async def test_cache_key_collision_handling(self, fake_redis):
         """Test cache behavior with similar keys and hash collisions."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         # Test similar keys don't interfere
@@ -77,7 +77,7 @@ class TestRedisCacheIntegrity:
     @pytest.mark.asyncio
     async def test_concurrent_cache_access(self, fake_redis):
         """Test concurrent cache operations for race conditions."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         async def cache_worker(worker_id: int):
@@ -138,7 +138,7 @@ class TestSessionIntegrity:
     @pytest.mark.asyncio
     async def test_session_storage_and_retrieval(self, fake_redis, test_session_data):
         """Test session data storage and retrieval integrity."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         session_id = test_session_data['session_id']
@@ -155,7 +155,7 @@ class TestSessionIntegrity:
     @pytest.mark.asyncio
     async def test_session_isolation(self, fake_redis):
         """Test that different sessions don't interfere with each other."""
-        from app.core import redis as redis_module
+        from app.infrastructure import redis as redis_module
         redis_client = redis_module.redis
         
         # Create multiple sessions
