@@ -6,8 +6,6 @@ import librosa
 from typing import Dict, List, Tuple, Optional, Union
 from pathlib import Path
 from captum.attr import IntegratedGradients, GradientShap, Lime
-from captum.attr._utils.lrp_rules import EpsilonRule
-from captum.attr._core.lrp import LRP
 from app.services.model_loader_service import (
     transcribe_whisper_base,
     transcribe_whisper_large,
