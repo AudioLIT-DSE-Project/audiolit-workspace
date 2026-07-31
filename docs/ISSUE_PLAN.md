@@ -33,7 +33,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-225 | Prototype RQ fan-out/fan-in | infra | — | 🟢 | none | **Do this first** — SAD §6.1 flags this as the highest-risk part of the whole design. Stub jobs only, no real models needed. |
+| LIT-225 | Prototype RQ fan-out/fan-in | infra | Tharusha | 🟡 In Progress | none | **PR #10 open, CI green, awaiting review.** Pattern documented in `docs/rq_fanout_pattern.md`. Found a pre-existing, out-of-scope bug while testing (health.py bypasses the fake_redis fixture) - flagged, not fixed here. |
 | LIT-207 | Dynamic HF model ingestion (Model Registry) | FR1 | Rahim | 🟢 | none | Also satisfies LIT-227's "model-loading reorganised" migration step — same work, don't duplicate. |
 | LIT-210 | Model ID resolver / safetensors / cache | FR1 | Rahim | 🟢 | none | Sub-task of LIT-207; can run in parallel with it. |
 | LIT-211 | Forward/attention hook registration | FR1 | Tharusha | 🟢 | LIT-207 (loose — same PR is fine) | Unlocks all attribution work (FR8/FR9/FR17). |
