@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import json
 
-from app.services.custom_dataset_service import (
+from app.infrastructure.custom_dataset_service import (
     get_custom_dataset_manager,
     format_custom_dataset_name,
     cleanup_session_datasets
