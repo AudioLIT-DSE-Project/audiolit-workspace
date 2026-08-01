@@ -22,7 +22,7 @@ class TestMLModelIntegration:
     async def test_whisper_transcription_endpoint(self, client):
         """Test Whisper ASR model integration via API endpoint."""
         # Mock the transcribe_whisper function
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_transcriber.return_value = {"text": "test transcription"}
             
             # Create a mock audio file
@@ -37,7 +37,7 @@ class TestMLModelIntegration:
     @pytest.mark.asyncio
     async def test_wav2vec2_emotion_prediction(self, client):
         """Test Wav2Vec2 emotion recognition model integration."""
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_transcriber.return_value = {"text": "emotion test"}
             
             audio_content = b"fake audio data"
@@ -51,12 +51,12 @@ class TestMLModelIntegration:
     def test_model_loading_and_initialization(self):
         """Test that ML models can be loaded without errors."""
         # Mock model loading to avoid actual GPU/model requirements
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             
             mock_transcriber.return_value = {"text": "initialization test"}
             
             # Test model functionality
-            from app.services import model_loader_service
+            from app.domain import model_loader_service
             
             # Should not raise exceptions
             result = model_loader_service.transcribe_whisper("test_model", "test_audio.wav")
@@ -67,7 +67,7 @@ class TestMLModelIntegration:
     @pytest.mark.asyncio
     async def test_model_inference_error_handling(self, client):
         """Test error handling when model inference fails."""
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             # Simulate model error
             mock_transcriber.side_effect = Exception("Model loading failed")
             
@@ -81,12 +81,12 @@ class TestMLModelIntegration:
     
     def test_model_memory_management(self):
         """Test model memory usage and cleanup."""
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_result = {"text": "memory test"}
             mock_transcriber.return_value = mock_result
             
             # Test model functionality
-            from app.services import model_loader_service
+            from app.domain import model_loader_service
             result = model_loader_service.transcribe_whisper("test_model", "test_audio.wav")
             
             # Should successfully process audio
@@ -257,7 +257,7 @@ class TestDataFlowIntegration:
     @pytest.mark.asyncio
     async def test_complete_transcription_workflow(self, client, fake_redis):
         """Test complete workflow: upload -> process -> cache -> retrieve."""
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             
             mock_transcriber.return_value = {"text": "complete workflow test"}
             
@@ -274,7 +274,7 @@ class TestDataFlowIntegration:
     @pytest.mark.asyncio
     async def test_emotion_recognition_workflow(self, client):
         """Test complete emotion recognition workflow."""
-        with patch('app.services.model_loader_service.transcribe_whisper') as mock_transcriber:
+        with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             
             mock_transcriber.return_value = {"text": "emotion test", "emotion": "surprised"}
             

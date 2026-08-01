@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+import torch.nn as nn
 from huggingface_hub.utils import HfHubHTTPError
 
-from app.services.model_registry_service import (
+from app.domain.model_registry_service import (
     HUB_UNAVAILABLE,
     UNSAFE_ARTIFACT,
     UNSUPPORTED_ARCHITECTURE,
@@ -20,6 +22,7 @@ from app.services.model_registry_service import (
     ModelRegistryError,
     ResolvedModel,
     _CircuitBreaker,
+    download_and_load,
     resolve_model_id,
 )
 
@@ -84,7 +87,7 @@ class TestResolveModelId:
 
     def test_rejects_non_safetensors_before_config_lookup(self):
         api = self._mock_api([_sibling("pytorch_model.bin")])
-        with patch("app.services.model_registry_service.hf_hub_download") as mock_download:
+        with patch("app.domain.model_registry_service.hf_hub_download") as mock_download:
             with pytest.raises(ModelRegistryError) as exc_info:
                 resolve_model_id("some/model", api=api)
         assert exc_info.value.code == UNSAFE_ARTIFACT
@@ -94,7 +97,7 @@ class TestResolveModelId:
         api = self._mock_api([_sibling("model.safetensors")])
         config_path = tmp_path / "config.json"
         config_path.write_text('{"model_type": "bert"}')
-        with patch("app.services.model_registry_service.hf_hub_download", return_value=str(config_path)):
+        with patch("app.domain.model_registry_service.hf_hub_download", return_value=str(config_path)):
             with pytest.raises(ModelRegistryError) as exc_info:
                 resolve_model_id("some/bert-model", api=api)
         assert exc_info.value.code == UNSUPPORTED_ARCHITECTURE
@@ -103,7 +106,7 @@ class TestResolveModelId:
         api = self._mock_api([_sibling("model.safetensors")], sha="deadbeef")
         config_path = tmp_path / "config.json"
         config_path.write_text('{"model_type": "whisper"}')
-        with patch("app.services.model_registry_service.hf_hub_download", return_value=str(config_path)):
+        with patch("app.domain.model_registry_service.hf_hub_download", return_value=str(config_path)):
             resolved = resolve_model_id("openai/whisper-base", revision="main", api=api)
         assert resolved == ResolvedModel(model_id="openai/whisper-base", revision="deadbeef", family="whisper")
 
@@ -111,7 +114,7 @@ class TestResolveModelId:
         api = self._mock_api([_sibling("model.safetensors")], sha="cafef00d")
         config_path = tmp_path / "config.json"
         config_path.write_text('{"model_type": "wav2vec2"}')
-        with patch("app.services.model_registry_service.hf_hub_download", return_value=str(config_path)):
+        with patch("app.domain.model_registry_service.hf_hub_download", return_value=str(config_path)):
             resolved = resolve_model_id("facebook/wav2vec2-base-960h", api=api)
         assert resolved.family == "wav2vec2"
 
@@ -144,8 +147,8 @@ class TestModelRegistryLRU:
         loaded = self._fake_loaded("openai/whisper-base", revision="deadbeef")
         reg._cache["openai/whisper-base@deadbeef"] = loaded
 
-        with patch("app.services.model_registry_service.resolve_model_id") as mock_resolve, \
-             patch("app.services.model_registry_service.download_and_load") as mock_download:
+        with patch("app.domain.model_registry_service.resolve_model_id") as mock_resolve, \
+             patch("app.domain.model_registry_service.download_and_load") as mock_download:
             mock_resolve.return_value = ResolvedModel(
                 model_id="openai/whisper-base", revision="deadbeef", family="whisper"
             )
@@ -157,8 +160,8 @@ class TestModelRegistryLRU:
 
     def test_evicts_oldest_beyond_max_cache_size(self):
         reg = ModelRegistry(max_cache_size=2)
-        with patch("app.services.model_registry_service.resolve_model_id") as mock_resolve, \
-             patch("app.services.model_registry_service.download_and_load") as mock_download:
+        with patch("app.domain.model_registry_service.resolve_model_id") as mock_resolve, \
+             patch("app.domain.model_registry_service.download_and_load") as mock_download:
             for name in ["model-a", "model-b", "model-c"]:
                 mock_resolve.return_value = ResolvedModel(model_id=name, revision="main", family="whisper")
                 mock_download.return_value = self._fake_loaded(name, revision="main")
@@ -172,8 +175,8 @@ class TestModelRegistryLRU:
     def test_eviction_releases_the_model_reference(self):
         reg = ModelRegistry(max_cache_size=1)
         evicted_model = MagicMock()
-        with patch("app.services.model_registry_service.resolve_model_id") as mock_resolve, \
-             patch("app.services.model_registry_service.download_and_load") as mock_download:
+        with patch("app.domain.model_registry_service.resolve_model_id") as mock_resolve, \
+             patch("app.domain.model_registry_service.download_and_load") as mock_download:
             mock_resolve.return_value = ResolvedModel(model_id="model-a", revision="main", family="whisper")
             mock_download.return_value = LoadedModel(
                 model_id="model-a", revision="main", family="whisper",
@@ -190,8 +193,8 @@ class TestModelRegistryLRU:
 
     def test_recently_used_entry_is_not_the_eviction_target(self):
         reg = ModelRegistry(max_cache_size=2)
-        with patch("app.services.model_registry_service.resolve_model_id") as mock_resolve, \
-             patch("app.services.model_registry_service.download_and_load") as mock_download:
+        with patch("app.domain.model_registry_service.resolve_model_id") as mock_resolve, \
+             patch("app.domain.model_registry_service.download_and_load") as mock_download:
             for name in ["model-a", "model-b"]:
                 mock_resolve.return_value = ResolvedModel(model_id=name, revision="main", family="whisper")
                 mock_download.return_value = self._fake_loaded(name, revision="main")
@@ -210,3 +213,79 @@ class TestModelRegistryLRU:
         assert "model-a@main" in reg._cache
         assert "model-b@main" not in reg._cache
         assert "model-c@main" in reg._cache
+
+
+class _FakeAttention(nn.Module):
+    def forward(self, x):
+        return x, torch.softmax(x, dim=-1)
+
+
+class _FakeWhisperEncoderLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = _FakeAttention()
+
+    def forward(self, x):
+        out, _ = self.self_attn(x)
+        return out
+
+
+class _FakeWhisperModel(nn.Module):
+    """Shaped like a real WhisperModel closely enough for HookManager to
+    resolve encoder/attention layers, without downloading real weights."""
+
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Module()
+        self.encoder.layers = nn.ModuleList([_FakeWhisperEncoderLayer()])
+        self.config = SimpleNamespace(output_attentions=False)
+
+    def forward(self, x):
+        for layer in self.encoder.layers:
+            x = layer(x)
+        return x
+
+    @classmethod
+    def from_pretrained(cls, path, attn_implementation="eager"):
+        return cls()
+
+
+class _FakeUnresolvableModel(nn.Module):
+    """No encoder/layers HookManager can find -- simulates an architecture
+    whose config.json claims a supported model_type but whose module tree
+    doesn't actually match (download_and_load must degrade, not crash)."""
+
+    @classmethod
+    def from_pretrained(cls, path, attn_implementation="eager"):
+        return cls()
+
+
+class TestDownloadAndLoadHookWiring:
+    """LIT-207's DoD requires a loaded model to expose selectable layers via
+    hooks -- these exercise that wiring (ModelRegistry -> HookManager)."""
+
+    def test_populates_available_layers_for_a_resolvable_architecture(self, tmp_path):
+        resolved = ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        assert loaded.available_layers == ["encoder.layers.0", "encoder.layers.0.self_attn"]
+
+    def test_degrades_to_empty_layers_without_failing_the_load(self, tmp_path):
+        resolved = ResolvedModel(model_id="fake/mystery", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = download_and_load(resolved, model_class=_FakeUnresolvableModel)
+
+        # The model still loads (usable for inference) even though hook
+        # layer resolution failed -- LIT-207 doesn't gate loading on it.
+        assert loaded.available_layers == []
+        assert loaded.model is not None
+
+    def test_attach_hooks_returns_a_working_hook_manager(self, tmp_path):
+        resolved = ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        with loaded.attach_hooks() as hooks:
+            loaded.model(torch.randn(1, 4, 8))
+            assert set(hooks.captured) == set(loaded.available_layers)
