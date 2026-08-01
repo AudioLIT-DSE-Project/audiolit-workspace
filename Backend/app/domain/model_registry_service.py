@@ -3,14 +3,16 @@ import json
 import logging
 import time
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import torch
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.utils import HfHubHTTPError
 from transformers import Wav2Vec2Model, WhisperModel
+
+from .hook_manager_service import HookManager, HookRegistrationError
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,15 @@ class LoadedModel:
     family: str
     weights_sha256: str
     model: torch.nn.Module
+    available_layers: List[str] = field(default_factory=list)
+
+    def attach_hooks(self) -> HookManager:
+        """Fresh HookManager for this model, used as a context manager for
+        attribution: `with loaded.attach_hooks() as hooks: ...`. Layer
+        resolution already succeeded once at load time (see available_layers
+        below) so this is expected to always succeed too.
+        """
+        return HookManager(self.model, family=self.family)
 
 
 class _CircuitBreaker:
@@ -190,12 +201,24 @@ def download_and_load(
     model = model.to(device)
     model.eval()
 
+    try:
+        available_layers = HookManager(model, family=resolved.family).available_layers()
+    except HookRegistrationError as e:
+        # resolve_model_id already gated model_type to a supported family, so
+        # this should be rare in practice (an architecture whose config
+        # claims whisper/wav2vec2 but whose module tree doesn't match) -- but
+        # don't fabricate a layer list if it happens, and don't fail the load
+        # over it either, since the model itself still works for inference.
+        logger.warning("model_registry: hook layer resolution failed for %s: %s", resolved.model_id, e)
+        available_layers = []
+
     logger.info(
-        "model_registry: loaded %s@%s family=%s weights_sha256=%s",
+        "model_registry: loaded %s@%s family=%s weights_sha256=%s layers=%d",
         resolved.model_id,
         resolved.revision,
         resolved.family,
         weights_sha256,
+        len(available_layers),
     )
 
     return LoadedModel(
@@ -204,6 +227,7 @@ def download_and_load(
         family=resolved.family,
         weights_sha256=weights_sha256,
         model=model,
+        available_layers=available_layers,
     )
 
 

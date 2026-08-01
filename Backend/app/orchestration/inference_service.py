@@ -8,14 +8,14 @@ from typing import Optional
 import numpy as np
 from fastapi import HTTPException
 
-from app.services.model_loader_service import (
+from app.domain.model_loader_service import (
     transcribe_whisper_base,
     transcribe_whisper_large,
     wave2vec,
     extract_whisper_embeddings,
     extract_wav2vec2_embeddings,
 )
-from app.services.dataset_service import resolve_file
+from app.infrastructure.dataset_service import resolve_file
 from app.infrastructure.redis import get_result, cache_result
 
 logger = logging.getLogger(__name__)
