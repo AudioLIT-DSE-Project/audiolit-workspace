@@ -13,6 +13,14 @@ it will drift from Linear otherwise. The dependency edges here are also
 encoded in Linear itself as `blockedBy`/`blocks` relations, so Linear's own
 dependency graph matches this document.
 
+> **Current critical-path bottlenecks (check Linear before trusting this —
+> it drifts):** **LIT-123** (Ravindu, Multi-task dataset ingestion core) and
+> **LIT-127** (Rahim, Deploy RQ broker, Urgent) are both unstarted and each
+> block several other issues (see Tier 0/1/2 below). These are the
+> highest-leverage places to start if you're not already mid-issue.
+> Separately: **#12, #16, #17** are open PRs awaiting review — check
+> `gh pr list` before starting related work so you don't duplicate them.
+
 ---
 
 ## How to read the tiers

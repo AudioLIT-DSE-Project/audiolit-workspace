@@ -72,21 +72,32 @@ evidence are not the same thing — when something matters, check the repo.**
 
 ## Repo structure — current state, not yet the SAD's target
 
-The real ECHO 1.0 baseline is merged (PR #7). Structure today:
+The real ECHO 1.0 baseline is merged (PR #7). Structure on `develop` as of
+this writing:
 
 ```
 Backend/app/{core, api/routes, services}    # ECHO's own layout
 Frontend/src/{pages, contexts, components/{layout,panels,audio,visualization,ui,analysis,dataset,predictions}, hooks, lib}
 ```
 
-The SAD's target five-layer layout
-(`backend/app/{api,orchestration,domain,infrastructure}`, lower-case
-`frontend/src/`) **has not been migrated to yet** — that's LIT-227, and per
-SAD §8.2 it happens incrementally ("infra services set up first, then
-model-loading reorganised, then explanation code tidied, then
+The SAD's target five-layer layout (`Backend/app/{api,domain,infrastructure,
+orchestration}`) is **mid-migration, not merged into `develop` yet** — PR #16
+(LIT-227 slice 2) does the real move (every service into its actual
+domain/infrastructure/orchestration home, grounded in the real SAD §5.1/§5.2
+text, not guessed) but is sitting in review. **Check whether #16 has merged
+before assuming either tree shape** — `git log --oneline -5` or `ls
+Backend/app/` settles it in one command; don't guess from this doc, which
+will drift the moment that PR lands and someone forgets to update it.
+
+Per SAD §8.2 the migration is incremental ("infra services set up first,
+then model-loading reorganised, then explanation code tidied, then
 background-processing replaces the old queue, then new features built on
 top," system kept working at each step) — not a big-bang rewrite blocking
-everything else. Don't assume the target paths exist; check the actual tree.
+everything else. `app/core/` retiring entirely and everything moving out of
+flat `app/services/` is what #16 finishes; the queue → real RQ /
+no-synchronous-inference-on-the-request-path step is still genuinely open
+after #16 (see LIT-227's Linear comments for exactly what's left and why —
+it changes `/upload`'s HTTP contract and needs LIT-157, not started).
 
 ---
 
@@ -145,12 +156,66 @@ everything else. Don't assume the target paths exist; check the actual tree.
   missing its unmount-cleanup function — pre-existing ECHO bug, not yet
   filed as its own issue.
 - **LIT-229** — `Backend/app/api/routes/health.py` imports the redis client
-  by direct name (`from ...core.redis import redis`), bypassing the
-  `fake_redis` test fixture. Harmless today (no test run has a real Redis
-  reachable), but adding a real Redis to CI/local test runs before this is
-  fixed will break 7 unrelated tests with `RuntimeError: Event loop is
-  closed`. Don't add a Redis service container to CI until this is
-  resolved.
+  by direct name (`from ...core.redis import redis`, or
+  `from ...infrastructure.redis import redis` once PR #16 merges), bypassing
+  the `fake_redis` test fixture. Harmless today (no test run has a real
+  Redis reachable), but adding a real Redis to CI/local test runs before
+  this is fixed will break 7 unrelated tests with `RuntimeError: Event loop
+  is closed`. Don't add a Redis service container to CI until this is
+  resolved. **This is also the reference example for "don't bind a name
+  directly across a module boundary"** — see `app/domain/saliency_service.py`
+  for the fix pattern (import the module, not the name, so a later
+  reassignment upstream is still visible).
+- **LIT-227 and LIT-207 were briefly marked Done in Linear without their own
+  DoD actually being met** (`app/domain`/`app/orchestration` were empty
+  placeholders; hook registration wasn't wired into the registry). Caught by
+  a repo audit, not by anyone reading the status — flagged in Linear
+  comments on both issues rather than silently re-toggled, and PR #16 closes
+  the real gap. **Second occurrence of the LIT-7 lesson above** (Linear
+  status ≠ repo evidence) — if you're relying on a Done status for something
+  that matters, spend the one command it takes to verify it against the
+  actual tree/tests instead of trusting the label.
+- **As of this writing, three PRs are open awaiting review**: #12 (LIT-211,
+  HookManager), #16 (LIT-227 slice 2 + LIT-207 hook-wiring fix), #17 (draft,
+  LIT-150 real ASR+SER orchestrator, ADD stubbed — LIT-128 doesn't exist
+  yet). Check `gh pr list` before starting related work so you don't
+  duplicate what's already sitting in review.
+- **Current critical-path bottlenecks, unstarted**: LIT-123 (Ravindu, Multi-
+  task dataset ingestion core — blocks 4 other dataset issues plus ADD
+  integration) and LIT-127 (Rahim, Deploy RQ broker, Urgent — blocks the
+  entire async fabric: worker scaffolding, the real orchestrator, frontend
+  wiring). If you're picking up work for either of them and neither reason
+  applies, these are the highest-leverage places to start.
+
+## Multiple concurrent sessions
+
+More than one developer may now be running a Claude Code session on this
+repo at the same time (see `docs/TEAM_AGENT_WORKFLOW.md`). This is a real
+collision risk, not a hypothetical one — it already happened once: PR #10
+(LIT-225) added `app/core/rq_connection.py` importing `app.core.settings`;
+PR #13 (LIT-227) separately moved `settings.py` out of `app/core/`. Neither
+PR touched the same lines, so they merged into `develop` with no git
+conflict at all — and the combination broke `pytest` collection entirely
+(`ModuleNotFoundError`) for everyone, on every branch, until a third PR
+fixed it. Two individually-green PRs are not proof the combination works.
+
+Before starting real implementation work in a session:
+
+1. `git fetch origin` and skim `gh pr list --state open` — if someone else
+   has an open PR touching the area you're about to work in, coordinate
+   before you also touch it, even if your change looks unrelated on paper.
+2. Re-check `docs/ISSUE_PLAN.md` **and** Linear for the issue's current
+   status immediately before starting, not from memory of an earlier
+   session — status changes fast when several sessions are landing work the
+   same day.
+3. If your change and another open PR both touch a file that only one of
+   you renamed/moved, that's exactly the shape of bug above — flag it
+   rather than assuming CI passing on your branch alone means the
+   combination is safe.
+4. After a merge you didn't make lands on `develop`, and before you push
+   your own PR, merge (or rebase onto) latest `develop` and run the full
+   test suite once more — don't assume your branch is still consistent with
+   `develop` just because it was when you started.
 
 ---
 
