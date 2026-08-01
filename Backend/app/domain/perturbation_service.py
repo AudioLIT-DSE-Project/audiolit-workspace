@@ -6,7 +6,7 @@ import librosa
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
-from .dataset_service import resolve_file
+from ..infrastructure.dataset_service import resolve_file
 
 def _load_waveform(path: str) -> Tuple[torch.Tensor, int]:
     """

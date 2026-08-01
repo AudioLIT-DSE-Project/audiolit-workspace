@@ -20,7 +20,7 @@ from redis import Redis
 from rq import Queue, Retry, get_current_job
 from rq.job import Dependency, Job
 
-from ..core.rq_connection import get_redis_connection
+from ..infrastructure.rq_connection import get_redis_connection
 
 CHILD_QUEUE_NAMES = ("fanout_child_a", "fanout_child_b", "fanout_child_c")
 AGGREGATOR_QUEUE_NAME = "fanout_aggregator"

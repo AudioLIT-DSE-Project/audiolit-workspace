@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request, Body
 from ...infrastructure import redis as r
-from ...services.queue_service import add_item, set_progress
+from ...orchestration.queue_service import add_item, set_progress
 
 router = APIRouter()
 

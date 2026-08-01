@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 import numpy as np
 import pandas as pd
-from app.services.model_loader_service import (
+from app.domain.model_loader_service import (
     reduce_dimensions,
     predict_emotion_wave2vec,
     extract_audio_frequency_features,
@@ -20,8 +20,8 @@ from app.services.model_loader_service import (
     extract_whisper_embeddings,
     extract_wav2vec2_embeddings,
 )
-from app.services.dataset_service import resolve_file
-from app.services.inference_service import run_inference, extract_single_embedding
+from app.infrastructure.dataset_service import resolve_file
+from app.orchestration.inference_service import run_inference, extract_single_embedding
 from app.infrastructure.redis import get_result, cache_result
 from app.api.dependencies import get_session_id
 
@@ -159,12 +159,12 @@ async def batch_whisper_analysis(request: Request):
                 
                 # If not found and this is a custom dataset with session mismatch, try alternative cache keys
                 if cached_result is None and dataset and dataset.startswith('custom:'):
-                    from app.services.custom_dataset_service import parse_custom_dataset_name
+                    from app.infrastructure.custom_dataset_service import parse_custom_dataset_name
                     try:
                         session_id_from_name, dataset_name = parse_custom_dataset_name(dataset)
                         if session_id_from_name != session_id:
                             # Try cache key with the original session ID path
-                            from app.services.custom_dataset_service import get_custom_dataset_manager
+                            from app.infrastructure.custom_dataset_service import get_custom_dataset_manager
                             original_manager = get_custom_dataset_manager(session_id_from_name)
                             original_file_path = original_manager.resolve_file_path(dataset_name, filename)
                             original_hash = hashlib.md5(str(original_file_path).encode()).hexdigest()
@@ -1234,7 +1234,7 @@ async def extract_attention_pairs_endpoint(
         }
         
         # Process attention data into pairs and timeline format
-        from app.services.model_loader_service import process_attention_into_pairs
+        from app.domain.model_loader_service import process_attention_into_pairs
         
         attention_pairs_data = process_attention_into_pairs(
             combined_result,
