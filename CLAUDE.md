@@ -27,8 +27,8 @@ over Linear issue bodies, which win over your own assumptions.
 - **RQ + Redis only.** Celery is removed project-wide. If you see a Celery
   mention anywhere (old issue bodies, comments), it's stale — never
   reintroduce it.
-- **soundfile only** for audio I/O. torchaudio is on a discontinuation path
-  and is being removed (LIT-226). Never reintroduce it.
+- **soundfile only** for audio I/O. torchaudio has been removed (LIT-226,
+  merged) — never reintroduce it.
 - **Single monorepo** (`audiolit-workspace`). Some old issue bodies and an
   earlier SAD draft describe a two-repo split (workspace + ds-engine) — that
   topology is superseded, documented in `docs/README.md` errata E1.
@@ -70,34 +70,34 @@ evidence are not the same thing — when something matters, check the repo.**
 
 ---
 
-## Repo structure — current state, not yet the SAD's target
+## Repo structure — five-layer migration is merged
 
-The real ECHO 1.0 baseline is merged (PR #7). Structure on `develop` as of
-this writing:
+The real ECHO 1.0 baseline is merged (PR #7), and the SAD §5.1/§5.2 five-layer
+layout landed via PR #16 (LIT-227). Structure on `develop` as of 2026-08-05:
 
 ```
-Backend/app/{core, api/routes, services}    # ECHO's own layout
+Backend/app/{api/routes, domain, orchestration, infrastructure, services}
 Frontend/src/{pages, contexts, components/{layout,panels,audio,visualization,ui,analysis,dataset,predictions}, hooks, lib}
 ```
 
-The SAD's target five-layer layout (`Backend/app/{api,domain,infrastructure,
-orchestration}`) is **mid-migration, not merged into `develop` yet** — PR #16
-(LIT-227 slice 2) does the real move (every service into its actual
-domain/infrastructure/orchestration home, grounded in the real SAD §5.1/§5.2
-text, not guessed) but is sitting in review. **Check whether #16 has merged
-before assuming either tree shape** — `git log --oneline -5` or `ls
-Backend/app/` settles it in one command; don't guess from this doc, which
-will drift the moment that PR lands and someone forgets to update it.
+`app/core/` is **gone** — `settings`/`redis`/`session` now live in
+`app/infrastructure/`. Model + explanation logic is in `app/domain/`, RQ
+fan-out/fan-in in `app/orchestration/`. One file has **not** been moved yet:
+`app/services/multitask_orchestrator_service.py` (the LIT-150 orchestrator
+draft) — it's the next migration target, not the seed of a second parallel
+tree. **Don't trust this block over the repo** — `ls Backend/app/` settles the
+current shape in one command, and this doc drifts the moment someone forgets to
+update it (the whole reason the previous version of this section was wrong).
 
-Per SAD §8.2 the migration is incremental ("infra services set up first,
-then model-loading reorganised, then explanation code tidied, then
-background-processing replaces the old queue, then new features built on
-top," system kept working at each step) — not a big-bang rewrite blocking
-everything else. `app/core/` retiring entirely and everything moving out of
-flat `app/services/` is what #16 finishes; the queue → real RQ /
-no-synchronous-inference-on-the-request-path step is still genuinely open
-after #16 (see LIT-227's Linear comments for exactly what's left and why —
-it changes `/upload`'s HTTP contract and needs LIT-157, not started).
+Per SAD §8.2 the migration is incremental ("infra services set up first, then
+model-loading reorganised, then explanation code tidied, then background-
+processing replaces the old queue, then new features built on top," system kept
+working at each step) — not a big-bang rewrite. What #16 finished: the layered
+packages + hook registration wired into the registry. **Still genuinely open
+after #16**: the queue → real RQ / no-synchronous-inference-on-the-request-path
+step, which changes `/upload`'s HTTP contract and needs LIT-157 (not started —
+verify in Linear/`docs/ISSUE_PLAN.md`). See LIT-227's Linear comments for what's
+left and why.
 
 ---
 
@@ -137,9 +137,9 @@ it changes `/upload`'s HTTP contract and needs LIT-157, not started).
 9. **Update `docs/ISSUE_PLAN.md`'s status column** for the issue (and any
    issue it unblocks) so the next session/developer sees accurate state.
 10. If you find a conflict along the way (issue body contradicts SAD/SRS, a
-   mapping in LIT-228 points at the wrong thing, an issue marked Done with
-   no evidence in the repo) — **flag it in a Linear comment and to the
-   user, don't silently resolve it** by guessing which side is right.
+    mapping in LIT-228 points at the wrong thing, an issue marked Done with
+    no evidence in the repo) — **flag it in a Linear comment and to the
+    user, don't silently resolve it** by guessing which side is right.
 
 ## Known open items (check before assuming these need fresh triage)
 
@@ -156,36 +156,58 @@ it changes `/upload`'s HTTP contract and needs LIT-157, not started).
   missing its unmount-cleanup function — pre-existing ECHO bug, not yet
   filed as its own issue.
 - **LIT-229** — `Backend/app/api/routes/health.py` imports the redis client
-  by direct name (`from ...core.redis import redis`, or
-  `from ...infrastructure.redis import redis` once PR #16 merges), bypassing
-  the `fake_redis` test fixture. Harmless today (no test run has a real
-  Redis reachable), but adding a real Redis to CI/local test runs before
-  this is fixed will break 7 unrelated tests with `RuntimeError: Event loop
-  is closed`. Don't add a Redis service container to CI until this is
-  resolved. **This is also the reference example for "don't bind a name
-  directly across a module boundary"** — see `app/domain/saliency_service.py`
-  for the fix pattern (import the module, not the name, so a later
-  reassignment upstream is still visible).
+  by direct name (`from ...infrastructure.redis import redis`, verified still
+  present on `develop` 2026-08-05), bypassing the `fake_redis` test fixture.
+  Harmless today (no test run has a real Redis reachable), but adding a real
+  Redis to CI/local test runs before this is fixed will break 7 unrelated
+  tests with `RuntimeError: Event loop is closed`. Don't add a Redis service
+  container to CI until this is resolved. **This is also the reference example
+  for "don't bind a name directly across a module boundary"** — see
+  `app/domain/saliency_service.py` for the fix pattern (import the module, not
+  the name, so a later reassignment upstream is still visible).
 - **LIT-227 and LIT-207 were briefly marked Done in Linear without their own
   DoD actually being met** (`app/domain`/`app/orchestration` were empty
   placeholders; hook registration wasn't wired into the registry). Caught by
   a repo audit, not by anyone reading the status — flagged in Linear
-  comments on both issues rather than silently re-toggled, and PR #16 closes
-  the real gap. **Second occurrence of the LIT-7 lesson above** (Linear
-  status ≠ repo evidence) — if you're relying on a Done status for something
-  that matters, spend the one command it takes to verify it against the
-  actual tree/tests instead of trusting the label.
-- **As of this writing, three PRs are open awaiting review**: #12 (LIT-211,
-  HookManager), #16 (LIT-227 slice 2 + LIT-207 hook-wiring fix), #17 (draft,
-  LIT-150 real ASR+SER orchestrator, ADD stubbed — LIT-128 doesn't exist
-  yet). Check `gh pr list` before starting related work so you don't
-  duplicate what's already sitting in review.
-- **Current critical-path bottlenecks, unstarted**: LIT-123 (Ravindu, Multi-
-  task dataset ingestion core — blocks 4 other dataset issues plus ADD
-  integration) and LIT-127 (Rahim, Deploy RQ broker, Urgent — blocks the
-  entire async fabric: worker scaffolding, the real orchestrator, frontend
-  wiring). If you're picking up work for either of them and neither reason
-  applies, these are the highest-leverage places to start.
+  comments on both issues rather than silently re-toggled, and PR #16 (now
+  merged) closed the real gap. **Second occurrence of the LIT-7 lesson above**
+  (Linear status ≠ repo evidence) — if you're relying on a Done status for
+  something that matters, spend the one command it takes to verify it against
+  the actual tree/tests instead of trusting the label.
+- **LIT-150 — removed by #21, being RE-ADDED FIXED via PR #22 (2026-08-05).**
+  History: orchestrator merged (#17) → reverted (#19) → re-applied (#20) →
+  **PR #21 merged (by Ravindu, 2026-08-05) which DELETED it** — both
+  `app/services/multitask_orchestrator_service.py` and its test are gone from
+  `develop` as of b01ccd0. The reason #21 gave was a red CI pipeline; the actual
+  cause was never a logic bug but a **post-migration import break**:
+  `multitask_orchestrator_service.py` was written against the pre-migration
+  layout and still imported `..core.rq_connection`,
+  `.fanout_orchestrator_service`, `.model_loader_service` — all of which PR #16
+  relocated, so pytest collection died with `ModuleNotFoundError: app.core` (the
+  same "two green PRs break in combination" trap as the earlier rq_connection
+  incident). **PR #22** (`fix/lit-150-post-migration-imports-ci`) re-introduces
+  the orchestrator **with the imports repointed** to `..infrastructure` /
+  `..orchestration` / `..domain` (one file, three lines) plus its restored test.
+  Verified on Python 3.11: full backend suite **149 passed, 2 skipped**, frontend
+  `npm ci && lint && build` green. So the current plan is: **LIT-150 comes back,
+  fixed, through PR #22's review** — don't re-revert it, and don't build on
+  `multitask_orchestrator_service.py` until #22 merges. The infra tier
+  (LIT-207/211/225/226/227) is Done, so a large batch of Tier 2–5 work is
+  unblocked regardless — see `docs/ISSUE_PLAN.md`. Re-run `gh pr list --state
+  open` to confirm current PR state.
+- **AGREED SEQUENCING PLAN (2026-08-05) — read before claiming an issue so
+  concurrent sessions don't collide:** (1) land the LIT-150 re-add/fix PR #22 above first;
+  (2) **then complete LIT-123 (Ravindu, dataset ingestion core) and LIT-127
+  (Rahim, RQ broker, Urgent) FIRST, before anyone starts a downstream critical
+  path** — these two are the shared base that de-risks everything else, so they
+  go through review + merge before the parallel build-out; (3) **then work the
+  LIT-127 critical path step by step** (LIT-127 → LIT-149 workers → real
+  orchestrator wiring → LIT-131/157 frontend async), in parallel with the
+  LIT-123 → LIT-142 → LIT-128 → LIT-148 dataset/ADD path. If you're a fresh
+  session: LIT-150 fix, LIT-123, LIT-127 are already claimed/in-flight — pick
+  genuinely independent unblocked work (e.g. LIT-206/224 SER, LIT-126/130 XAI,
+  LIT-222) rather than touching those, and coordinate per "Multiple concurrent
+  sessions" below.
 
 ## Multiple concurrent sessions
 
@@ -219,5 +241,5 @@ Before starting real implementation work in a session:
 
 ---
 
-*Keep this file and `docs/ISSUE_PLAN.md` current as work lands — a stale
-CLAUDE.md is worse than no CLAUDE.md, because it reads as authoritative.*
+_Keep this file and `docs/ISSUE_PLAN.md` current as work lands — a stale
+CLAUDE.md is worse than no CLAUDE.md, because it reads as authoritative._
