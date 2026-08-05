@@ -17,7 +17,6 @@ from app.infrastructure.dataset_ingestion import (
     CORPUS_REGISTRY,
     ColumnMap,
     CommonVoiceLoader,
-    CORPUS_REGISTRY,
     CsvCatalogLoader,
     TARGET_SAMPLE_RATE,
     TaskFamily,
@@ -188,10 +187,6 @@ class TestCorpusRegistry:
         with pytest.raises(NotImplementedError) as exc:
             get_loader(name)
         assert CORPUS_REGISTRY[name].owner_issue in str(exc.value)
-        # (asvspoof-2021 now has a loader via LIT-142; librispeech is still pending.)
-        with pytest.raises(NotImplementedError) as exc:
-            get_loader("librispeech")
-        assert "LIT-141" in str(exc.value)
 
 
 def _write_cv_catalog(tmp_path: Path, *, columns: str = "processed") -> tuple[Path, Path]:
