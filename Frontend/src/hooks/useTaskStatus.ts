@@ -36,7 +36,7 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
 
       ws.onopen = () => {
         console.log(`[WS] Connected for task ${taskId}`);
-        retryCountRef.current = 0; // Reset retry count on successful connection
+        retryCountRef.current = 0;
       };
 
       ws.onmessage = (event) => {
@@ -49,7 +49,7 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
             
             if (currentState === 'SUCCESS') {
               setResult(data.payload?.result || data.payload);
-              isManualClose.current = true; // Allow clean close
+              isManualClose.current = true;
             } else if (currentState === 'FAILURE') {
               setError(data.payload?.error || 'Task failed');
               isManualClose.current = true;
@@ -70,12 +70,10 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
         retryCountRef.current += 1;
         console.warn(`[WS] Disconnected. Retry attempt: ${retryCountRef.current}`);
 
-        // If we fail 3 times, fallback to HTTP long-polling
         if (retryCountRef.current > 3) {
           console.warn(`[WS] Max retries reached. Falling back to HTTP polling.`);
           startPolling();
         } else {
-          // Exponential backoff: 1s, 2s, 4s...
           const delay = Math.pow(2, retryCountRef.current) * 1000;
           reconnectTimeoutRef.current = setTimeout(connectWs, delay);
         }
@@ -83,7 +81,6 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
     };
 
     const startPolling = () => {
-      // Clear any existing polling
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
       
       pollIntervalRef.current = setInterval(async () => {
@@ -100,7 +97,7 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
         } catch (e) {
           console.error('[Polling] Failed to fetch status', e);
         }
-      }, 2000); // Poll every 2 seconds
+      }, 2000);
     };
 
     connectWs();
