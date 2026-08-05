@@ -64,8 +64,11 @@ export const MainLayout = () => {
   // Refs to track ongoing requests and prevent duplicates
   const wav2vecRequestRef = useRef<AbortController | null>(null);
   const whisperRequestRef = useRef<AbortController | null>(null);
+  
+  // RQ Task State (WebSocket listener)
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const { state, result } = useTaskStatus(activeTaskId);
+
   // Clear perturbation result and predictions when selected file changes
   useEffect(() => {
     setPerturbationResult(null);
@@ -511,6 +514,7 @@ export const MainLayout = () => {
       setBatchInferenceStatus('idle');
     }
   };
+
   return (
     <EmbeddingProvider>
       <div className="h-screen flex flex-col bg-background">
@@ -557,6 +561,9 @@ export const MainLayout = () => {
                     onPerturbationComplete={handlePerturbationComplete}
                     onPredictionRefresh={handlePredictionRefresh}
                     onPredictionUpdate={handlePredictionUpdate}
+                    // Pass the RQ result down to the panel:
+                    unifiedResult={state === 'SUCCESS' ? (typeof result === 'string' ? JSON.parse(result) : result) : null}
+                    audioDuration={selectedFile?.duration || 10.0}
                   />
                 </Panel>
                 
