@@ -42,6 +42,7 @@ interface WhisperPrediction {
 }
 
 export const MainLayout = () => {
+
   const [apiData, setApiData] = useState<unknown>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<UploadedFile | null>(null);
@@ -63,7 +64,8 @@ export const MainLayout = () => {
   // Refs to track ongoing requests and prevent duplicates
   const wav2vecRequestRef = useRef<AbortController | null>(null);
   const whisperRequestRef = useRef<AbortController | null>(null);
-
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const { state, result } = useTaskStatus(activeTaskId);
   // Clear perturbation result and predictions when selected file changes
   useEffect(() => {
     setPerturbationResult(null);
