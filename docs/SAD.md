@@ -177,6 +177,24 @@ The use-case view sits at the centre: every element in the other views exists to
 
 **Description:** Figure 1 shows how the views relate to one another. The use-case view is placed at the centre because everything else exists to support what users want to do. The logical view describes the parts the software is made of; the process view describes how those parts behave together while running; the implementation view describes how they are organised as code; and the deployment view describes where they run. The data view underpins all of them by describing how information is stored. Reading the views together gives a complete picture of the system from every important angle.
 
+**Recreated diagram (Mermaid, for text-based reading — the embedded image above is the rendered original):**
+
+```mermaid
+flowchart TB
+    UC["Use-Case View\n• User Goals\n• Functional Scenarios\n• Use-Case Diagrams"]
+    LV["Logical View\n• Software Structure\n• Packages & Classes\n• Responsibilities"]
+    PV["Process View\n• Runtime Behaviour\n• Concurrency\n• Activity & Sequence Diagrams"]
+    DepV["Deployment View\n• Physical Nodes\n• Runtime Environment\n• Deployment Diagram"]
+    IV["Implementation View\n• Source Code Organisation\n• Components\n• Layered Structure"]
+    DV["Data View\n• MongoDB Metadata\n• Redis Cache\n• Data Lifetime\n• Persistence Rules"]
+
+    UC --- LV
+    UC --- PV
+    UC --- DepV
+    UC --- IV
+    UC --- DV
+```
+
 This combination of views is a standard and well-established way of describing software architecture. Using it ensures that no important aspect of the system is overlooked: the static structure, the running behaviour, the physical setup, and the data are all covered. Each of the following sections presents one view, supported by a diagram and a plain-language description.
 
 # **3\. Architectural Goals and Constraints**
@@ -225,6 +243,46 @@ Several constraints shape the design and limit the options available:
 
 **Description:** Figure 2 pairs each constraint with the design decision that answers it. Reading it shows that the constraints are not independent: the limited graphics memory and the need for full model access together lead to the choice of several small, dedicated workers rather than one large one; and the goals of reproducibility and privacy are met together by the caching design, which uses a fingerprint of the request that is both a reliable identifier and free of any personal information.
 
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart LR
+    subgraph Constraints["Architectural Constraints"]
+        C1["Full Model Access\nModels must execute locally"]
+        C2["Limited GPU Memory\n3-5 GB VRAM"]
+        C3["Safe Model Files\nsafetensors only"]
+        C4["No Personal Data\nNo permanent audio storage"]
+        C5["Research-only Datasets\nAcademic licences"]
+        C6["Extend ECHO 1.0\nReuse existing code"]
+        C7["Secure Communication\nTLS + Secret Management"]
+    end
+    subgraph Goals["Goals"]
+        G1["Goal: Reproducibility"]
+        G2["Goal: Privacy"]
+    end
+    subgraph Responses["Architectural Design Responses"]
+        R1["Background Task Orchestrator (RQ Workers)"]
+        R2["Dynamic Hugging Face Model Registry"]
+        R3["CPU Fallback: Small Dedicated Workers"]
+        R4["Safe Model Validation Before Loading"]
+        R5["Licence-aware Dataset Manager"]
+        R6["Layered Extension Architecture"]
+        R7["HTTPS / Environment Secrets"]
+        R8["SHA-256 Cache + MongoDB Metadata Only"]
+    end
+
+    C1 -->|together| R1
+    C1 --> R2
+    C2 -->|together| R1
+    C2 --> R3
+    C3 --> R4
+    C5 --> R5
+    C6 --> R6
+    C7 --> R7
+    G1 --> R8
+    G2 --> R8
+```
+
 A distinctive feature of AudioLIT, reflected throughout this document, is that it grows an existing academic tool into a more capable one rather than starting over. This shapes many of the decisions that follow: the design must fit alongside what already exists, reuse it where sensible, and add new capabilities cleanly. Being explicit about this boundary \- what is inherited, what is extended, and what is new \- is one of the main ways this document supports both the development team and the examiners.
 
 ## **3.3 Technology Choices**
@@ -246,6 +304,54 @@ Figure 3 shows the use-case diagram. The main users are the ML researcher (the p
 **Diagram type:** *UML Use-Case Diagram*
 
 **Description:** Figure 3 shows the functional scope of the system. Each oval is a use case \- something a user can accomplish \- and the lines connect each user type to the use cases relevant to them. The ML researcher has the widest access, since they are the primary user. The trust-and-safety analyst is connected mainly to the bias and deepfake use cases, reflecting their focus on model fairness and forensic risk. The external systems (the model hub and the cloud GPU service) appear on the right because the system depends on them but does not control them. The advanced use cases shown as future work are included so that the full ambition of the project is visible, even though only the committed use cases are built in this delivery.
+
+**Recreated diagram (Mermaid)** — actor-to-use-case edges reconstructed from the figure and the description above; treat the embedded original image as authoritative if a specific edge is in question:
+
+```mermaid
+flowchart LR
+    Educator["Educator / Student"]
+    SWEng["Software Engineer"]
+    MLRes["ML Researcher"]
+    TSA["Trust-and-Safety Analyst"]
+    GPU["Free Cloud GPU"]
+    HF["Hugging Face Hub"]
+
+    subgraph AudioLIT
+        UC1(("Retrieve Saved Result"))
+        UC2(("Generate Explanation"))
+        UC3(("Run Multi-Task Analysis"))
+        UC4(("Apply Counterfactual Mutation"))
+        UC5(("Compare Multiple Models"))
+        UC6(("Profile Bias & Check Explanation Quality"))
+        UC7(("Add Custom Model"))
+        UC8(("Deepfake Forensics"))
+    end
+
+    Educator --> UC1
+    Educator --> UC2
+    Educator --> UC3
+
+    SWEng --> UC2
+    SWEng --> UC3
+    SWEng --> UC4
+
+    MLRes --> UC1
+    MLRes --> UC2
+    MLRes --> UC3
+    MLRes --> UC4
+    MLRes --> UC5
+    MLRes --> UC6
+    MLRes --> UC7
+
+    TSA --> UC6
+    TSA --> UC8
+    TSA --> UC3
+
+    GPU --> UC3
+    HF --> UC7
+```
+
+*(UC5 "Compare Multiple Models" is shown as future work in the source figure — see SRS §4.4, where multi-model side-by-side comparison is listed as not committed for this delivery. Don't build it as committed scope.)*
 
 ## **4.1 Use-Case Realizations**
 
@@ -349,6 +455,24 @@ A key design rule is that the gateway never loads AI models directly. If it did,
 
 **Description:** Figure 4 shows the five layers as a stack. The interface is at the top, closest to the user, and the supporting services are at the bottom. Each layer uses only the one directly below it, so a change in one layer has a limited and predictable effect on the others. This simple rule is one of the most important decisions in the whole design, because it is what keeps a system with many moving parts understandable and maintainable.
 
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TB
+    User(["User"])
+    Pres["Presentation Layer\nReact Web Interface\n• Multi-pane Workspace\n• Visualisations\n• User Interaction"]
+    App["Application Layer (Gateway)\nFastAPI Gateway\n• REST API\n• Validation\n• Authentication\n• Request Routing"]
+    Orch["Orchestration Layer\nTask Orchestrator\n• Background Workers (RQ)\n• Job Scheduling\n• Result Aggregation"]
+    Domain["Domain Layer\nCore AI Services\n• Model Registry\n• ASR / SER / Deepfake\n• XAI Methods\n• Acoustic Profiling\n• Mutation Engine\n• Bias & Faithfulness Analysis"]
+    Infra["Infrastructure Layer\nInfrastructure Services\n• Redis Cache\n• MongoDB\n• Hugging Face\n• Dataset Storage\n• Logging"]
+
+    User --> Pres
+    Pres -->|Uses| App
+    App -->|Delegates Heavy Tasks| Orch
+    Orch -->|Invokes| Domain
+    Domain -->|Uses| Infra
+```
+
 ## **5.2 Main Components**
 
 Within these layers, the most important components are described below. Figure 5 shows them as a class diagram.
@@ -374,6 +498,76 @@ Within these layers, the most important components are described below. Figure 5
 
 The Explanation Strategies component deserves special mention, because it is the key to keeping the system extensible. All explanation methods share the same simple interface, so the rest of the system does not need to know which one is being used. Adding a new method \- now or in the future \- means adding one new component, and nothing else changes. This is also how the more advanced research methods, if they are completed, can be slotted in without disturbing the committed system.
 
+**Recreated diagram (Mermaid):**
+
+```mermaid
+classDiagram
+    class Workspace {
+        +currentFile
+        +selectedModel
+        +analysisResults
+        +updateState()
+    }
+    class CacheManager {
+        +lookup()
+        +store()
+        +invalidate()
+    }
+    class TaskOrchestrator {
+        +createJobs()
+        +dispatchJobs()
+        +mergeResults()
+    }
+    class ModelRegistry {
+        +loadModel()
+        +downloadModel()
+        +registerModel()
+        +getVersion()
+    }
+    class BiasProfiler {
+        +evaluateBias()
+    }
+    class AcousticProfiler {
+        +extractPitch()
+        +extractEnergy()
+        +extractFeatures()
+    }
+    class MutationEngine {
+        +silenceRegion()
+        +addNoise()
+        +shiftPitch()
+        +restoreOriginal()
+    }
+    class ExplanationStrategy {
+        <<interface>>
+        +generateExplanation()
+    }
+    class IntegratedGradients
+    class LIME
+    class SHAP
+    class GradCAM
+    class FaithfulnessAuditor {
+        +measureFaithfulness()
+    }
+
+    Workspace --> CacheManager : retrieves results
+    Workspace --> TaskOrchestrator : submits analysis
+    TaskOrchestrator --> CacheManager : cache lookup/store
+    TaskOrchestrator --> ModelRegistry : loads models
+    TaskOrchestrator --> BiasProfiler
+    TaskOrchestrator --> AcousticProfiler
+    TaskOrchestrator --> MutationEngine
+    TaskOrchestrator --> ExplanationStrategy
+    BiasProfiler --> ModelRegistry : loads models
+    AcousticProfiler --> ModelRegistry
+    MutationEngine --> ExplanationStrategy
+    FaithfulnessAuditor --> ExplanationStrategy
+    IntegratedGradients ..|> ExplanationStrategy
+    LIME ..|> ExplanationStrategy
+    SHAP ..|> ExplanationStrategy
+    GradCAM ..|> ExplanationStrategy
+```
+
 # **6\. Process View**
 
 This section describes how AudioLIT behaves while it is running, and in particular how it handles slow AI tasks without making the user wait with a frozen screen. This is the most important dynamic aspect of the system.
@@ -392,6 +586,44 @@ All the parts of the system communicate through Redis rather than talking to eac
 
 **Description:** Figure 6 shows the running processes and how they exchange work through the shared store. The web server never runs a model itself; it only places jobs on the queue and passes progress back to the browser. Each worker is dedicated to one kind of model, which keeps each worker's memory use small and predictable. This arrangement is the direct result of the limited-memory constraint: rather than one large worker holding every model, several small workers each hold one.
 
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart LR
+    Browser["Browser (React UI)"]
+    Gateway["FastAPI Gateway\n• Validate Request\n• Create Job\n• Return Job ID"]
+    Redis["Redis\n• Job Queue\n• Progress\n• Result Store"]
+
+    subgraph Workers["RQ Background Workers"]
+        ASR["ASR Worker (Whisper)"]
+        Emotion["Emotion Worker (Wav2Vec2)"]
+        Deepfake["Deepfake Worker"]
+        Explanation["Explanation Worker"]
+        Editing["Audio Editing Worker"]
+    end
+
+    Orchestrator["Task Orchestrator\n• Wait for All Jobs\n• Merge Results"]
+
+    Browser -->|Submit Analysis| Gateway
+    Gateway -->|Enqueue Job| Redis
+    Redis -->|Progress Updates / Completed Result| Gateway
+    Gateway -->|Progress / Final Result| Browser
+
+    Redis -->|ASR Job| ASR
+    Redis -->|SER Job| Emotion
+    Redis -->|Deepfake Job| Deepfake
+    Redis -->|Explanation Job| Explanation
+    Redis -->|Mutation Job| Editing
+
+    ASR -->|Result| Orchestrator
+    Emotion -->|Result| Orchestrator
+    Deepfake -->|Result| Orchestrator
+    Explanation -->|Result| Orchestrator
+    Editing -->|Result| Orchestrator
+
+    Orchestrator -->|Combined Result| Redis
+```
+
 ## **6.2 A Typical Analysis, Step by Step**
 
 Figure 7 is an activity diagram showing the flow of a typical multi-part analysis. The user uploads a clip and chooses the analyses. The server checks the file and then checks whether the result is already saved. If it is, the saved result is returned at once. If not, the work is placed on the queue, the workers run the analyses together, the results are combined and saved, and the finished result is sent back to the browser, which updates the display.
@@ -404,6 +636,40 @@ Figure 7 is an activity diagram showing the flow of a typical multi-part analysi
 
 **Description:** Figure 7 shows the decision points and parallel work in a single analysis. The important branch is the check for a saved result: if one exists, the flow ends almost immediately with the saved answer; if not, the flow splits so that the separate analyses run at the same time, then joins again to combine them before saving and returning the result. The diagram highlights both the shortcut that makes repeated requests fast and the parallelism that makes a fresh multi-part analysis quick.
 
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TD
+    Start(("Start"))
+    Upload["Upload Audio & Select Analyses"]
+    Validate["Validate Audio File"]
+    Cached{"Cached Result Available?"}
+    ReturnSaved["Return Saved Result"]
+    CreateJobs["Create Background Jobs"]
+    ForkStart[" "]:::bar
+    ASR["Run ASR"]
+    Emotion["Run Emotion Analysis"]
+    Deepfake["Run Deepfake Detection"]
+    Explain["Generate Explanation"]
+    ForkEnd[" "]:::bar
+    Combine["Combine Results"]
+    Save["Save Result (Cache + Metadata)"]
+    SendResult["Send Result to Browser"]
+    UpdateUI["Update User Interface"]
+    End((("End")))
+
+    Start --> Upload --> Validate --> Cached
+    Cached -->|Yes| ReturnSaved --> SendResult
+    Cached -->|No| CreateJobs --> ForkStart
+    ForkStart --> ASR --> ForkEnd
+    ForkStart --> Emotion --> ForkEnd
+    ForkStart --> Deepfake --> ForkEnd
+    ForkStart --> Explain --> ForkEnd
+    ForkEnd --> Combine --> Save --> SendResult --> UpdateUI --> End
+
+    classDef bar fill:#000,stroke:#000,height:4px
+```
+
 Figure 8 shows the same scenario as a sequence diagram, making clear the order in which the browser, the gateway, the queue, the workers, and the databases exchange messages over time. It shows the request being accepted immediately, the workers running in the background, and progress updates flowing back to the browser until the final result arrives.
 
 ![][image8]
@@ -413,6 +679,43 @@ Figure 8 shows the same scenario as a sequence diagram, making clear the order i
 **Diagram type:** *UML Sequence Diagram*
 
 **Description:** Figure 8 reads from top to bottom as time passes. The user's request arrives at the gateway, which quickly checks the cache and, finding nothing saved, places the work on the queue and immediately replies so the browser is not left waiting. The workers then take the work and run in parallel, sending progress updates back as they go. When all the analyses are done, the orchestrator combines them, saves the combined result, and sends it back to the browser. The diagram makes clear the key design point: the slow work happens in the background, and the user's connection is never held open waiting for it.
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+sequenceDiagram
+    actor Browser as Browser (React UI)
+    participant Gateway as FastAPI Gateway
+    participant Redis as Redis (Queue + Cache)
+    participant Orchestrator as Task Orchestrator
+    participant Workers as Model Workers
+    participant Mongo as MongoDB
+
+    Browser->>Gateway: Submit analysis request
+    Gateway->>Redis: Check cached result
+    Redis-->>Gateway: No cached result
+    Gateway->>Redis: Enqueue analysis job
+    Gateway-->>Browser: Job accepted (Job ID)
+    Redis->>Orchestrator: Notify new job
+
+    par Parallel model execution
+        Orchestrator->>Workers: Run ASR
+        Orchestrator->>Workers: Run Emotion Analysis
+        Orchestrator->>Workers: Run Deepfake Detection
+        Orchestrator->>Workers: Generate Explanation
+    end
+
+    Workers-->>Orchestrator: Update progress
+    Orchestrator-->>Gateway: Progress notification
+    Gateway-->>Browser: Progress notification
+
+    Workers-->>Orchestrator: Individual results
+    Orchestrator->>Mongo: Save combined analysis
+    Mongo-->>Orchestrator: Saved successfully
+    Orchestrator->>Redis: Store cached result
+    Redis-->>Gateway: Final result ready
+    Gateway-->>Browser: Final analysis result
+```
 
 # **7\. Deployment View**
 
@@ -427,6 +730,36 @@ The containers are: the web interface, the gateway server, the background worker
 **Diagram type:** *UML Deployment Diagram*
 
 **Description:** Figure 9 shows the physical arrangement. The user's browser is on the left, connecting over an encrypted internet connection to the application host. Inside the host, each box is a container running one part of the system, and the graphics card is shown attached to the model workers. On the right are the two external services the host connects to: the model hub, from which models are downloaded, and the optional cloud GPU service. Grouping the parts this way shows clearly which components share a machine, which share the graphics card, and which are external.
+
+**Recreated diagram (Mermaid — flowchart-with-subgraphs standing in for a UML deployment diagram, which Mermaid has no native node type for):**
+
+```mermaid
+flowchart LR
+    Client["Client Computer\nWeb Browser (React UI)"]
+
+    subgraph Host["Application Host — Docker Engine"]
+        WebIf["Web Interface"]
+        Gateway["FastAPI Gateway"]
+        Redis["Redis\nQueue + Cache"]
+        Workers["RQ Background Workers\n• ASR\n• Emotion\n• Deepfake\n• XAI\n• Audio Editing"]
+        Mongo[("MongoDB")]
+        GPU["GPU (Optional)"]
+    end
+
+    subgraph External["External Services"]
+        HF["Hugging Face Hub"]
+        CloudGPU["Cloud GPU Service (Optional)"]
+    end
+
+    Client -->|HTTPS| WebIf
+    WebIf --> Gateway
+    Gateway --> Redis
+    Redis --> Workers
+    Workers --> Mongo
+    Workers -.->|Uses when available| GPU
+    Workers -->|Download Models| HF
+    Workers -.->|Optional Remote Execution| CloudGPU
+```
 
 Because everything is defined in a single configuration file, the same setup runs on a laptop for development (without the graphics card) and on the demonstration host (with it). This is what makes it practical for a small team to develop and demonstrate the system from ordinary computers.
 
@@ -443,6 +776,32 @@ This section describes how the source code is organised. The code mirrors the fi
 **Diagram type:** *UML Component Diagram*
 
 **Description:** Figure 10 shows the code as a set of layered components. The arrows point downward, showing that each layer depends only on the layer beneath it and never on a layer above. The single dashed shortcut shows the one deliberate exception: the gateway is allowed to read directly from the cache to answer a repeated request quickly. Keeping the dependencies flowing in one direction like this is what prevents the code from becoming tangled and hard to change.
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TB
+    Rule["Dependency Rule\nComponents may depend only on the layer immediately below.\nException: Gateway → Cache"]
+    Pres["Presentation Layer\nReact UI, Dashboard, Visualisation Panels"]
+    App["Application Layer\nFastAPI Gateway, REST API, Authentication, Validation"]
+    Orch["Orchestration Layer\nTask Scheduler, RQ Queue, Job Coordinator"]
+    Domain["Domain Layer\nModel Registry, Analysis Engine, XAI Engine, Mutation Engine"]
+    Cache["Redis Cache"]
+    Infra["Infrastructure Layer\nRedis, MongoDB, Logging, Dataset Access"]
+
+    Rule -.-> Pres
+    Rule -.-> App
+    Rule -.-> Orch
+    Rule -.-> Domain
+    Rule -.-> Infra
+
+    Pres -->|uses| App
+    App -->|delegates| Orch
+    App -.->|cache lookup, exception| Cache
+    Orch -->|invokes| Domain
+    Domain -->|uses| Infra
+    Cache --> Infra
+```
 
 ## **8.2 Building on the Existing ECHO 1.0 Code**
 
@@ -466,6 +825,50 @@ This work is done in a careful order rather than all at once: the supporting ser
 
 **Description:** Figure 11 shows the two code repositories and how the existing ECHO 1.0 parts map into AudioLIT's structure. Each arrow is labelled with how that part is treated \- reused, wrapped, refactored, or newly built. Seeing this at a glance makes clear how much of the system builds directly on the existing project and where the genuinely new work is concentrated, which is one of the defining characteristics of this project.
 
+> **Superseded by errata E1 (see `docs/README.md`):** this figure and the surrounding text describe a **two-repository** split (Repository 1 - Frontend & Backend, Repository 2 - Machine Learning). That topology was later superseded — AudioLIT is built as a **single monorepo** (`audiolit-workspace`), with `Backend/` and `Frontend/` in one tree. Note for anyone chasing this citation: `docs/README.md`'s own erratum E1 currently cites "SAD §8.3 / Figure 21" for this two-repo description — that section/figure number doesn't exist in this document (the real SAD tops out at §12 with 14 figures). The actual location is **§8.2 / Figure 11**, i.e. right here. `docs/README.md` should be corrected to cite this instead of the non-existent §8.3/Figure 21.
+
+**Recreated diagram (Mermaid) — reproduced faithfully from the source figure for the historical record; the two-repo split it depicts is not the actual topology (see note above):**
+
+```mermaid
+flowchart LR
+    subgraph ECHO["Existing Repository — ECHO 1.0"]
+        E1["Explanation Engine"]
+        E2["React Interface"]
+        E3["Simple Task Queue"]
+        E4["Dataset Utilities"]
+        E5["Model Loader"]
+    end
+
+    subgraph Repo1["Repository 1 — Frontend & Backend"]
+        R1P["Presentation Layer"]
+        R1A["Application Layer"]
+        R1O["Orchestration Layer"]
+        R1I["Infrastructure Layer"]
+    end
+
+    subgraph Repo2["Repository 2 — Machine Learning"]
+        R2D["Domain Layer"]
+    end
+
+    NewDeepfake["New Deepfake Models"]
+    NewBG["Background Processing"]
+    NewDB["Durable Database"]
+    CI["Continuous Integration\n• Tests\n• Quality Checks"]
+
+    E2 -->|Reuse| R1P
+    E1 -->|Wrap| R1P
+    E3 -->|Refactor| R1O
+    E4 -->|Refactor| R1I
+    E5 -->|Refactor| R2D
+
+    NewDeepfake -->|Build New| R2D
+    NewBG -->|Build New| R1O
+    NewDB -->|Build New| R1I
+
+    Repo1 --> CI
+    Repo2 --> CI
+```
+
 The code is kept in two repositories: one for the interface and backend services, and one for the machine-learning parts. This split lets the two areas of work progress separately and makes each team member's contribution clear. Both repositories use automated checks that run the tests and quality checks every time new code is added.
 
 # **9\. Data View**
@@ -487,6 +890,34 @@ A specific design choice supports the goal of honest explanations: when the syst
 **Diagram type:** *Data storage diagram*
 
 **Description:** Figure 12 shows the two stores side by side. On one side, MongoDB holds the lasting records; on the other, Redis holds the temporary cache and the job queue. The arrow from the analysis records to the cache shows the space-saving idea at the heart of the design: the durable record does not contain the large result itself, only a pointer to where it is cached. The diagram also makes the privacy rule visible \- no box anywhere contains the uploaded audio.
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart TB
+    Upload["Uploaded Audio File"]
+    TempOnly["Temporary Processing Only\nAudio Deleted (Not Stored)"]
+    Rules["Storage Rules\n• No Audio Stored\n• Cached Results are Temporary\n• MongoDB Stores Metadata Only\n• Honest Explanations: Unavailable ≠ Fabricated"]
+
+    subgraph Mongo["MongoDB (Durable Storage)"]
+        ModelRec["Model Records\n• Metadata\n• Version\n• Configuration"]
+        BiasRep["Bias Reports\n• Fairness Metrics\n• Explanation Quality\n• Permanent"]
+        AnalysisRec["Analysis Records\n• Analysis ID\n• Timestamp\n• Cache Reference\n• Expire after 24 Hours"]
+    end
+
+    subgraph RedisStore["Redis (Temporary Storage)"]
+        Queue["Background Job Queue\n• Pending Jobs\n• Running Jobs"]
+        Cache["Analysis Cache\n• Cached Results\n• TTL Expiry"]
+    end
+
+    Upload --> TempOnly
+    Rules --> Mongo
+    Rules --> RedisStore
+    ModelRec --> AnalysisRec
+    BiasRep --> AnalysisRec
+    AnalysisRec -->|Reference Only| Cache
+    Queue --> Cache
+```
 
 # **10\. Size and Performance**
 
@@ -511,6 +942,39 @@ On memory, the set of models running at once is designed to fit within roughly 3
 **Diagram type:** *Performance and resource chart*
 
 **Description:** Figure 13 illustrates the two most important numbers in the design. The first is the very large gap between answering from the cache (almost instant) and running a fresh analysis (a few seconds); this gap is why caching is worth the effort. The second is the model memory use compared with the memory available on a free cloud graphics card, showing that the committed set of models fits comfortably with room to spare, which is what the memory constraint requires.
+
+**Recreated diagram (Mermaid)** — the original is a bar-chart-style figure; Mermaid has no first-class bar-chart node type, so the timing numbers themselves are the `Action | Target time` table already given just above this figure, and the diagram below instead recreates the figure's *structure* (how the targets, the GPU budget, and the memory-management levers connect to one design goal):
+
+```mermaid
+flowchart LR
+    subgraph Perf["Performance Targets"]
+        Cached["Cached Analysis ≈ 0.2 s"]
+        Fresh["Fresh Multi-part Analysis ≈ 8 s"]
+        Explain["Generate Explanation ≈ 8 s"]
+        Bias["Bias Check ≈ 30 s"]
+        Download["Download New Model ≈ 60 s"]
+        Cached -->|~40x faster| Fresh
+    end
+
+    subgraph Mem["GPU Memory Budget"]
+        Models["Models in Memory: 3-5 GB"]
+        FreeGPU["Typical Free GPU: 16 GB VRAM"]
+        Models -->|fits comfortably| FreeGPU
+    end
+
+    subgraph Strategy["Memory Management Strategy"]
+        LRU["LRU Redis Cache"]
+        Stream["Stream Datasets (do not load entirely)"]
+        CPUFallback["CPU Fallback when GPU unavailable"]
+        Evict["Automatic Cache Eviction"]
+    end
+
+    Goal["Design Goal:\nFast repeated requests + Controlled memory usage"]
+
+    Perf --> Goal
+    Mem --> Goal
+    Strategy --> Goal
+```
 
 # **11\. Quality**
 
@@ -555,6 +1019,35 @@ Because AudioLIT builds on existing code, the team also reviewed the security of
 **Diagram type:** *Security overview diagram*
 
 **Description:** Figure 14 shows the points at which security is enforced. Most checks happen at the entry to the system, where uploads and downloaded models are validated before anything else is done with them \- the principle being to stop problems at the door rather than deeper inside. The diagram also shows the encrypted channel between the browser and the server, and the rule that the stored data contains no audio and no personal identifiers.
+
+**Recreated diagram (Mermaid):**
+
+```mermaid
+flowchart LR
+    Browser["User Browser"]
+    HF["Hugging Face Hub"]
+
+    subgraph Trusted["AudioLIT Application (Trusted Boundary)"]
+        Gateway["FastAPI Gateway"]
+        SecVal["Security Validation\n• File Type Check\n• File Size Check\n• Audio Validation"]
+        SafeModel["Safe Model Handling\n• safetensors Only\n• Model Verification\n• Version Recording"]
+        Engine["Analysis Engine"]
+        Storage[("Persistent Storage\nMongoDB / Redis")]
+    end
+
+    PrivacyRule["Privacy Rule:\nUploaded audio is NEVER stored"]
+    StoredRecords["Stored Records:\nAnalysis Metadata, Bias Reports,\nNo Personal Identifiers"]
+
+    Browser -->|HTTPS / TLS| Gateway
+    Gateway --> SecVal
+    Gateway -->|Secure Model Download| SafeModel
+    HF --> SafeModel
+    SecVal --> Engine
+    SafeModel --> Engine
+    Engine --> Storage
+    Storage --> StoredRecords
+    Engine -.-> PrivacyRule
+```
 
 # **12\. References**
 

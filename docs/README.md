@@ -52,7 +52,7 @@ statements. The **decision** column is authoritative.
 
 | # | Topic | Stale text / assumption | Decision (authoritative) |
 |---|-------|-------------------------|--------------------------|
-| E1 | **Repository topology** | SAD §8.3 / Figure 21 describe **two repos** (`audiolit-workspace` + `audiolit-ds-engine`). | **Single monorepo: `audiolit-workspace`.** ECHO 1.0 is cloned and extended in place; frontend and backend live in one tree. The two-repo diagram is superseded. |
+| E1 | **Repository topology** | SAD §8.2 / Figure 11 describe **two repos** (Repository 1 - Frontend & Backend, Repository 2 - Machine Learning). | **Single monorepo: `audiolit-workspace`.** ECHO 1.0 is cloned and extended in place; frontend and backend live in one tree. The two-repo diagram is superseded. (Corrected citation: the real SAD has no §8.3 or Figure 21 - it tops out at §12/Figure 14. This erratum's own citation was never checked against the source and is exactly the kind of fabrication LIT-228 was corrected for; verified against `docs/SAD.md` directly on 2026-07-30.) |
 | E2 | **Async task fabric** | SRS §3.6.1 / §3.9.3 / §3.10 mention **"Celery/RQ"** or a Celery broker. | **RQ + Redis only.** Celery is removed project-wide (lighter setup, simpler single-host operation). Never reintroduce Celery. The SAD already commits to RQ; the SRS text is the stale side. |
 | E3 | **Audio I/O library** | ECHO baseline and some early issues use **torchaudio**. | **soundfile** is the standard for all audio load/save (SAD §3.3, tracked by LIT-226). torchaudio is on a discontinuation path and is removed. Never reintroduce it. |
 
@@ -70,14 +70,28 @@ audiolit-workspace/
 ├── docs/                    # this directory (SAD, SRS, README)
 ├── backend/
 │   └── app/
-│       ├── api/             # FastAPI gateway: routes, CORS, enqueue, WebSocket relay   (SAD §5.2.1)
-│       ├── orchestration/   # RQ workers, fan-out/fan-in orchestrator, per-family queues (SAD §5.2.2 / §6.2)
-│       ├── domain/          # framework-free: ModelRegistry, HookManager, attribution,   (SAD §5.2.3)
-│       │                    #   MutationEngine, acoustic estimators
-│       └── infrastructure/  # SHA-256 content-addressed cache, Redis tensor serialisation, MongoDB (SAD §5.2.4)
+│       ├── api/             # FastAPI gateway (the "application layer"): routes, CORS,   (SAD §5.1, application layer)
+│       │                    #   enqueue, WebSocket relay — deliberately contains no AI code
+│       ├── orchestration/   # RQ/Redis per-model workers, Task Orchestrator fan-out/fan-in (SAD §5.1 orchestration layer; §6.1 worker design; §5.2 Task Orchestrator)
+│       ├── domain/          # framework-free: Model Registry, Explanation Strategies       (SAD §5.1 domain layer; §5.2 component table)
+│       │                    #   (IG/LIME/SHAP/Grad-CAM), Mutation Engine, Acoustic Profiler,
+│       │                    #   Bias Profiler and Faithfulness Auditor
+│       └── infrastructure/  # Cache Manager (Redis, fingerprint-keyed), MongoDB,           (SAD §5.1 infrastructure layer; §5.2 Cache Manager)
+│                            #   dataset-reading tools, activity logging
 └── frontend/
-    └── src/                 # React 18 workspace, HTML5 canvas, Plotly projection, spectrogram overlays (SAD §5.2.5)
+    └── src/                 # React 18 Workspace (shared interface state), HTML5 canvas,   (SAD §5.1 presentation layer; §3.3 Plotly)
+                             #   Plotly projection, spectrogram overlays
 ```
+
+> Note on SAD citations above: `docs/SAD.md` describes the five layers in prose in §5.1
+> and lists components in a single flat table in §5.2 — it does **not** have numbered
+> per-layer subsections (`§5.2.1`...`§5.2.5`), and its component names are plain
+> (`Model Registry`, `Explanation Strategies`, `Cache Manager`, `Mutation Engine`,
+> `Acoustic Profiler`, `Bias Profiler and Faithfulness Auditor`, `Task Orchestrator`,
+> `Workspace`) rather than class-style names like `HookManager`/`CacheGateway`/`TensorCodec`.
+> An earlier pass (LIT-228) cited fine-grained section numbers and class names that were
+> never verified against the actual document; both LIT-228 and downstream Tier-C-stamped
+> issues have been corrected to match the real SAD.md structure above.
 
 > The ECHO 1.0 clone may still be in its inherited `Backend/` / `Frontend/`
 > shape until the layered migration (LIT-227) completes. Verify the actual tree
@@ -94,6 +108,17 @@ audiolit-workspace/
 - **One feature branch per Linear issue** (`feature/lit-xxx-...`), **one PR per
   issue**, referencing the LIT-id. CI (pytest + Jest, ruff/Black,
   ESLint/Prettier) green before merge.
+- **Every PR requires at least one approving review from a different team
+  member before merging** — this is mandatory, not optional, even when CI is
+  green. With 3 people on this project, self-merging is exactly how scope
+  drifts and mistakes go unnoticed. Opening a PR automatically moves the
+  linked Linear issue to **In Review** (LIT-134's GitHub↔Linear automation)
+  — that's expected and not something to "fix"; it reflects the PR waiting
+  on a human reviewer, not on more work.
+- **Claude Code sessions must not self-merge PRs.** Open the PR, verify CI is
+  green (`gh pr checks <n>`, waiting for an actual terminal result — see
+  below), then stop and hand off for review. Only merge if a human
+  explicitly instructs it for that specific PR.
 
 ---
 
