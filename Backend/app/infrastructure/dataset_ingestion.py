@@ -333,7 +333,7 @@ class LibriSpeechLoader(DatasetLoader):
     LibriSpeech has no single catalog: transcripts live in per-chapter
     ``<speaker>-<chapter>.trans.txt`` files (each line ``<utt-id> <TRANSCRIPT>``)
     beside the utterance ``.flac`` files, under ``<root>/<speaker>/<chapter>/``.
-    This walks that tree lazily. Speaker gender is read from the root
+    This walks that tree. Speaker gender is read from the root
     ``SPEAKERS.TXT`` (``ID | SEX | SUBSET | MINUTES | NAME``) when present, and
     exposed as demographic metadata. Audio is standardised to 16 kHz mono.
 
