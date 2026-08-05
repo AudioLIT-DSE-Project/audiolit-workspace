@@ -495,6 +495,74 @@ class ASVspoofLoader(DatasetLoader):
         return None
 
 
+# L2-ARCTIC's 24 speakers grouped by first language (L1). The accent is the
+# whole point of this corpus (it drives the FR15 accent-bias work) and the
+# speaker -> L1 mapping is fixed, so it's encoded here rather than parsed.
+L2_ARCTIC_SPEAKER_L1 = {
+    "ABA": "Arabic", "SKA": "Arabic", "YBAA": "Arabic", "ZHAA": "Arabic",
+    "BWC": "Mandarin", "LXC": "Mandarin", "NCC": "Mandarin", "TXHC": "Mandarin",
+    "ASI": "Hindi", "RRBI": "Hindi", "SVBI": "Hindi", "TNI": "Hindi",
+    "HJK": "Korean", "HKK": "Korean", "YDCK": "Korean", "YKWK": "Korean",
+    "EBVS": "Spanish", "ERMS": "Spanish", "MBMPS": "Spanish", "NJS": "Spanish",
+    "HQTV": "Vietnamese", "PNV": "Vietnamese", "THV": "Vietnamese", "TLV": "Vietnamese",
+}
+L2_ARCTIC_LICENSE = "L2-ARCTIC — research use only"
+
+
+class L2ArcticLoader(DatasetLoader):
+    """Loader for the L2-ARCTIC non-native reading corpus (LIT-181; FR2/FR15).
+
+    Each speaker lives in ``<root>/<SPEAKER>/`` with ``wav/arctic_*.wav`` and a
+    matching per-utterance transcript at ``transcript/<utt>.txt``. The speaker's
+    first language (accent) comes from the fixed ``SPEAKER_L1`` map and is
+    exposed as ``accent`` / ``demographic["l1"]`` — the grouping the FR15 bias
+    diagnostics slice on. Audio is standardised to 16 kHz mono for the ASR path.
+
+    Research-use-only corpus; paths default to the real data location but are
+    injectable for tests.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "l2_arctic"
+    SPEAKER_L1 = L2_ARCTIC_SPEAKER_L1
+
+    def __init__(self, root_dir: Optional[Path | str] = None, *, name: str = "l2-arctic"):
+        super().__init__(name=name, task_family=TaskFamily.ASR, license=L2_ARCTIC_LICENSE)
+        self.root_dir = Path(root_dir or self.DEFAULT_DIR)
+
+    def iter_metadata(self) -> Iterator[SampleMetadata]:
+        if not self.root_dir.exists():
+            raise FileNotFoundError(
+                f"L2-ARCTIC root for '{self.name}' not found: {self.root_dir}"
+            )
+        for speaker in sorted(self.SPEAKER_L1):
+            wav_dir = self.root_dir / speaker / "wav"
+            if not wav_dir.is_dir():
+                continue
+            l1 = self.SPEAKER_L1[speaker]
+            for wav_path in sorted(wav_dir.glob("*.wav")):
+                utt_id = wav_path.stem
+                transcript = self._read_transcript(
+                    self.root_dir / speaker / "transcript" / f"{utt_id}.txt"
+                )
+                yield SampleMetadata(
+                    dataset=self.name,
+                    sample_id=f"{speaker}-{utt_id}",
+                    audio_path=wav_path,
+                    task_family=TaskFamily.ASR,
+                    label=transcript,
+                    speaker_id=speaker,
+                    accent=l1,
+                    license=self.license,
+                    demographic={"l1": l1},
+                )
+
+    @staticmethod
+    def _read_transcript(path: Path) -> Optional[str]:
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip() or None
+        return None
+
+
 @dataclass
 class CorpusSpec:
     """A registry entry: what a corpus is, and how (or whether yet) to load it.
@@ -521,7 +589,7 @@ CORPUS_REGISTRY: Dict[str, CorpusSpec] = {
     "crema-d": CorpusSpec("crema-d", TaskFamily.SER, "Open Database License", owner_issue="LIT-208"),
     "ravdess": CorpusSpec("ravdess", TaskFamily.SER, "CC-BY-NC-SA-4.0", owner_issue="LIT-208"),
     "esd": CorpusSpec("esd", TaskFamily.SER, "Research-only", owner_issue="LIT-208"),
-    "l2-arctic": CorpusSpec("l2-arctic", TaskFamily.ASR, "Research-only", owner_issue="LIT-181"),
+    "l2-arctic": CorpusSpec("l2-arctic", TaskFamily.ASR, L2_ARCTIC_LICENSE, loader_factory=L2ArcticLoader, owner_issue="LIT-181"),
     "asvspoof-2021": CorpusSpec("asvspoof-2021", TaskFamily.DEEPFAKE, ASVSPOOF_LICENSE, loader_factory=ASVspoofLoader, owner_issue="LIT-142"),
 }
 
