@@ -9,7 +9,49 @@ import { useState, useEffect } from "react";
 import { API_BASE } from '@/lib/api';
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 
-// ... [Keep your existing UploadedFile, Wav2Vec2Prediction, WhisperPrediction, PerturbationResult interfaces here] ...
+interface UploadedFile {
+  file_id: string;
+  filename: string;
+  file_path: string;
+  message: string;
+  size?: number;
+  duration?: number;
+  sample_rate?: number;
+}
+
+interface Wav2Vec2Prediction {
+  predicted_emotion: string;
+  probabilities: Record<string, number>;
+  confidence: number;
+}
+
+interface WhisperPrediction {
+  predicted_transcript: string;
+  ground_truth: string;
+  accuracy_percentage: number;
+  word_error_rate: number;
+  character_error_rate: number;
+  levenshtein_distance: number;
+  exact_match: number;
+  character_similarity: number;
+  word_count_predicted: number;
+  word_count_truth: number;
+}
+
+interface PerturbationResult {
+  perturbed_file: string;
+  filename: string;
+  duration_ms: number;
+  sample_rate: number;
+  applied_perturbations: Array<{
+    type: string;
+    params: Record<string, any>;
+    status: string;
+    error?: string;
+  }>;
+  success: boolean;
+  error?: string;
+}
 
 // New interfaces for the Unified RQ Fan-in Result
 export interface ASRToken {
@@ -71,8 +113,98 @@ export const PredictionPanel = ({
   const [isLoadingPerturbed, setIsLoadingPerturbed] = useState(false);
   const [hoveredToken, setHoveredToken] = useState<ASRToken | null>(null);
 
-  // ... [Keep your existing handlePerturbationComplete, runInferenceOnPerturbed, and useEffect hooks for fetching wav2vec/whisper predictions here] ...
-  // (I am omitting them to save space, but do NOT delete them from your file)
+  // Handle perturbation completion
+  const handlePerturbationComplete = async (result: PerturbationResult) => {
+    if (!result.success) {
+      console.error("Perturbation failed:", result.error);
+      return;
+    }
+
+    const perturbedFileObj: UploadedFile = {
+      file_id: result.filename,
+      filename: result.filename,
+      file_path: result.perturbed_file,
+      message: "Perturbed audio",
+      duration: result.duration_ms / 1000,
+      sample_rate: result.sample_rate
+    };
+    
+    setPerturbedFile(perturbedFileObj);
+    
+    if (onPerturbationComplete) {
+      onPerturbationComplete(result);
+    }
+  };
+
+  // Fetch wav2vec prediction when model is wav2vec2 and file is selected
+  useEffect(() => {
+    let isMounted = true;
+    const abortController = new AbortController();
+    
+    const fetchWav2vecPrediction = async () => {
+      if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile)) {
+        if (isMounted) {
+          setWav2vecPrediction(null);
+          setError(null);
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      setIsLoading(true);
+      setError(null);
+
+      try {
+        const requestBody: any = {};
+        
+        if (selectedFile) {
+          const isUploadedFile = selectedFile.file_path && (
+            selectedFile.file_path.includes('uploads/') || 
+            selectedFile.file_path.startsWith('uploads/') ||
+            selectedFile.message === "Perturbed file" ||
+            selectedFile.message === "File uploaded successfully" ||
+            selectedFile.message === "File uploaded and processed successfully"
+          ) && selectedFile.message !== "Selected from dataset";
+          
+          if (isUploadedFile) {
+            requestBody.file_path = selectedFile.file_path;
+          } else {
+            requestBody.dataset = originalDataset || dataset;
+            requestBody.dataset_file = selectedFile.filename;
+          }
+        } else if (selectedEmbeddingFile && dataset) {
+          requestBody.dataset = originalDataset || dataset;
+          requestBody.dataset_file = selectedEmbeddingFile;
+        }
+
+        const response = await fetch(`${API_BASE}/inferences/wav2vec2-detailed`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: 'include',
+          body: JSON.stringify(requestBody),
+          signal: abortController.signal
+        });
+
+        if (!response.ok) throw new Error(`Failed to fetch prediction: ${response.status}`);
+
+        const prediction = await response.json();
+        if (isMounted) setWav2vecPrediction(prediction);
+        
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        const errorMessage = err instanceof Error ? err.message : "Unknown error";
+        if (isMounted) setError(errorMessage);
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    };
+
+    fetchWav2vecPrediction();
+    return () => {
+      isMounted = false;
+      abortController.abort();
+    };
+  }, [selectedFile, selectedEmbeddingFile, model, dataset, originalDataset]);
 
   const hasAttention = !!model && model.includes('whisper');
   const addResult = unifiedResult?.tasks?.add;
@@ -116,7 +248,6 @@ export const PredictionPanel = ({
       <Tabs defaultValue="analytics" className="h-full flex flex-col">
         <div className="bg-panel-header border-b border-border px-3 py-2">
           <TabsList className={`h-7 grid w-full ${hasAttention ? 'grid-cols-4' : 'grid-cols-3'} bg-muted`}>
-            {/* New Analytics Tab for Unified RQ Results */}
             <TabsTrigger value="analytics" className="text-xs">Analytics</TabsTrigger>
             <TabsTrigger value="saliency" className="text-xs">Saliency</TabsTrigger>
             {hasAttention && <TabsTrigger value="attention" className="text-xs">Attention</TabsTrigger>}
@@ -125,7 +256,7 @@ export const PredictionPanel = ({
         </div>
 
         <div className="flex-1 overflow-auto bg-background">
-          {/* New Analytics Tab Content */}
+          {/* New Analytics Tab Content for Unified RQ Results */}
           <TabsContent value="analytics" className="m-0 h-full p-3 space-y-4">
             
             {/* Interactive ASR Token Timeline */}
@@ -262,7 +393,7 @@ export const PredictionPanel = ({
             <div className="p-3">
               <PerturbationTools
                 selectedFile={selectedFile}
-                onPerturbationComplete={onPerturbationComplete}
+                onPerturbationComplete={handlePerturbationComplete}
                 onPredictionRefresh={onPredictionRefresh}
                 model={model}
                 dataset={dataset}
