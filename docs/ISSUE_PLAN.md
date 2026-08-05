@@ -13,13 +13,31 @@ it will drift from Linear otherwise. The dependency edges here are also
 encoded in Linear itself as `blockedBy`/`blocks` relations, so Linear's own
 dependency graph matches this document.
 
-> **Current critical-path bottlenecks (check Linear before trusting this —
-> it drifts):** **LIT-123** (Ravindu, Multi-task dataset ingestion core) and
-> **LIT-127** (Rahim, Deploy RQ broker, Urgent) are both unstarted and each
-> block several other issues (see Tier 0/1/2 below). These are the
-> highest-leverage places to start if you're not already mid-issue.
-> Separately: **#12, #16, #17** are open PRs awaiting review — check
-> `gh pr list` before starting related work so you don't duplicate them.
+> **AGREED SEQUENCING PLAN (2026-08-05) — the order we are actually working
+> in; read before claiming an issue so parallel sessions don't collide:**
+> 1. **LIT-150 re-add/fix lands first.** PR #21 (the revert) was *merged*
+>    2026-08-05 and DELETED the orchestrator + its test from `develop`. The CI
+>    failure it cited was a post-migration import break, not a logic bug —
+>    **PR #22** (`fix/lit-150-post-migration-imports-ci`) re-introduces the
+>    orchestrator with the imports fixed and its test restored (backend 149
+>    passed / 2 skipped, frontend green). Land #22 through review; don't
+>    re-revert LIT-150.
+> 2. **Then complete LIT-123 (Ravindu, dataset core) and LIT-127 (Rahim, RQ
+>    broker, Urgent) FIRST — before any downstream critical path.** These two
+>    are the shared base; each goes through review + merge before the parallel
+>    build-out starts, so the two critical paths begin from solid ground.
+> 3. **Then work the LIT-127 critical path step by step** (LIT-127 → LIT-149
+>    → orchestrator wiring → LIT-131/157), in parallel with the LIT-123 →
+>    LIT-142 → LIT-128 → LIT-148 dataset/ADD path.
+>
+> The whole infra tier (LIT-207/211/225/226/227) is Done; PRs #12/#16/#17 all
+> merged; #21 merged (removed LIT-150 — being re-added fixed by #22). **Fresh
+> sessions:** LIT-150-fix (#22), LIT-123, LIT-127 are claimed/in-flight — take
+> independent unblocked work instead (LIT-206/224 SER, LIT-126/130 XAI,
+> LIT-222) and coordinate. Always run `gh pr list` + re-check Linear before
+> starting; this note drifts.
+>
+> _Status column last reconciled against Linear: 2026-08-05._
 
 ---
 
@@ -41,13 +59,13 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-225 | Prototype RQ fan-out/fan-in | infra | Tharusha | 🟡 In Progress | none | **PR #10 open, CI green, awaiting review.** Pattern documented in `docs/rq_fanout_pattern.md`. Found a pre-existing, out-of-scope bug while testing (health.py bypasses the fake_redis fixture) - flagged, not fixed here. |
-| LIT-207 | Dynamic HF model ingestion (Model Registry) | FR1 | Rahim | ✅ Done | none | Also satisfies LIT-227's "model-loading reorganised" migration step — same work, don't duplicate. **Correction:** was marked Done via draft PR #14, but its DoD's "registers hooks... selectable layers" line wasn't actually met until PR #16 wired `HookManager` (from LIT-211/PR #12) into `ModelRegistry` (`LoadedModel.available_layers` / `.attach_hooks()`). Flagged in a Linear comment rather than silently reopened — genuinely Done once #16 merges. |
+| LIT-225 | Prototype RQ fan-out/fan-in | infra | Tharusha | ✅ Done | none | **Merged (PR #10).** Pattern documented in `docs/rq_fanout_pattern.md`. Found a pre-existing, out-of-scope bug while testing (health.py bypasses the fake_redis fixture) - flagged, not fixed here. |
+| LIT-207 | Dynamic HF model ingestion (Model Registry) | FR1 | Rahim | ✅ Done | none | Also satisfies LIT-227's "model-loading reorganised" migration step — same work, don't duplicate. **Correction:** was marked Done via draft PR #14, but its DoD's "registers hooks... selectable layers" line wasn't actually met until PR #16 wired `HookManager` (from LIT-211/PR #12) into `ModelRegistry` (`LoadedModel.available_layers` / `.attach_hooks()`). Flagged in a Linear comment rather than silently reopened — genuinely Done now that #16 has merged. |
 | LIT-210 | Model ID resolver / safetensors / cache | FR1 | Rahim | 🟢 | none | Sub-task of LIT-207; can run in parallel with it. |
-| LIT-211 | Forward/attention hook registration | FR1 | Tharusha | 🟢 | LIT-207 (loose — same PR is fine) | Unlocks all attribution work (FR8/FR9/FR17). |
-| LIT-226 | Remove torchaudio, standardise on soundfile | infra | — | 🟢 | none | Touches `pertubation_service.py` — do before LIT-165 to avoid rework on the same file. |
-| LIT-227 | Layered migration (restructure ECHO code) | infra | Tharusha | 🟡 In Progress | none | Incremental per SAD §8.2 — infra → registry → explanation code → orchestration → new features, system kept working at each step. Coordinate with LIT-207 (same registry work). **PR #13 (slice 1, merged):** infra/domain/orchestration skeleton stood up, `settings`/`redis`/`session` moved into `infrastructure`, `upload.py`↔`inferences.py` route coupling removed, 5 duplicated `get_session_id` defs collapsed, `pertubation_service.py` renamed, unused LRP import removed. **Correction:** this was then marked Done in Linear even though the DoD wasn't fully met (found via repo audit) — `domain`/`orchestration` were still empty placeholders (everything stayed flat in `app/services/`), and the "unreachable model option" dead-code item was still present. **PR #16 (slice 2):** actually moves every service into its real domain/infrastructure/orchestration home per SAD §5.1/§5.2, fixes `Toolbar.tsx`'s unreachable `whisper-large` option; investigated "orphaned visualisation components" and found none (all 5 files reachable). **Still open, deliberately out of scope:** `queue_service.py` → real RQ / no synchronous inference on `/upload`'s request path — changes the HTTP contract, needs LIT-157 (frontend polling, not started); that's LIT-150's job, being drafted separately in PR #17 without touching the routes. |
-| LIT-123 | Multi-task dataset ingestion core | FR2 | Ravindu | 🟢 | none | Parent of 141/142/208/181 below. |
+| LIT-211 | Forward/attention hook registration | FR1 | Tharusha | ✅ Done | LIT-207 (loose — same PR is fine) | **Merged (PR #12).** Unlocks all attribution work (FR8/FR9/FR17) — LIT-126/130/222 now unblocked. |
+| LIT-226 | Remove torchaudio, standardise on soundfile | infra | — | ✅ Done | none | **Merged (PR #9).** Unblocks LIT-165 (mutation engine), same `perturbation_service.py` file. |
+| LIT-227 | Layered migration (restructure ECHO code) | infra | Tharusha | ✅ Done | none | **Merged (PR #16 completed slice 2).** Incremental per SAD §8.2 — infra → registry → explanation code → orchestration → new features, system kept working at each step. Coordinate with LIT-207 (same registry work). **PR #13 (slice 1, merged):** infra/domain/orchestration skeleton stood up, `settings`/`redis`/`session` moved into `infrastructure`, `upload.py`↔`inferences.py` route coupling removed, 5 duplicated `get_session_id` defs collapsed, `pertubation_service.py` renamed, unused LRP import removed. **Correction:** this was then marked Done in Linear even though the DoD wasn't fully met (found via repo audit) — `domain`/`orchestration` were still empty placeholders (everything stayed flat in `app/services/`), and the "unreachable model option" dead-code item was still present. **PR #16 (slice 2):** actually moves every service into its real domain/infrastructure/orchestration home per SAD §5.1/§5.2, fixes `Toolbar.tsx`'s unreachable `whisper-large` option; investigated "orphaned visualisation components" and found none (all 5 files reachable). **Still open, deliberately out of scope:** `queue_service.py` → real RQ / no synchronous inference on `/upload`'s request path — changes the HTTP contract, needs LIT-157 (frontend polling, not started); that's LIT-150's job (merged as a draft via PR #17/#20 without touching the routes — but the real-RQ swap itself is still open, needs LIT-157). |
+| LIT-123 | Multi-task dataset ingestion core | FR2 | Ravindu | 🟢 **NEXT (claimed)** | none | Parent of 141/142/208/181 below. **Per the sequencing plan, one of the two "base first" issues — starts right after the LIT-150 fix PR merges; don't duplicate.** |
 | LIT-125 | Librosa DSP extraction pipeline (STFT/pYIN/RMS) | FR10 | Ravindu | 🟢 | none | Fully independent — no model or async-fabric dependency. |
 | LIT-145 | pYIN F0 tracking | FR10 | Ravindu | 🟢 | none | Sub-task of LIT-125. |
 | LIT-146 | RMS energy estimation | FR10 | Ravindu | 🟢 | none | Sub-task of LIT-125. |
@@ -65,9 +83,9 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-127 | Deploy RQ broker | FR3 | Rahim | 🟢 | **LIT-225** | |
+| LIT-127 | Deploy RQ broker | FR3 | Rahim | 🟢 **NEXT (claimed)** | **LIT-225** ✅ | Blocker LIT-225 is merged → **unblocked.** Per the sequencing plan, the second "base first" issue (starts right after the LIT-150 fix PR merges), then its critical path is worked step by step (→ LIT-149 → orchestrator wiring → LIT-131/157). Don't duplicate. |
 | LIT-149 | RQ worker scaffolding | FR3 | Rahim | 🟢 | LIT-127 (parent) | |
-| LIT-150 | ASR+SER+ADD orchestrator | FR3 | Rahim | 🟢 | LIT-127, LIT-225 | Real fan-in logic — reuses the pattern LIT-225 proves out. |
+| LIT-150 | ASR+SER+ADD orchestrator | FR3 | Rahim | 🔵 Re-add in review (PR #22) | LIT-127, LIT-225 | **Churny history:** draft merged (PR #17) → reverted (#19) → re-applied (#20) → **#21 merged 2026-08-05, DELETING it (service + test) from `develop`.** The CI failure #21 cited was a post-migration import break, not a logic bug. **PR #22 re-adds the orchestrator with imports fixed** (`..core`→`..infrastructure`, `.fanout`→`..orchestration`, `.model_loader`→`..domain`) + restored test; backend 149 passed / 2 skipped, frontend green. ⚠ Still a draft that landed ahead of its LIT-127 blocker; the synchronous `/upload` → real-RQ swap it needs is still open (LIT-157). **Don't build on `app/services/multitask_orchestrator_service.py` until #22 merges.** |
 
 ### Tier 3 — Model integration (blocked by the registry + relevant datasets)
 
