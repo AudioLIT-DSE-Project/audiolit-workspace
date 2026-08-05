@@ -179,9 +179,10 @@ class TestCorpusRegistry:
 
     def test_pending_loader_raises_with_owner_issue(self):
         # Concrete loaders not yet contributed must signal that honestly.
+        # (asvspoof-2021 now has a loader via LIT-142; librispeech is still pending.)
         with pytest.raises(NotImplementedError) as exc:
-            get_loader("asvspoof-2021")
-        assert "LIT-142" in str(exc.value)
+            get_loader("librispeech")
+        assert "LIT-141" in str(exc.value)
 
 
 def _write_cv_catalog(tmp_path: Path, *, columns: str = "processed") -> tuple[Path, Path]:
