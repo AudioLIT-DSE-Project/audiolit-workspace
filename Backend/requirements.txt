@@ -1,7 +1,10 @@
-fastapi>=0.100.0
-uvicorn[standard]>=0.23.0
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29
 aiofiles>=23.0.0
 librosa>=0.10.0
 soundfile>=0.12.1
 python-multipart>=0.0.6
-pydantic>=2.0
+pydantic>=2.6
+redis>=5.0,<6.0  
+rq>=1.16,<2.0
+fakeredis>=2.20,<3.0
