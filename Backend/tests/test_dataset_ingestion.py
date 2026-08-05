@@ -16,6 +16,7 @@ import soundfile as sf
 from app.infrastructure.dataset_ingestion import (
     CORPUS_REGISTRY,
     ColumnMap,
+    CommonVoiceLoader,
     CsvCatalogLoader,
     TARGET_SAMPLE_RATE,
     TaskFamily,
@@ -177,7 +178,89 @@ class TestCorpusRegistry:
             get_corpus_spec("not-a-corpus")
 
     def test_pending_loader_raises_with_owner_issue(self):
-        # Concrete loaders are child issues; the core must signal that honestly.
+        # Concrete loaders not yet contributed must signal that honestly.
         with pytest.raises(NotImplementedError) as exc:
             get_loader("asvspoof-2021")
         assert "LIT-142" in str(exc.value)
+
+
+def _write_cv_catalog(tmp_path: Path, *, columns: str = "processed") -> tuple[Path, Path]:
+    """Write a tiny Common Voice-shaped catalog + clips. ``columns`` selects the
+    processed export schema (filename/accent) or the raw CV schema (path/accents).
+    """
+    audio_dir = tmp_path / "common_voice_valid_dev"
+    audio_dir.mkdir()
+    file_col, accent_col = ("filename", "accent") if columns == "processed" else ("path", "accents")
+    rows = []
+    for i in range(4):
+        fname = f"cv_{i}.wav"
+        _write_tone(audio_dir / fname, sr=48_000, seconds=0.25)  # CV clips are 48 kHz
+        rows.append(
+            {
+                file_col: fname if columns == "processed" else f"clips/{fname}",
+                "sentence": f"the quick brown fox {i}",
+                accent_col: "us" if i % 2 == 0 else "england",
+                "age": "twenties",
+                "gender": "female" if i % 2 == 0 else "male",
+                "client_id": f"cvspk{i}",
+                "locale": "en",
+            }
+        )
+    catalog = audio_dir / "common_voice_valid_data_metadata.csv"
+    with catalog.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    return catalog, audio_dir
+
+
+class TestCommonVoiceLoader:
+    def test_maps_processed_catalog_schema(self, tmp_path: Path):
+        catalog, audio_dir = _write_cv_catalog(tmp_path, columns="processed")
+        loader = CommonVoiceLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+
+        samples = list(loader)
+        assert loader.task_family is TaskFamily.ASR
+        assert len(samples) == 4
+        s0 = samples[0]
+        assert s0.label == "the quick brown fox 0"          # 'sentence' column
+        assert s0.accent == "us"
+        assert s0.speaker_id == "cvspk0"
+        assert s0.language == "en"
+        assert s0.demographic == {"age": "twenties", "gender": "female"}
+        assert s0.license == "CC0-1.0"
+        assert s0.audio_path.name == "cv_0.wav"
+
+    def test_falls_back_to_raw_cv_schema(self, tmp_path: Path):
+        # Raw Common Voice uses 'path' and 'accents' instead of 'filename'/'accent'.
+        catalog, audio_dir = _write_cv_catalog(tmp_path, columns="raw")
+        loader = CommonVoiceLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+
+        s0 = next(iter(loader))
+        assert s0.audio_path.name == "cv_0.wav"             # basename from 'clips/cv_0.wav'
+        assert s0.accent == "us"                            # resolved from 'accents'
+
+    def test_load_audio_standardizes_48k_to_16k_mono(self, tmp_path: Path):
+        catalog, audio_dir = _write_cv_catalog(tmp_path)
+        loader = CommonVoiceLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        audio, sr = loader.load_sample_audio(next(iter(loader)))
+        assert sr == TARGET_SAMPLE_RATE
+        assert audio.ndim == 1 and audio.dtype == np.float32
+
+    def test_registry_get_loader_returns_common_voice(self, tmp_path: Path):
+        catalog, audio_dir = _write_cv_catalog(tmp_path)
+        loader = get_loader("common-voice", catalog_path=catalog, audio_base_dir=audio_dir)
+        assert isinstance(loader, CommonVoiceLoader)
+        assert len(list(loader)) == 4
+
+    @pytest.mark.skipif(
+        not CommonVoiceLoader.DEFAULT_CATALOG.exists(),
+        reason="real Common Voice data not provisioned (Backend/data/ is gitignored)",
+    )
+    def test_real_catalog_loads_when_present(self):
+        loader = CommonVoiceLoader()
+        first = next(iter(loader.stream(limit=1)))
+        assert first.dataset == "common-voice"
+        assert first.label  # every validated CV clip has a transcript
+        audio, sr = loader.load_sample_audio(first)
+        assert sr == TARGET_SAMPLE_RATE and audio.ndim == 1
