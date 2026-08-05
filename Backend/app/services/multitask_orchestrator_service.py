@@ -5,11 +5,9 @@ DRAFT -- LIT-150 is assigned to Rahim in Linear; this is a head start for
 his review/takeover, not a claim on the issue.
 
 Extends LIT-225's stub fan-out/fan-in prototype (fanout_orchestrator_service.py)
-with real inference: ASR (Whisper) and SER (Wav2Vec2 emotion) run as actual
-parallel RQ child jobs, reusing the same job-dependency fan-in pattern (see
-docs/rq_fanout_pattern.md). ADD (deepfake detection) has no integrated model
-yet -- LIT-128 is still Todo -- so its child job returns a typed
-ADD_NOT_IMPLEMENTED result rather than a fabricated score.
+with real inference: ASR (Whisper), SER (Wav2Vec2 emotion) and ADD (Wav2Vec2
+binary deepfake detection, LIT-128) all run as actual parallel RQ child jobs,
+reusing the same job-dependency fan-in pattern (see docs/rq_fanout_pattern.md).
 
 Deliberately NOT wired into the /upload or /inferences/run HTTP routes: doing
 so changes their response contract from an inline result to a job id the
@@ -27,6 +25,7 @@ from rq.job import Dependency, Job
 from ..infrastructure.rq_connection import get_redis_connection
 from ..orchestration.fanout_orchestrator_service import CHILD_JOB_RETRY, _publish_progress
 from ..domain.model_loader_service import (
+    predict_deepfake,
     predict_emotion_wave2vec,
     transcribe_whisper_base,
     transcribe_whisper_large,
@@ -36,8 +35,6 @@ ASR_QUEUE_NAME = "multitask_asr"
 SER_QUEUE_NAME = "multitask_ser"
 ADD_QUEUE_NAME = "multitask_add"
 AGGREGATOR_QUEUE_NAME = "multitask_aggregator"
-
-ADD_NOT_IMPLEMENTED = "ADD_NOT_IMPLEMENTED"
 
 
 def run_asr_job(file_path: str, model: str = "whisper-base") -> dict[str, Any]:
@@ -70,16 +67,17 @@ def run_ser_job(file_path: str) -> dict[str, Any]:
 
 
 def run_add_job(file_path: str) -> dict[str, Any]:
-    """No deepfake classifier is integrated yet (LIT-128 not started). Return
-    a typed not-implemented marker instead of a fabricated score -- same
-    anti-fabrication principle as HookManager's UNSUPPORTED_ARCHITECTURE and
-    the ModelRegistry's typed errors elsewhere in this codebase.
-    """
+    """Real binary audio-deepfake detection (LIT-128), run as an RQ child job."""
     conn = get_redis_connection()
     job = get_current_job()
     if job is not None:
+        _publish_progress(conn, job.id, "add", 0.5)
+
+    prediction = predict_deepfake(file_path)
+
+    if job is not None:
         _publish_progress(conn, job.id, "add", 1.0)
-    return {"task_name": "add", "status": ADD_NOT_IMPLEMENTED}
+    return {"task_name": "add", **prediction}
 
 
 def aggregate_multitask(child_job_ids: list[str]) -> dict[str, Any]:
