@@ -15,6 +15,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
+          cache-dependency-path: Frontend/package-lock.json
       - name: Install Dependencies
         run: |
           cd Frontend
@@ -36,13 +38,26 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          # Cache pip's wheel downloads, keyed on requirements.txt. On a cache
+          # hit the heavy wheels (torch/transformers/umap/...) aren't re-fetched.
+          cache: 'pip'
+          cache-dependency-path: Backend/requirements.txt
       - name: Install Dependencies
         run: |
           cd Backend
           python -m pip install --upgrade pip
+          # CPU-only torch: the default Linux torch wheel is the multi-GB CUDA
+          # build, but the runners are CPU-only. Pull the much smaller CPU wheel
+          # from PyTorch's CPU index (its deps resolve from PyPI). requirements'
+          # torch>=2.6.0 is then already satisfied, so the -r install won't
+          # re-fetch it. This shrinks both the download and the cache entry.
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
           python -m pip install -r requirements.txt pytest httpx
+      - name: Verify torch is the CPU build
+        run: |
+          cd Backend
+          python -c "import torch; print('torch', torch.__version__, '| cuda_available', torch.cuda.is_available())"
       - name: Run Pytest
         run: |
           cd Backend
           pytest
-
