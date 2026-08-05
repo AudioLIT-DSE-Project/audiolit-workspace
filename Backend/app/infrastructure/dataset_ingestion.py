@@ -313,6 +313,107 @@ class CommonVoiceLoader(CsvCatalogLoader):
         )
 
 
+# ASVspoof labels are the tokens "bonafide" / "spoof"; normalize to these.
+BONA_FIDE = "bona-fide"
+SPOOF = "spoof"
+_ASVSPOOF_LABEL_TOKENS = {"bonafide": BONA_FIDE, "spoof": SPOOF}
+ASVSPOOF_LICENSE = "ASVspoof 2021 DF — research use only"
+
+
+class ASVspoofLoader(DatasetLoader):
+    """Loader for the ASVspoof 2021 DF deepfake benchmark (LIT-142; FR7 eval set).
+
+    The protocol / label file is whitespace-delimited with no header. The
+    bona-fide vs spoof tag is read by scanning each line for the
+    ``bonafide`` / ``spoof`` token, so both the ASVspoof 2019 LA CM protocol
+    (``SPEAKER FILE - SYSTEM bonafide``) and the 2021 DF ``trial_metadata.txt``
+    layout (``SPEAKER FILE codec source attack spoof …``) load through the same
+    path. Audio is the per-utterance FLAC named by the file-id column,
+    standardised to 16 kHz mono like every other loader.
+
+    Research-use-only corpus (SAD constraint C5): a licence notice is logged the
+    first time samples are read. Paths default to the real data location but are
+    injectable for tests.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "asvspoof2021_df"
+    DEFAULT_PROTOCOL = DEFAULT_DIR / "trial_metadata.txt"
+
+    def __init__(
+        self,
+        protocol_path: Optional[Path | str] = None,
+        audio_base_dir: Optional[Path | str] = None,
+        *,
+        audio_ext: str = ".flac",
+        file_col: int = 1,
+        speaker_col: int = 0,
+        name: str = "asvspoof-2021",
+    ):
+        super().__init__(name=name, task_family=TaskFamily.DEEPFAKE, license=ASVSPOOF_LICENSE)
+        self.protocol_path = Path(protocol_path or self.DEFAULT_PROTOCOL)
+        self.audio_base_dir = Path(audio_base_dir or self.DEFAULT_DIR)
+        self.audio_ext = audio_ext
+        self.file_col = file_col
+        self.speaker_col = speaker_col
+        self._notice_logged = False
+
+    def iter_metadata(self) -> Iterator[SampleMetadata]:
+        if not self.protocol_path.exists():
+            raise FileNotFoundError(
+                f"ASVspoof protocol for '{self.name}' not found: {self.protocol_path}"
+            )
+        if not self._notice_logged:
+            logger.warning(
+                "ASVspoof 2021 DF is a research-use-only corpus (SAD C5) — "
+                "ensure your use complies with its licence."
+            )
+            self._notice_logged = True
+
+        with self.protocol_path.open("r", encoding="utf-8") as fh:
+            for index, line in enumerate(fh):
+                tokens = line.split()
+                if not tokens:
+                    continue
+
+                label = self._extract_label(tokens)
+                if label is None:
+                    logger.warning(
+                        "Skipping ASVspoof line %d: no bonafide/spoof token in %r",
+                        index,
+                        line.strip(),
+                    )
+                    continue
+                if self.file_col >= len(tokens):
+                    logger.warning(
+                        "Skipping ASVspoof line %d: no file id at column %d",
+                        index,
+                        self.file_col,
+                    )
+                    continue
+
+                file_id = tokens[self.file_col]
+                speaker = tokens[self.speaker_col] if self.speaker_col < len(tokens) else None
+                filename = file_id if Path(file_id).suffix else f"{file_id}{self.audio_ext}"
+
+                yield SampleMetadata(
+                    dataset=self.name,
+                    sample_id=file_id,
+                    audio_path=self.audio_base_dir / Path(filename).name,
+                    task_family=TaskFamily.DEEPFAKE,
+                    label=label,
+                    speaker_id=speaker,
+                    license=self.license,
+                )
+
+    @staticmethod
+    def _extract_label(tokens: List[str]) -> Optional[str]:
+        for token in tokens:
+            normalized = _ASVSPOOF_LABEL_TOKENS.get(token.strip().lower())
+            if normalized is not None:
+                return normalized
+        return None
+
+
 @dataclass
 class CorpusSpec:
     """A registry entry: what a corpus is, and how (or whether yet) to load it.
@@ -340,7 +441,7 @@ CORPUS_REGISTRY: Dict[str, CorpusSpec] = {
     "ravdess": CorpusSpec("ravdess", TaskFamily.SER, "CC-BY-NC-SA-4.0", owner_issue="LIT-208"),
     "esd": CorpusSpec("esd", TaskFamily.SER, "Research-only", owner_issue="LIT-208"),
     "l2-arctic": CorpusSpec("l2-arctic", TaskFamily.ASR, "Research-only", owner_issue="LIT-181"),
-    "asvspoof-2021": CorpusSpec("asvspoof-2021", TaskFamily.DEEPFAKE, "ODC-By", owner_issue="LIT-142"),
+    "asvspoof-2021": CorpusSpec("asvspoof-2021", TaskFamily.DEEPFAKE, ASVSPOOF_LICENSE, loader_factory=ASVspoofLoader, owner_issue="LIT-142"),
 }
 
 
