@@ -107,6 +107,20 @@ def load_standardized_audio(
     return np.ascontiguousarray(mono, dtype=np.float32), target_sr
 
 
+# Reject empty or all-silence clips before they reach an evaluation batch
+# (LIT-141 DoD: "remove corrupted frames or empty silence buffers"). RMS below
+# this floor means effectively no signal.
+SILENCE_RMS_FLOOR = 1e-4
+
+
+def is_silent(audio: np.ndarray, rms_floor: float = SILENCE_RMS_FLOOR) -> bool:
+    """True if the waveform is empty or below the silence RMS floor."""
+    if audio.size == 0:
+        return True
+    rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64))))
+    return rms < rms_floor
+
+
 class DatasetLoader(ABC):
     """Common interface every corpus loader exposes.
 
@@ -313,6 +327,73 @@ class CommonVoiceLoader(CsvCatalogLoader):
         )
 
 
+class LibriSpeechLoader(DatasetLoader):
+    """Loader for LibriSpeech (ASR; LIT-141).
+
+    LibriSpeech has no single catalog: transcripts live in per-chapter
+    ``<speaker>-<chapter>.trans.txt`` files (each line ``<utt-id> <TRANSCRIPT>``)
+    beside the utterance ``.flac`` files, under ``<root>/<speaker>/<chapter>/``.
+    This walks that tree. Speaker gender is read from the root
+    ``SPEAKERS.TXT`` (``ID | SEX | SUBSET | MINUTES | NAME``) when present, and
+    exposed as demographic metadata. Audio is standardised to 16 kHz mono.
+
+    Paths default to the real data location but are injectable for tests.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "librispeech"
+
+    def __init__(
+        self,
+        root_dir: Optional[Path | str] = None,
+        *,
+        speakers_file: Optional[Path | str] = None,
+        name: str = "librispeech",
+    ):
+        super().__init__(name=name, task_family=TaskFamily.ASR, license="CC-BY-4.0")
+        self.root_dir = Path(root_dir or self.DEFAULT_DIR)
+        self.speakers_file = Path(speakers_file) if speakers_file else self.root_dir / "SPEAKERS.TXT"
+
+    def iter_metadata(self) -> Iterator[SampleMetadata]:
+        if not self.root_dir.exists():
+            raise FileNotFoundError(
+                f"LibriSpeech root for '{self.name}' not found: {self.root_dir}"
+            )
+        genders = self._load_speaker_genders()
+
+        for trans_file in sorted(self.root_dir.rglob("*.trans.txt")):
+            with trans_file.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.strip().split(maxsplit=1)
+                    if len(parts) != 2:
+                        continue
+                    utt_id, transcript = parts
+                    speaker = utt_id.split("-")[0]
+                    demographic = {"gender": genders[speaker]} if speaker in genders else {}
+                    yield SampleMetadata(
+                        dataset=self.name,
+                        sample_id=utt_id,
+                        audio_path=trans_file.parent / f"{utt_id}.flac",
+                        task_family=TaskFamily.ASR,
+                        label=transcript,
+                        speaker_id=speaker,
+                        license=self.license,
+                        demographic=demographic,
+                    )
+
+    def _load_speaker_genders(self) -> Dict[str, str]:
+        """Parse SPEAKERS.TXT (``ID | SEX | …``) into {speaker_id: gender}."""
+        genders: Dict[str, str] = {}
+        if not self.speakers_file.exists():
+            return genders
+        sex_map = {"M": "male", "F": "female"}
+        with self.speakers_file.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith(";"):  # header/comment lines
+                    continue
+                cols = [c.strip() for c in line.split("|")]
+                if len(cols) >= 2 and cols[0]:
+                    genders[cols[0]] = sex_map.get(cols[1].upper(), cols[1])
+        return genders
 # ASVspoof labels are the tokens "bonafide" / "spoof"; normalize to these.
 BONA_FIDE = "bona-fide"
 SPOOF = "spoof"
@@ -436,7 +517,7 @@ class CorpusSpec:
 # core owns the registry, the schema, and the standardiser.
 CORPUS_REGISTRY: Dict[str, CorpusSpec] = {
     "common-voice": CorpusSpec("common-voice", TaskFamily.ASR, "CC0-1.0", loader_factory=CommonVoiceLoader, owner_issue="LIT-141"),
-    "librispeech": CorpusSpec("librispeech", TaskFamily.ASR, "CC-BY-4.0", owner_issue="LIT-141"),
+    "librispeech": CorpusSpec("librispeech", TaskFamily.ASR, "CC-BY-4.0", loader_factory=LibriSpeechLoader, owner_issue="LIT-141"),
     "crema-d": CorpusSpec("crema-d", TaskFamily.SER, "Open Database License", owner_issue="LIT-208"),
     "ravdess": CorpusSpec("ravdess", TaskFamily.SER, "CC-BY-NC-SA-4.0", owner_issue="LIT-208"),
     "esd": CorpusSpec("esd", TaskFamily.SER, "Research-only", owner_issue="LIT-208"),
