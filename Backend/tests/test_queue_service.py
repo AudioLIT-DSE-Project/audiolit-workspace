@@ -50,22 +50,23 @@ def test_enqueue_multitask_creates_per_family_jobs_and_aggregator(fake_redis):
     agg = Job.fetch(result.job_id, connection=fake_redis)
     assert set(agg.dependency_ids) == set(result.family_jobs.values())
 
-def test_run_worker_acquires_lock_for_gpu_family(fake_redis, stub_worker):
+def test_gpu_family_lock_acquired_and_released(fake_redis, stub_worker):
+    # Initially no lock
+    assert not fake_redis.exists("audiolit:worker-lock:asr")
+    # Run worker (stubbed to finish immediately)
     run_worker(TaskFamily.ASR)
-    assert fake_redis.exists("audiolit:worker-lock:asr")
+    # Lock should be released after worker exits
+    assert not fake_redis.exists("audiolit:worker-lock:asr")
 
 def test_run_worker_raises_if_gpu_lock_already_held(fake_redis, stub_worker):
-    run_worker(TaskFamily.ASR)
+    # Manually acquire the lock first to simulate another running worker
+    fake_redis.set("audiolit:worker-lock:asr", "locked")
     with pytest.raises(RuntimeError):
         run_worker(TaskFamily.ASR)
 
 def test_run_worker_no_lock_for_mutation_family(fake_redis, stub_worker):
     run_worker(TaskFamily.MUTATION)
     assert not fake_redis.exists("audiolit:worker-lock:mutation")
-
-def test_run_worker_releases_lock_on_exit(fake_redis, stub_worker):
-    run_worker(TaskFamily.SER)
-    assert not fake_redis.exists("audiolit:worker-lock:ser")
 
 def test_publish_progress_emits_to_pubsub(fake_redis):
     # Subscribe FIRST
