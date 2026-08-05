@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from itertools import islice
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Union
 
 import librosa
 import numpy as np
@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 # Every corpus is standardized to this rate, single channel — the input contract
 # shared by the Whisper (ASR) and Wav2Vec2 (SER/deepfake) model families.
 TARGET_SAMPLE_RATE = 16_000
+
+# Benchmark corpora live under Backend/data/ (gitignored — provisioned locally,
+# not committed). Resolved the same way as the existing dataset_service.py:
+# app/infrastructure/dataset_ingestion.py -> parents[2] == Backend/.
+DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 
 class TaskFamily(str, Enum):
@@ -155,6 +160,13 @@ class DatasetLoader(ABC):
         return self.iter_metadata()
 
 
+# A catalog field may be named differently across corpora (Common Voice's audio
+# column is ``path``, a processed export may call it ``filename``), so each
+# mapping accepts either a single column name or an ordered list of candidates —
+# the first one present in a row wins.
+ColumnRef = Union[str, Sequence[str]]
+
+
 @dataclass
 class ColumnMap:
     """Maps a corpus catalog's columns onto :class:`SampleMetadata` fields.
@@ -162,14 +174,15 @@ class ColumnMap:
     Only ``filename`` and ``label`` are usually required; the rest are wired up
     per corpus (e.g. Common Voice exposes ``accent``/``gender``/``age``, RAVDESS
     encodes emotion in the filename so its loader overrides parsing entirely).
+    Each field may be a single column name or a list of fallback candidates.
     """
 
-    filename: str = "filename"
-    label: Optional[str] = None
-    sample_id: Optional[str] = None
-    speaker_id: Optional[str] = None
-    accent: Optional[str] = None
-    language: Optional[str] = None
+    filename: ColumnRef = "filename"
+    label: Optional[ColumnRef] = None
+    sample_id: Optional[ColumnRef] = None
+    speaker_id: Optional[ColumnRef] = None
+    accent: Optional[ColumnRef] = None
+    language: Optional[ColumnRef] = None
     demographic: tuple[str, ...] = ()
 
 
@@ -215,10 +228,10 @@ class CsvCatalogLoader(DatasetLoader):
                     if k is not None
                 }
 
-                filename = row.get(cmap.filename.lower())
+                filename = self._resolve(row, cmap.filename)
                 if not filename:
                     logger.warning(
-                        "Skipping row %d in %s: no '%s' column value",
+                        "Skipping row %d in %s: no value for column(s) %s",
                         index,
                         self.name,
                         cmap.filename,
@@ -233,22 +246,71 @@ class CsvCatalogLoader(DatasetLoader):
 
                 yield SampleMetadata(
                     dataset=self.name,
-                    sample_id=self._lookup(row, cmap.sample_id) or filename,
+                    sample_id=self._resolve(row, cmap.sample_id) or filename,
                     audio_path=self.audio_base_dir / Path(filename).name,
                     task_family=self.task_family,
-                    label=self._lookup(row, cmap.label),
-                    speaker_id=self._lookup(row, cmap.speaker_id),
-                    accent=self._lookup(row, cmap.accent),
-                    language=self._lookup(row, cmap.language),
+                    label=self._resolve(row, cmap.label),
+                    speaker_id=self._resolve(row, cmap.speaker_id),
+                    accent=self._resolve(row, cmap.accent),
+                    language=self._resolve(row, cmap.language),
                     license=self.license,
                     demographic=demographic,
                 )
 
     @staticmethod
-    def _lookup(row: Dict[str, str], column: Optional[str]) -> Optional[str]:
-        if not column:
+    def _resolve(row: Dict[str, str], ref: Optional[ColumnRef]) -> Optional[str]:
+        """Return the first non-empty value among ``ref``'s candidate columns."""
+        if not ref:
             return None
-        return row.get(column.lower()) or None
+        candidates = (ref,) if isinstance(ref, str) else ref
+        for column in candidates:
+            value = row.get(column.lower())
+            if value:
+                return value
+        return None
+
+
+class CommonVoiceLoader(CsvCatalogLoader):
+    """Concrete loader for the Mozilla Common Voice validated-dev subset (ASR).
+
+    Wired to the real catalog under ``Backend/data/common_voice_valid_dev/`` (see
+    the existing ``dataset_service.py`` for the same paths). Common Voice carries
+    the accent/age/gender labels the FR15 bias work depends on, and its
+    transcript column is ``sentence``. Column names are given as candidate lists
+    so both the raw Common Voice ``.tsv`` schema (``path``, ``accents``) and the
+    repo's processed ``…_metadata.csv`` export (``filename``, ``accent``) load
+    through the same mapping.
+
+    Paths default to the real data location but are injectable for tests.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "common_voice_valid_dev"
+    DEFAULT_CATALOG = DEFAULT_DIR / "common_voice_valid_data_metadata.csv"
+
+    COLUMN_MAP = ColumnMap(
+        filename=("filename", "path"),
+        label=("sentence", "transcript", "text"),
+        speaker_id=("client_id", "speaker_id"),
+        accent=("accent", "accents"),
+        language=("locale", "language"),
+        demographic=("age", "gender"),
+    )
+
+    def __init__(
+        self,
+        catalog_path: Optional[Path | str] = None,
+        audio_base_dir: Optional[Path | str] = None,
+        *,
+        name: str = "common-voice",
+    ):
+        super().__init__(
+            name=name,
+            task_family=TaskFamily.ASR,
+            catalog_path=catalog_path or self.DEFAULT_CATALOG,
+            audio_base_dir=audio_base_dir or self.DEFAULT_DIR,
+            column_map=self.COLUMN_MAP,
+            license="CC0-1.0",
+        )
 
 
 @dataclass
@@ -272,7 +334,7 @@ class CorpusSpec:
 # task family and licence. Concrete loaders are wired in by the child issues; the
 # core owns the registry, the schema, and the standardiser.
 CORPUS_REGISTRY: Dict[str, CorpusSpec] = {
-    "common-voice": CorpusSpec("common-voice", TaskFamily.ASR, "CC0-1.0", owner_issue="LIT-141"),
+    "common-voice": CorpusSpec("common-voice", TaskFamily.ASR, "CC0-1.0", loader_factory=CommonVoiceLoader, owner_issue="LIT-141"),
     "librispeech": CorpusSpec("librispeech", TaskFamily.ASR, "CC-BY-4.0", owner_issue="LIT-141"),
     "crema-d": CorpusSpec("crema-d", TaskFamily.SER, "Open Database License", owner_issue="LIT-208"),
     "ravdess": CorpusSpec("ravdess", TaskFamily.SER, "CC-BY-NC-SA-4.0", owner_issue="LIT-208"),
