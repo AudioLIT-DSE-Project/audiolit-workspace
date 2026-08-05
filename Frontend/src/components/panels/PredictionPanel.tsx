@@ -79,6 +79,7 @@ export interface UnifiedTaskResult {
     acoustic?: {
       spectrogram?: number[][];
       f0?: F0Point[];
+      waveform?: number[]; // Added waveform array
     };
   };
   cache_key?: string;
@@ -223,6 +224,7 @@ export const PredictionPanel = ({
   // Extract XAI and Acoustic data from unified result
   const xaiResult = unifiedResult?.tasks?.xai;
   const spectrogramData = unifiedResult?.tasks?.acoustic?.spectrogram;
+  const waveformData = unifiedResult?.tasks?.acoustic?.waveform || []; // Extract waveform
   const f0Data = unifiedResult?.tasks?.acoustic?.f0 || [];
 
   return (
@@ -405,6 +407,7 @@ export const PredictionPanel = ({
                 <XAIOverlayCanvas
                   audioDuration={audioDuration}
                   baseSpectrogram={spectrogramData}
+                  waveformData={waveformData} // Pass waveform data to canvas
                   xaiResults={xaiResult ? [xaiResult] : []}
                   f0Data={f0Data}
                   activeMethod={activeXAIMethod}
