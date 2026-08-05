@@ -31,7 +31,8 @@ def _clip(path: Path, sr: int = 16_000) -> None:
 @pytest.fixture
 def df_corpus(tmp_path: Path):
     """A 2021 DF-shaped protocol: SPEAKER FILE codec source attack LABEL trim subset."""
-    audio = tmp_path / "asvspoof2021_df"; audio.mkdir()
+    audio = tmp_path / "asvspoof2021_df"
+    audio.mkdir()
     rows = [
         "DF_0001 DF_E_2000001 nocodec asvspoof -   bonafide notrim eval",
         "DF_0002 DF_E_2000002 low_mp3 vcc2020  A14 spoof    notrim eval",
