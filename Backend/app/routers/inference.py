@@ -1,0 +1,146 @@
+"""
+FastAPI gateway routes for asynchronous inference (SRS FR3).
+
+The gateway **never** loads a model or runs inference; it dispatches to RQ
+workers via :mod:`app.services.queue_service` and returns immediately with
+a job id + WebSocket URL (SAD §5.1: the application layer contains no AI code).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
+
+from app.services.queue_service import (
+    PROGRESS_CHANNEL_PREFIX,
+    TaskFamily,
+    enqueue_attribution,
+    enqueue_multitask_analysis,
+    enqueue_mutation,
+    get_redis_connection,
+    job_status,
+)
+
+logger = logging.getLogger("audiolit.api.inference")
+router = APIRouter(prefix="/api", tags=["inference"])
+
+
+# ---------------------------------------------------------------------------
+# Schemas (FR3.3 — versioned, backward-compatible)
+# ---------------------------------------------------------------------------
+class MultiTaskRequest(BaseModel):
+    audio_ref: str = Field(..., description="Content-addressed audio ref (SHA-256)")
+    tasks: list[str] = Field(default_factory=lambda: ["asr", "ser", "add"])
+    model_ids: dict[str, str] = Field(default_factory=dict)
+    params: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    cache_key: str | None = None
+
+
+class AttributionRequest(BaseModel):
+    audio_ref: str
+    model_id: str
+    method: str = Field(..., description="ig | lime | shap | gradcam")
+    params: dict[str, Any] = Field(default_factory=dict)
+    cache_key: str | None = None
+
+
+class MutationRequest(BaseModel):
+    audio_ref: str
+    mutation: dict[str, Any]
+
+
+class JobResponse(BaseModel):
+    job_id: str
+    websocket_url: str
+    schema_version: str
+    family_jobs: dict[str, str]
+    cache_key: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Routes — enqueue and return immediately
+# ---------------------------------------------------------------------------
+@router.post("/inference/multitask", response_model=JobResponse)
+async def post_multitask(req: MultiTaskRequest) -> JobResponse:
+    """Enqueue a multi-task analysis; return immediately (SRS FR3)."""
+    result = enqueue_multitask_analysis(
+        audio_ref=req.audio_ref,
+        tasks=[TaskFamily(t) for t in req.tasks],
+        model_ids={TaskFamily(k): v for k, v in req.model_ids.items()},
+        params={TaskFamily(k): v for k, v in req.params.items()},
+        cache_key=req.cache_key,
+    )
+    return JobResponse(**result.as_response())
+
+
+@router.post("/inference/attribution", response_model=JobResponse)
+async def post_attribution(req: AttributionRequest) -> JobResponse:
+    """Enqueue a single attribution job (SRS FR7–FR9)."""
+    result = enqueue_attribution(
+        audio_ref=req.audio_ref,
+        model_id=req.model_id,
+        method=req.method,
+        params=req.params,
+        cache_key=req.cache_key,
+    )
+    return JobResponse(**result.as_response())
+
+
+@router.post("/inference/mutation", response_model=JobResponse)
+async def post_mutation(req: MutationRequest) -> JobResponse:
+    """Enqueue a CPU-only mutation job (SRS FR12)."""
+    result = enqueue_mutation(
+        audio_ref=req.audio_ref,
+        mutation=req.mutation,
+    )
+    return JobResponse(**result.as_response())
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str) -> dict[str, Any]:
+    """Long-polling fallback for task state (SRS FR3.2)."""
+    return job_status(job_id)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — stream progress events (FR3.2)
+# ---------------------------------------------------------------------------
+@router.websocket("/ws/jobs/{job_id}")
+async def job_progress_ws(websocket: WebSocket, job_id: str) -> None:
+    """
+    Stream progress events for *job_id* over WebSocket (SRS FR3.2).
+
+    Subscribes to the Redis pub/sub channel that workers publish to via
+    :func:`queue_service.publish_progress`. Uses ``run_in_executor`` so the
+    synchronous ``redis-py`` pub/sub call does not block the event loop.
+    """
+    await websocket.accept()
+    conn = get_redis_connection()
+    channel = f"{PROGRESS_CHANNEL_PREFIX}:{job_id}".encode()
+    ps = conn.pubsub()
+    ps.subscribe(channel)
+    loop = asyncio.get_running_loop()
+    try:
+        await websocket.send_text(
+            json.dumps({"job_id": job_id, "stage": "subscribed"})
+        )
+        while True:
+            msg = await loop.run_in_executor(None, ps.get_message, 1.0)
+            if msg is not None and msg.get("type") == "message":
+                await websocket.send_text(msg["data"].decode())
+            # Allow the event loop to process sends / disconnects.
+            await asyncio.sleep(0.01)
+    except WebSocketDisconnect:
+        logger.info("ws.disconnect job_id=%s", job_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("ws.error job_id=%s", job_id)
+    finally:
+        try:
+            ps.unsubscribe(channel)
+            ps.close()
+        except Exception:  # noqa: BLE001
+            pass
