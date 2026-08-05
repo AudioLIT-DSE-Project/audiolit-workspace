@@ -797,6 +797,90 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
         logger.debug("Emotion logits shape=%s, predicted=%s, label=%s", tuple(logits.shape), label_idx, predicted_emotion)
     return result
 
+# --- Audio deepfake (ADD) binary classifier (LIT-128, FR7) -------------------
+# Binary bona-fide vs synthetic detector, loaded lazily through the same
+# ModelRegistry path as every other model (never an import-time singleton).
+# NOTE: the checkpoint below is a placeholder default and should be verified /
+# swapped for the team's chosen ASVspoof-trained model (cf. LIT-224 for SER).
+_ADD_MODEL_ID = "MelodyMachine/Deepfake-audio-detection-V2"
+add_feature_extractor = None
+add_model = None
+
+# Canonical binary labels; a model's own label strings are normalized onto these.
+DEEPFAKE_BONA_FIDE = "bona-fide"
+DEEPFAKE_SPOOF = "spoof"
+
+
+def _normalize_deepfake_label(raw) -> str:
+    """Map a model's class label onto bona-fide / spoof.
+
+    Deepfake checkpoints name the two classes inconsistently (real/fake,
+    genuine/spoof, bonafide/synthetic, ...). Anything meaning 'generated' maps
+    to spoof; everything else to bona-fide.
+    """
+    key = str(raw).strip().lower()
+    if any(tok in key for tok in ("spoof", "fake", "synthetic", "generated", "deepfake")):
+        return DEEPFAKE_SPOOF
+    return DEEPFAKE_BONA_FIDE
+
+
+def ensure_add_model_loaded():
+    """Lazily load the deepfake classifier + feature extractor via ModelRegistry.
+
+    Mirrors ensure_emo_model_loaded (LIT-207 ingestion path); nothing loads
+    until the first prediction. Go through this function / the module globals,
+    never a bare `from ... import add_model`.
+    """
+    global add_feature_extractor, add_model
+    if add_model is None:
+        add_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(_ADD_MODEL_ID)
+        loaded = _model_registry.get(_ADD_MODEL_ID, model_class=Wav2Vec2ForSequenceClassification)
+        add_model = loaded.model
+    return add_feature_extractor, add_model, emo_device
+
+
+def predict_deepfake(audio_path):
+    """Binary audio-deepfake detection (FR7).
+
+    Returns the synthetic (spoof) probability and a confidence, plus the full
+    two-class distribution normalized onto bona-fide / spoof:
+
+        {
+          "predicted_label": "bona-fide" | "spoof",
+          "synthetic_probability": float,   # P(spoof)
+          "confidence": float,              # max class probability
+          "probabilities": {"bona-fide": float, "spoof": float},
+        }
+    """
+    ensure_add_model_loaded()
+    audio, rate = librosa.load(audio_path, sr=16000)
+    inputs = add_feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(emo_device)
+    attention_mask = inputs.attention_mask.to(emo_device) if "attention_mask" in inputs else None
+
+    with torch.no_grad():
+        outputs = add_model(input_values=input_values, attention_mask=attention_mask)
+        probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
+
+    id2label = add_model.config.id2label if isinstance(add_model.config.id2label, dict) else {}
+    class_probs = {DEEPFAKE_BONA_FIDE: 0.0, DEEPFAKE_SPOOF: 0.0}
+    for i, prob in enumerate(probs):
+        raw = id2label.get(i, id2label.get(str(i), f"label_{i}"))
+        class_probs[_normalize_deepfake_label(raw)] += float(prob.item())
+
+    predicted_label = (
+        DEEPFAKE_SPOOF
+        if class_probs[DEEPFAKE_SPOOF] >= class_probs[DEEPFAKE_BONA_FIDE]
+        else DEEPFAKE_BONA_FIDE
+    )
+    return {
+        "predicted_label": predicted_label,
+        "synthetic_probability": class_probs[DEEPFAKE_SPOOF],
+        "confidence": max(class_probs.values()),
+        "probabilities": class_probs,
+    }
+
+
 def wave2vec(audio_file_path: str, return_probabilities: bool = False):
     """
     Predict emotion using wav2vec2 model.
