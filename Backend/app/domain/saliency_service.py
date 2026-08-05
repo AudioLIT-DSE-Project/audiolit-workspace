@@ -513,3 +513,79 @@ def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam",
         return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
     else:
         raise ValueError(f"Unsupported model: {model}")
+
+
+# --- Grad-CAM (LIT-148, FR8) --------------------------------------------------
+# Class-discriminative attribution over a convolutional layer's spatial dims:
+# hook the target conv layer's activations (forward) and gradients (backward),
+# global-average-pool the gradients into per-channel weights, take a ReLU'd
+# weighted combination of the feature maps, and normalize to [0, 1]. Works for
+# Conv1d (attribution over time) and Conv2d (2D spectrogram attribution).
+
+
+def find_last_conv_layer(model: "torch.nn.Module") -> "torch.nn.Module":
+    """Return the last Conv1d/Conv2d module in ``model`` (Grad-CAM's usual target).
+
+    Grad-CAM hooks the final convolutional layer because it holds the highest-
+    level spatial features while still being spatially resolved.
+    """
+    last_conv = None
+    for module in model.modules():
+        if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d)):
+            last_conv = module
+    if last_conv is None:
+        raise ValueError("model has no Conv1d/Conv2d layer to attach Grad-CAM to")
+    return last_conv
+
+
+def compute_grad_cam(
+    model: "torch.nn.Module",
+    inputs: "torch.Tensor",
+    target_layer: "torch.nn.Module" = None,
+    target_index: Optional[int] = None,
+) -> np.ndarray:
+    """Grad-CAM attribution map for one input over ``target_layer``'s feature maps.
+
+    Registers a forward hook (activations) and a full backward hook (gradients)
+    on ``target_layer`` (defaults to the model's last conv layer), runs a
+    forward + backward pass for ``target_index`` (argmax class if None), and
+    returns the ReLU'd, [0, 1]-normalized weighted feature-map combination as a
+    numpy score matrix (shape = the conv layer's spatial dims). Hooks are always
+    removed, so this can be called repeatedly without leaking them.
+    """
+    if target_layer is None:
+        target_layer = find_last_conv_layer(model)
+
+    captured = {}
+
+    def _forward_hook(_module, _inp, output):
+        captured["activations"] = output.detach()
+
+    def _backward_hook(_module, _grad_in, grad_out):
+        captured["gradients"] = grad_out[0].detach()
+
+    fwd_handle = target_layer.register_forward_hook(_forward_hook)
+    bwd_handle = target_layer.register_full_backward_hook(_backward_hook)
+    try:
+        model.zero_grad(set_to_none=True)
+        outputs = model(inputs)
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs
+        if target_index is None:
+            target_index = int(torch.argmax(logits, dim=-1)[0])
+        logits[0, target_index].backward()
+
+        acts = captured["activations"][0]   # [C, *spatial]
+        grads = captured["gradients"][0]     # [C, *spatial]
+        spatial_dims = tuple(range(1, grads.dim()))
+        weights = grads.mean(dim=spatial_dims)                       # [C]
+        weights = weights.view([-1] + [1] * (acts.dim() - 1))        # broadcast over spatial
+        cam = torch.relu((weights * acts).sum(dim=0))                # [*spatial]
+
+        cam = cam - cam.min()
+        peak = cam.max()
+        if peak > 0:
+            cam = cam / peak
+        return cam.cpu().numpy()
+    finally:
+        fwd_handle.remove()
+        bwd_handle.remove()
