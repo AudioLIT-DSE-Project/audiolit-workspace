@@ -5,6 +5,7 @@ import { Progress } from "@/components/ui/progress";
 import { SaliencyVisualization } from "../visualization/SaliencyVisualization";
 import { AttentionVisualization } from "../visualization/AttentionVisualization";
 import { PerturbationTools } from "../analysis/PerturbationTools";
+import { XAIOverlayCanvas, XAIMethod, XAIResult, F0Point } from "../visualization/XAIOverlayCanvas";
 import { useState, useEffect } from "react";
 import { API_BASE } from '@/lib/api';
 import { AlertTriangle, ShieldCheck } from "lucide-react";
@@ -53,7 +54,7 @@ interface PerturbationResult {
   error?: string;
 }
 
-// New interfaces for the Unified RQ Fan-in Result
+// Interfaces for the Unified RQ Fan-in Result
 export interface ASRToken {
   text: string;
   start: number;
@@ -74,6 +75,11 @@ export interface UnifiedTaskResult {
       label: 'bona-fide' | 'synthetic';
       confidence: number;
     };
+    xai?: XAIResult;
+    acoustic?: {
+      spectrogram?: number[][];
+      f0?: F0Point[];
+    };
   };
   cache_key?: string;
 }
@@ -87,8 +93,8 @@ interface PredictionPanelProps {
   onPerturbationComplete?: (result: PerturbationResult) => void;
   onPredictionRefresh?: (file: UploadedFile, prediction: string) => void;
   onPredictionUpdate?: (fileId: string, prediction: string) => void;
-  unifiedResult?: UnifiedTaskResult | null; // New prop for RQ result
-  audioDuration?: number; // New prop for timeline scaling
+  unifiedResult?: UnifiedTaskResult | null; 
+  audioDuration?: number; 
 }
 
 export const PredictionPanel = ({ 
@@ -112,6 +118,9 @@ export const PredictionPanel = ({
   const [perturbedFile, setPerturbedFile] = useState<UploadedFile | null>(null);
   const [isLoadingPerturbed, setIsLoadingPerturbed] = useState(false);
   const [hoveredToken, setHoveredToken] = useState<ASRToken | null>(null);
+  
+  // State for dynamic XAI canvas layer opacity swapping
+  const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('saliency');
 
   // Handle perturbation completion
   const handlePerturbationComplete = async (result: PerturbationResult) => {
@@ -210,6 +219,11 @@ export const PredictionPanel = ({
   const addResult = unifiedResult?.tasks?.add;
   const serResult = unifiedResult?.tasks?.ser;
   const asrResult = unifiedResult?.tasks?.asr;
+  
+  // Extract XAI and Acoustic data from unified result
+  const xaiResult = unifiedResult?.tasks?.xai;
+  const spectrogramData = unifiedResult?.tasks?.acoustic?.spectrogram;
+  const f0Data = unifiedResult?.tasks?.acoustic?.f0 || [];
 
   return (
     <div className="h-full bg-panel-background border-t border-border flex flex-col">
@@ -256,7 +270,7 @@ export const PredictionPanel = ({
         </div>
 
         <div className="flex-1 overflow-auto bg-background">
-          {/* New Analytics Tab Content for Unified RQ Results */}
+          {/* Analytics Tab Content for Unified RQ Results */}
           <TabsContent value="analytics" className="m-0 h-full p-3 space-y-4">
             
             {/* Interactive ASR Token Timeline */}
@@ -366,9 +380,46 @@ export const PredictionPanel = ({
 
           </TabsContent>
 
-          {/* Existing Tabs */}
+          {/* Saliency Tab with integrated XAI Canvas */}
           <TabsContent value="saliency" className="m-0 h-full">
-            <div className="p-3">
+            <div className="p-3 space-y-4">
+              {/* Dynamic XAI Method Toggle Buttons */}
+              <div className="flex gap-2 mb-2">
+                {(['saliency', 'shap', 'lime', 'ig'] as XAIMethod[]).map(m => (
+                  <button 
+                    key={m} 
+                    onClick={() => setActiveXAIMethod(m)}
+                    className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                      activeXAIMethod === m 
+                        ? 'bg-primary text-primary-foreground border-primary' 
+                        : 'bg-muted text-muted-foreground border-border hover:bg-accent'
+                    }`}
+                  >
+                    {m.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+
+              {/* New High-Performance XAI Overlay Canvas */}
+              {spectrogramData || xaiResult ? (
+                <XAIOverlayCanvas
+                  audioDuration={audioDuration}
+                  baseSpectrogram={spectrogramData}
+                  xaiResults={xaiResult ? [xaiResult] : []}
+                  f0Data={f0Data}
+                  activeMethod={activeXAIMethod}
+                  width={800}
+                  height={400}
+                />
+              ) : (
+                <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
+                  <CardContent className="text-center text-muted-foreground">
+                    <p className="text-sm">Awaiting XAI & Spectrogram data from worker...</p>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Existing inherited Saliency Visualization */}
               <SaliencyVisualization
                 selectedFile={selectedFile || selectedEmbeddingFile}
                 model={model}
