@@ -74,10 +74,22 @@ class TestRealSerJob:
         assert result == {"task_name": "ser", **fake_prediction}
 
 
-class TestAddJobStub:
-    def test_returns_typed_not_implemented_not_a_fabricated_score(self, fake_conn):
-        result = multitask.run_add_job("clip.wav")
-        assert result == {"task_name": "add", "status": multitask.ADD_NOT_IMPLEMENTED}
+# A mocked binary-deepfake prediction (the real model is exercised in
+# test_deepfake_classifier.py; here we only care about the orchestration).
+FAKE_ADD = {
+    "predicted_label": "bona-fide",
+    "synthetic_probability": 0.1,
+    "confidence": 0.9,
+    "probabilities": {"bona-fide": 0.9, "spoof": 0.1},
+}
+
+
+class TestAddJob:
+    def test_returns_real_deepfake_prediction(self, fake_conn):
+        with patch.object(multitask, "predict_deepfake", return_value=FAKE_ADD) as mock_add:
+            result = multitask.run_add_job("clip.wav")
+        mock_add.assert_called_once_with("clip.wav")
+        assert result == {"task_name": "add", **FAKE_ADD}
 
 
 class TestMultitaskFanOutFanIn:
@@ -95,6 +107,7 @@ class TestMultitaskFanOutFanIn:
 
     def test_aggregates_asr_ser_add_once_on_success(self, fake_conn):
         with patch.object(multitask, "transcribe_whisper_base", return_value="the transcript"), \
+             patch.object(multitask, "predict_deepfake", return_value=FAKE_ADD), \
              patch.object(
                  multitask,
                  "predict_emotion_wave2vec",
@@ -115,7 +128,7 @@ class TestMultitaskFanOutFanIn:
         by_task = {r["task_name"]: r for r in agg_result["succeeded"].values()}
         assert by_task["asr"]["transcript"] == "the transcript"
         assert by_task["ser"]["predicted_emotion"] == "neutral"
-        assert by_task["add"]["status"] == multitask.ADD_NOT_IMPLEMENTED
+        assert by_task["add"]["predicted_label"] == "bona-fide"
 
     def test_asr_failure_does_not_lose_ser_result(self, fake_conn):
         # CHILD_JOB_RETRY exists for real forking-Worker crash recovery; under
@@ -124,6 +137,7 @@ class TestMultitaskFanOutFanIn:
         # and let the asr child fail once, deterministically.
         with patch.object(multitask, "transcribe_whisper_base", side_effect=RuntimeError("model load failed")), \
              patch.object(multitask, "CHILD_JOB_RETRY", None), \
+             patch.object(multitask, "predict_deepfake", return_value=FAKE_ADD), \
              patch.object(
                  multitask,
                  "predict_emotion_wave2vec",
