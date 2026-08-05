@@ -17,6 +17,7 @@ from app.infrastructure.dataset_ingestion import (
     CORPUS_REGISTRY,
     ColumnMap,
     CommonVoiceLoader,
+    CORPUS_REGISTRY,
     CsvCatalogLoader,
     TARGET_SAMPLE_RATE,
     TaskFamily,
@@ -179,9 +180,14 @@ class TestCorpusRegistry:
 
     def test_pending_loader_raises_with_owner_issue(self):
         # Concrete loaders not yet contributed must signal that honestly.
+        # Pick a still-pending corpus dynamically so this test survives each new
+        # loader landing (rather than hardcoding a name every PR has to update).
+        pending = [n for n, s in CORPUS_REGISTRY.items() if s.loader_factory is None]
+        assert pending, "expected at least one not-yet-implemented loader"
+        name = pending[0]
         with pytest.raises(NotImplementedError) as exc:
-            get_loader("asvspoof-2021")
-        assert "LIT-142" in str(exc.value)
+            get_loader(name)
+        assert CORPUS_REGISTRY[name].owner_issue in str(exc.value)
 
 
 def _write_cv_catalog(tmp_path: Path, *, columns: str = "processed") -> tuple[Path, Path]:
