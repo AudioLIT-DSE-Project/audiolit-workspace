@@ -166,18 +166,22 @@ class AudioLITWorker(SimpleWorker):
             _WORKER_CTX = None
 
     def perform_job(self, job: Job, queue: Queue, *args: Any, **kwargs: Any) -> Any:
-        publish_progress(job.id, "started", {"family": self.family.value})
+        # Emit PROCESSING state
+        publish_progress(job.id, "PROCESSING", {"family": self.family.value})
         t0 = time.monotonic()
         try:
             assert self._ctx is not None
             self._ctx.load_libraries()
             result = super().perform_job(job, queue, *args, **kwargs)
             dt = time.monotonic() - t0
-            publish_progress(job.id, "finished", {"duration_s": round(dt, 3)})
+            # Emit SUCCESS state
+            publish_progress(job.id, "SUCCESS", {"duration_s": round(dt, 3)})
             return result
         except Exception as exc:
             dt = time.monotonic() - t0
-            publish_progress(job.id, "failed", {"duration_s": round(dt, 3)})
+            # Emit RETRYING or FAILURE state based on RQ's retry config
+            state = "RETRYING" if job.retries_left > 0 else "FAILURE"
+            publish_progress(job.id, state, {"duration_s": round(dt, 3), "error": str(exc)})
             logger.exception("job.failed id=%s", job.id)
             raise
 
