@@ -1,89 +1,48 @@
 # audiolit-workspace
 
-Core workspace repository for the AudioLIT project.
+Core monorepo for **AudioLIT** — an interpretability workbench for Automatic Speech
+Recognition (ASR), Speech Emotion Recognition (SER), and Audio Deepfake Detection
+(ADD), extending the **ECHO 1.0** baseline (`AudioLIT-DSE-Project/ECHO`, itself a
+fork of `AnasSAV/ECHO`) in place.
 
-## Core Service Structure
+Start with [`docs/README.md`](docs/README.md) — it indexes the authoritative
+planning documents (SAD, SRS), the repo's branch model, and known errata —
+before making architectural or scope decisions here.
 
-- `/services` - Contains backend business logic.
-- `/gateway` - API Gateway handling client routing.
-- `/config` - Global application configurations.
-- `/shared` - Common utilities shared across services.
+## Layout
 
-## Audio Upload Endpoint
-
-The backend exposes `POST /api/audio/upload` for streaming binary audio uploads.
-
-Example `curl` command:
-
-```bash
-curl -X POST "http://localhost:8000/api/audio/upload" \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@sample.wav;type=audio/wav"
+```
+audiolit-workspace/
+├── docs/        # SAD, SRS, conventions (read this first)
+├── Backend/     # FastAPI service — ECHO 1.0 backend, extended
+└── Frontend/    # React 18 + Vite workspace — ECHO 1.0 frontend, extended
 ```
 
-Postman raw body example:
+The five-layer target architecture (`backend/app/{api,orchestration,domain,infrastructure}`,
+lower-case `frontend/src/`) described in the SAD has not been migrated to yet —
+see LIT-227. `Backend/`/`Frontend/` currently reflect ECHO 1.0's own structure
+(`app/{api,core,services}`).
 
-- Choose `POST`
-- URL: `http://localhost:8000/api/audio/upload`
-- Body: `form-data`
-- Add a field named `file`
-- Select `File`
-- Choose a `.wav` or `.mp3`
-- Set type to `audio/wav` or `audio/mpeg`
+## Running locally
 
-Successful response schema:
-
-```json
-{
-  "transaction_token": "aud_<uuid>",
-  "file_path": "/tmp/audiolit/uploads/aud_<uuid>_xxxxx.tmp",
-  "audio_config": {
-    "format": "wav",
-    "sample_rate_hz": 48000,
-    "channels": 2,
-    "duration_sec": 12.345,
-    "total_bytes": 1234567
-  },
-  "status": "uploaded"
-}
+**Backend**
+```bash
+cd Backend
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+docker compose up -d   # Redis
+uvicorn app.main:app --reload
 ```
 
-## Verification
-
-Start the service:
-
+**Frontend**
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Health check:
-
-```bash
-curl -i http://localhost:8000/api/healthz
-```
-
-Audio upload:
-
-```bash
-curl -i -X POST "http://localhost:8000/api/audio/upload" \
-  -F "file=@test.wav;type=audio/wav"
-```
-
-Invalid upload validation check:
-
-```bash
-curl -i -X POST "http://localhost:8000/api/audio/upload" \
-  -F "file=@fake.txt;type=text/plain"
-```
-
-CORS preflight example:
-
-```bash
-curl -i -X OPTIONS "http://localhost:8000/api/audio/upload" \
-  -H "Origin: http://localhost:5173" \
-  -H "Access-Control-Request-Method: POST"
+cd Frontend
+npm install
+npm run dev
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE). Incorporates code from ECHO 1.0
+(`AudioLIT-DSE-Project/ECHO`, MIT-licensed, originally by Anas Hussaindeen,
+Chandupa Ambepitiya, and Dewmike Amarasinghe).
