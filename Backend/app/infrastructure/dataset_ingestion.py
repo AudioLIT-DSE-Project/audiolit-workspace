@@ -370,7 +370,7 @@ class ASVspoofLoader(DatasetLoader):
             self._notice_logged = True
 
         with self.protocol_path.open("r", encoding="utf-8") as fh:
-            for index, line in enumerate(fh):
+            for index, line in enumerate(fh, start=1):
                 tokens = line.split()
                 if not tokens:
                     continue
