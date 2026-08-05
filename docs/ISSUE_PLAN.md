@@ -13,31 +13,29 @@ it will drift from Linear otherwise. The dependency edges here are also
 encoded in Linear itself as `blockedBy`/`blocks` relations, so Linear's own
 dependency graph matches this document.
 
-> **AGREED SEQUENCING PLAN (2026-08-05) — the order we are actually working
-> in; read before claiming an issue so parallel sessions don't collide:**
-> 1. **LIT-150 re-add/fix lands first.** PR #21 (the revert) was *merged*
->    2026-08-05 and DELETED the orchestrator + its test from `develop`. The CI
->    failure it cited was a post-migration import break, not a logic bug —
->    **PR #22** (`fix/lit-150-post-migration-imports-ci`) re-introduces the
->    orchestrator with the imports fixed and its test restored (backend 149
->    passed / 2 skipped, frontend green). Land #22 through review; don't
->    re-revert LIT-150.
-> 2. **Then complete LIT-123 (Ravindu, dataset core) and LIT-127 (Rahim, RQ
->    broker, Urgent) FIRST — before any downstream critical path.** These two
->    are the shared base; each goes through review + merge before the parallel
->    build-out starts, so the two critical paths begin from solid ground.
-> 3. **Then work the LIT-127 critical path step by step** (LIT-127 → LIT-149
->    → orchestrator wiring → LIT-131/157), in parallel with the LIT-123 →
->    LIT-142 → LIT-128 → LIT-148 dataset/ADD path.
+> **STATUS (2026-08-05, end of session) — a large batch just merged; re-check
+> Linear + `gh pr list` before trusting this note:**
+> - **Merged to `develop` this session:** the ingestion core **LIT-123** plus
+>   its loaders **LIT-141** (Common Voice/LibriSpeech), **LIT-142** (ASVspoof),
+>   **LIT-181** (L2-ARCTIC); the async base **LIT-150** (orchestrator, re-added
+>   + import-fixed after the #21 revert) and **LIT-127** (RQ broker foundation);
+>   plus two CI fixes — the flaky `test_fanout_orchestrator` determinism fix and
+>   CI dependency caching + CPU-only torch.
+> - **Dataset ingestion is ~complete:** 6 of 7 corpora have loaders in
+>   `app/infrastructure/dataset_ingestion.py`; only the SER trio (CREMA-D /
+>   RAVDESS / ESD, **LIT-208**) is left. There is now one common
+>   `DatasetLoader`/registry the SER loader plugs into.
+> - **Next on the dataset→ADD critical path:** **LIT-128** (ADD integration,
+>   Tharusha) is now unblocked (LIT-207 ✅ + LIT-142 ✅) → then LIT-148 Grad-CAM
+>   → LIT-132. On the async path, **LIT-149** (RQ workers) follows the merged
+>   LIT-127, then orchestrator wiring + LIT-131/157 (the `/upload` async cutover
+>   still needs LIT-157 frontend polling).
+> - **Highest-leverage unstarted work:** LIT-128 (ADD), LIT-208 (SER data),
+>   LIT-206/224 (SER model), LIT-126/130/222 (XAI cores, unblocked by LIT-211),
+>   LIT-149 (workers), LIT-165 (mutation engine, unblocked by LIT-226).
 >
-> The whole infra tier (LIT-207/211/225/226/227) is Done; PRs #12/#16/#17 all
-> merged; #21 merged (removed LIT-150 — being re-added fixed by #22). **Fresh
-> sessions:** LIT-150-fix (#22), LIT-123, LIT-127 are claimed/in-flight — take
-> independent unblocked work instead (LIT-206/224 SER, LIT-126/130 XAI,
-> LIT-222) and coordinate. Always run `gh pr list` + re-check Linear before
-> starting; this note drifts.
->
-> _Status column last reconciled against Linear: 2026-08-05._
+> _Status column last reconciled against Linear + `develop`: 2026-08-05 (end of
+> session)._
 
 ---
 
@@ -65,7 +63,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 | LIT-211 | Forward/attention hook registration | FR1 | Tharusha | ✅ Done | LIT-207 (loose — same PR is fine) | **Merged (PR #12).** Unlocks all attribution work (FR8/FR9/FR17) — LIT-126/130/222 now unblocked. |
 | LIT-226 | Remove torchaudio, standardise on soundfile | infra | — | ✅ Done | none | **Merged (PR #9).** Unblocks LIT-165 (mutation engine), same `perturbation_service.py` file. |
 | LIT-227 | Layered migration (restructure ECHO code) | infra | Tharusha | ✅ Done | none | **Merged (PR #16 completed slice 2).** Incremental per SAD §8.2 — infra → registry → explanation code → orchestration → new features, system kept working at each step. Coordinate with LIT-207 (same registry work). **PR #13 (slice 1, merged):** infra/domain/orchestration skeleton stood up, `settings`/`redis`/`session` moved into `infrastructure`, `upload.py`↔`inferences.py` route coupling removed, 5 duplicated `get_session_id` defs collapsed, `pertubation_service.py` renamed, unused LRP import removed. **Correction:** this was then marked Done in Linear even though the DoD wasn't fully met (found via repo audit) — `domain`/`orchestration` were still empty placeholders (everything stayed flat in `app/services/`), and the "unreachable model option" dead-code item was still present. **PR #16 (slice 2):** actually moves every service into its real domain/infrastructure/orchestration home per SAD §5.1/§5.2, fixes `Toolbar.tsx`'s unreachable `whisper-large` option; investigated "orphaned visualisation components" and found none (all 5 files reachable). **Still open, deliberately out of scope:** `queue_service.py` → real RQ / no synchronous inference on `/upload`'s request path — changes the HTTP contract, needs LIT-157 (frontend polling, not started); that's LIT-150's job (merged as a draft via PR #17/#20 without touching the routes — but the real-RQ swap itself is still open, needs LIT-157). |
-| LIT-123 | Multi-task dataset ingestion core | FR2 | Ravindu | 🟢 **NEXT (claimed)** | none | Parent of 141/142/208/181 below. **Per the sequencing plan, one of the two "base first" issues — starts right after the LIT-150 fix PR merges; don't duplicate.** |
+| LIT-123 | Multi-task dataset ingestion core | FR2 | Ravindu | ✅ Done | none | **Merged (PR #23).** The common `DatasetLoader` / `CsvCatalogLoader` / `CORPUS_REGISTRY` + 16 kHz-mono standardization + accent/demographic `SampleMetadata` in `app/infrastructure/dataset_ingestion.py`. Parent of 141/142/208/181; each per-corpus loader plugs into the registry. |
 | LIT-125 | Librosa DSP extraction pipeline (STFT/pYIN/RMS) | FR10 | Ravindu | 🟢 | none | Fully independent — no model or async-fabric dependency. |
 | LIT-145 | pYIN F0 tracking | FR10 | Ravindu | 🟢 | none | Sub-task of LIT-125. |
 | LIT-146 | RMS energy estimation | FR10 | Ravindu | 🟢 | none | Sub-task of LIT-125. |
@@ -74,18 +72,18 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-141 | Common Voice / LibriSpeech ingestion | FR2 | Ravindu | 🟢 | LIT-123 (parent) | |
-| LIT-142 | ASVspoof 2021 DF loader | FR2 | Ravindu | 🟢 | LIT-123 (parent) | **Blocks LIT-128** (FR7 needs this dataset). |
-| LIT-208 | CREMA-D/RAVDESS demo subset | FR2 | Tharusha | 🟢 | LIT-123 (parent) | |
-| LIT-181 | L2-ARCTIC ingestion | FR2 | Ravindu | 🟢 | LIT-123 (parent) | **Blocks LIT-168/182** (FR15 needs this). |
+| LIT-141 | Common Voice / LibriSpeech ingestion | FR2 | Ravindu | ✅ Done | LIT-123 | **Merged (PR #27).** Common Voice loader shipped with the core; this added `LibriSpeechLoader` (walks speaker/chapter `*.trans.txt` + `.flac`, gender from `SPEAKERS.TXT`) + `is_silent()` corruption/silence validation. |
+| LIT-142 | ASVspoof 2021 DF loader | FR2 | Ravindu | ✅ Done | LIT-123 | **Merged (PR #26).** `ASVspoofLoader` — bona-fide/spoof from the protocol/label file (2021-DF + 2019-LA layouts), research-use notice (C5). **Unblocks LIT-128** (FR7 ADD data). |
+| LIT-208 | CREMA-D/RAVDESS demo subset | FR2 | Tharusha | 🟢 | LIT-123 ✅ | **Only remaining corpus loader** — the SER benchmark data (no SER loader exists yet). Plugs into the merged `CORPUS_REGISTRY` (crema-d/ravdess/esd slots are pending). Highest-value remaining dataset work. |
+| LIT-181 | L2-ARCTIC ingestion | FR2 | Ravindu | ✅ Done | LIT-123 | **Merged (PR #30).** `L2ArcticLoader` — fixed 24-speaker→L1 accent map (6 L1s) exposed as `accent`/`demographic["l1"]`. **Unblocks LIT-168/182** (FR15 accent bias). |
 
 ### Tier 2 — Async fabric build-out (blocked by the Tier-0 prototype)
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-127 | Deploy RQ broker | FR3 | Rahim | 🟢 **NEXT (claimed)** | **LIT-225** ✅ | Blocker LIT-225 is merged → **unblocked.** Per the sequencing plan, the second "base first" issue (starts right after the LIT-150 fix PR merges), then its critical path is worked step by step (→ LIT-149 → orchestrator wiring → LIT-131/157). Don't duplicate. |
-| LIT-149 | RQ worker scaffolding | FR3 | Rahim | 🟢 | LIT-127 (parent) | |
-| LIT-150 | ASR+SER+ADD orchestrator | FR3 | Rahim | 🔵 Re-add in review (PR #22) | LIT-127, LIT-225 | **Churny history:** draft merged (PR #17) → reverted (#19) → re-applied (#20) → **#21 merged 2026-08-05, DELETING it (service + test) from `develop`.** The CI failure #21 cited was a post-migration import break, not a logic bug. **PR #22 re-adds the orchestrator with imports fixed** (`..core`→`..infrastructure`, `.fanout`→`..orchestration`, `.model_loader`→`..domain`) + restored test; backend 149 passed / 2 skipped, frontend green. ⚠ Still a draft that landed ahead of its LIT-127 blocker; the synchronous `/upload` → real-RQ swap it needs is still open (LIT-157). **Don't build on `app/services/multitask_orchestrator_service.py` until #22 merges.** |
+| LIT-127 | Deploy RQ broker | FR3 | Rahim | ✅ Done (foundation) | **LIT-225** ✅ | **Merged (PR #25).** Broker foundation: per-family queues (asr/ser/add/xai + cpu mutation) with GPU concurrency pinned to 1 (SAD C2), enqueue + job-id progress pub/sub, and a `python -m app.orchestration.worker <family>` entrypoint (`app/orchestration/rq_broker.py`, `worker.py`). ⚠ **Deliberately not yet done** (follow-on, needs LIT-157): the inference-route rewrite → enqueue + WebSocket relay (changes `/upload`'s contract), removing the old `queue_service.py`, and wiring the LIT-150 orchestrator onto these queues. |
+| LIT-149 | RQ worker scaffolding | FR3 | Rahim | 🟢 | LIT-127 ✅ | Now unblocked (LIT-127 broker merged). Extends `rq_broker.make_worker` / the worker entrypoint. |
+| LIT-150 | ASR+SER+ADD orchestrator | FR3 | Rahim | ✅ Done | LIT-127, LIT-225 | **Merged (PR #22)** after a churny history (draft #17 → revert #19 → re-apply #20 → revert #21 deleted it → **#22 re-added it with post-migration imports fixed + a determinism fix for its flaky fan-in tests**). ⚠ Draft-level: ADD stubbed, and it isn't wired into the routes yet — the `/upload` → real-RQ cutover it needs is still open (LIT-157). Don't assume it runs end-to-end via HTTP yet. |
 
 ### Tier 3 — Model integration (blocked by the registry + relevant datasets)
 
