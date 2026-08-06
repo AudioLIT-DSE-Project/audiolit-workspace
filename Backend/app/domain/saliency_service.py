@@ -513,3 +513,144 @@ def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam",
         return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
     else:
         raise ValueError(f"Unsupported model: {model}")
+
+
+# --- Grad-CAM (LIT-148, FR8) --------------------------------------------------
+# Class-discriminative attribution over a convolutional layer's spatial dims:
+# hook the target conv layer's activations (forward) and gradients (backward),
+# global-average-pool the gradients into per-channel weights, take a ReLU'd
+# weighted combination of the feature maps, and normalize to [0, 1]. Works for
+# Conv1d (attribution over time) and Conv2d (2D spectrogram attribution).
+
+
+def find_last_conv_layer(model: "torch.nn.Module") -> "torch.nn.Module":
+    """Return the last Conv1d/Conv2d module in ``model`` (Grad-CAM's usual target).
+
+    Grad-CAM hooks the final convolutional layer because it holds the highest-
+    level spatial features while still being spatially resolved.
+    """
+    last_conv = None
+    for module in model.modules():
+        if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d)):
+            last_conv = module
+    if last_conv is None:
+        raise ValueError("model has no Conv1d/Conv2d layer to attach Grad-CAM to")
+    return last_conv
+
+
+def compute_grad_cam(
+    model: "torch.nn.Module",
+    inputs: "torch.Tensor",
+    target_layer: "torch.nn.Module" = None,
+    target_index: Optional[int] = None,
+) -> np.ndarray:
+    """Grad-CAM attribution map for one input over ``target_layer``'s feature maps.
+
+    Registers a forward hook (activations) and a full backward hook (gradients)
+    on ``target_layer`` (defaults to the model's last conv layer), runs a
+    forward + backward pass for ``target_index`` (argmax class if None), and
+    returns the ReLU'd, [0, 1]-normalized weighted feature-map combination as a
+    numpy score matrix (shape = the conv layer's spatial dims). Hooks are always
+    removed, so this can be called repeatedly without leaking them.
+    """
+    if target_layer is None:
+        target_layer = find_last_conv_layer(model)
+
+    captured = {}
+
+    def _forward_hook(_module, _inp, output):
+        captured["activations"] = output.detach()
+
+    def _backward_hook(_module, _grad_in, grad_out):
+        captured["gradients"] = grad_out[0].detach()
+
+    fwd_handle = target_layer.register_forward_hook(_forward_hook)
+    bwd_handle = target_layer.register_full_backward_hook(_backward_hook)
+    try:
+        model.zero_grad(set_to_none=True)
+        outputs = model(inputs)
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs
+        if target_index is None:
+            target_index = int(torch.argmax(logits, dim=-1)[0])
+        logits[0, target_index].backward()
+
+        acts = captured["activations"][0]   # [C, *spatial]
+        grads = captured["gradients"][0]     # [C, *spatial]
+        spatial_dims = tuple(range(1, grads.dim()))
+        weights = grads.mean(dim=spatial_dims)                       # [C]
+        weights = weights.view([-1] + [1] * (acts.dim() - 1))        # broadcast over spatial
+        cam = torch.relu((weights * acts).sum(dim=0))                # [*spatial]
+
+        cam = cam - cam.min()
+        peak = cam.max()
+        if peak > 0:
+            cam = cam / peak
+        return cam.cpu().numpy()
+    finally:
+        fwd_handle.remove()
+        bwd_handle.remove()
+
+
+# --- Spectrogram-patch LIME/SHAP-style attribution (LIT-130, FR8) -------------
+# Occlusion-based explanation over a 2D STFT spectrogram: divide it into a
+# time-frequency patch grid, replace each patch with a baseline, and record how
+# far the model's score drops. The result is a [n_freq_patches, n_time_patches]
+# importance grid aligned to the spectrogram — higher = the patch the score
+# depends on most (e.g. which frequency bins drove a deepfake alert). It's
+# model-agnostic (takes a score function), so it works for the deepfake
+# classifier or any other scalar-scoring model.
+
+
+def audio_to_spectrogram(audio, n_fft: int = 512, hop_length: int = 256) -> np.ndarray:
+    """Magnitude STFT spectrogram ``[freq, time]`` for a 1-D audio array."""
+    audio = np.asarray(audio, dtype=np.float32)
+    return np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
+
+
+def spectrogram_patch_bounds(length: int, n_patches: int) -> List[Tuple[int, int]]:
+    """Split range ``[0, length)`` into ``n_patches`` contiguous (start, end) bounds.
+
+    Patch sizes differ by at most 1 so they tile the axis exactly — no gaps or
+    overlaps — even when ``length`` isn't divisible by ``n_patches``. Never emits
+    more patches than there are samples along the axis.
+    """
+    if n_patches < 1:
+        raise ValueError("n_patches must be >= 1")
+    n_patches = min(n_patches, length)
+    edges = np.linspace(0, length, n_patches + 1).astype(int)
+    return [(int(edges[i]), int(edges[i + 1])) for i in range(n_patches)]
+
+
+def occlusion_attribution(
+    score_fn,
+    spectrogram,
+    n_freq_patches: int = 8,
+    n_time_patches: int = 8,
+    baseline: Union[str, float] = "mean",
+) -> np.ndarray:
+    """LIME/SHAP-style patch attribution for a 2-D spectrogram.
+
+    ``score_fn(spectrogram) -> float`` returns the model score to explain (e.g.
+    the deepfake/spoof probability). Each time-frequency patch is occluded with a
+    ``baseline`` value (``"mean"`` of the spectrogram, or a fixed float) and the
+    drop from the un-occluded score is recorded, yielding a
+    ``[n_freq_patches, n_time_patches]`` importance grid: positive where a patch
+    supported the score, negative where it suppressed it.
+    """
+    spectrogram = np.asarray(spectrogram, dtype=np.float32)
+    if spectrogram.ndim != 2:
+        raise ValueError("spectrogram must be 2-D [freq, time]")
+
+    base_score = float(score_fn(spectrogram))
+    fill = float(spectrogram.mean()) if baseline == "mean" else float(baseline)
+
+    freq_bounds = spectrogram_patch_bounds(spectrogram.shape[0], n_freq_patches)
+    time_bounds = spectrogram_patch_bounds(spectrogram.shape[1], n_time_patches)
+    importance = np.zeros((len(freq_bounds), len(time_bounds)), dtype=np.float32)
+
+    for i, (f0, f1) in enumerate(freq_bounds):
+        for j, (t0, t1) in enumerate(time_bounds):
+            occluded = spectrogram.copy()
+            occluded[f0:f1, t0:t1] = fill
+            importance[i, j] = base_score - float(score_fn(occluded))
+    return importance
