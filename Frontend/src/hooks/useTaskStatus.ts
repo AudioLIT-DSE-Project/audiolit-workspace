@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
+import { API_BASE } from '@/lib/api';
 
 export type TaskState = 'QUEUED' | 'PROCESSING' | 'RETRYING' | 'SUCCESS' | 'FAILURE' | 'UNKNOWN';
+
+/**
+ * WebSocket origin for the backend, derived from the same API_BASE every other
+ * component uses. Deriving it from window.location instead pointed the socket at
+ * the Vite dev server (port 8080, no proxy) rather than the API on 8000, and
+ * forced ws:// on an https:// page, where the browser blocks it as mixed
+ * content. http -> ws, https -> wss.
+ */
+const wsOrigin = (): string => {
+  const base = new URL(API_BASE, window.location.origin);
+  base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+  return base.origin;
+};
 
 interface UseTaskStatusResult {
   state: TaskState;
@@ -25,13 +39,12 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
     isManualClose.current = false;
     retryCountRef.current = 0;
     setState('QUEUED');
+    // Clear the previous task's outcome, or it renders briefly under the new id.
+    setResult(null);
+    setError(null);
 
     const connectWs = () => {
-      const wsHost = window.location.hostname;
-      const wsPort = window.location.port || '8000';
-      const wsUrl = `ws://${wsHost}:${wsPort}/api/ws/tasks/${taskId}`;
-      
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(`${wsOrigin()}/api/ws/tasks/${taskId}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -85,7 +98,7 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
       
       pollIntervalRef.current = setInterval(async () => {
         try {
-          const res = await fetch(`/api/tasks/${taskId}/status`);
+          const res = await fetch(`${API_BASE}/api/tasks/${taskId}/status`);
           const data = await res.json();
           setState(data.state as TaskState);
           

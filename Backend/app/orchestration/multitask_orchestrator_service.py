@@ -23,7 +23,7 @@ from rq import Queue, get_current_job
 from rq.job import Dependency, Job
 
 from ..infrastructure.rq_connection import get_redis_connection
-from ..orchestration.fanout_orchestrator_service import CHILD_JOB_RETRY, _publish_progress
+from .fanout_orchestrator_service import CHILD_JOB_RETRY, _publish_progress
 from ..domain.model_loader_service import (
     predict_deepfake,
     predict_emotion_wave2vec,

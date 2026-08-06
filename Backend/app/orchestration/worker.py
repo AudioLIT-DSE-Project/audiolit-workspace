@@ -8,7 +8,8 @@ in memory (SAD §6.1):
     python -m app.orchestration.worker mutation
 
 Deployment runs ``concurrency`` copies of each (see QUEUE_CONFIGS) — GPU-bound
-families are pinned to 1 to respect the VRAM budget (SAD C2).
+families are pinned to 1 to respect the VRAM budget (SAD C2), which
+``run_worker`` enforces with a per-family Redis lock.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from __future__ import annotations
 import sys
 from typing import List, Optional
 
-from .rq_broker import WorkerFamily, make_worker
+from .task_orchestrator import WorkerFamily, run_worker
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -33,7 +34,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"unknown family {argv[0]!r}; choose one of: {families}", file=sys.stderr)
         return 2
 
-    make_worker(family).work()
+    run_worker(family)
     return 0
 
 

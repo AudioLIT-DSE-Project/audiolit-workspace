@@ -1,18 +1,23 @@
-"""FastAPI gateway routes for asynchronous inference (SRS FR3)."""
+"""FastAPI gateway routes for asynchronous inference (SRS FR3).
+
+The gateway only enqueues and returns a job id - it never loads a model or runs
+inference itself (SAD §5.1: "the gateway never loads AI models directly").
+Job progress and results are served by `tasks.py`; this module deliberately does
+not duplicate that surface.
+"""
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.services.queue_service import (
-    PROGRESS_CHANNEL_PREFIX, TaskFamily,
-    enqueue_attribution, enqueue_multitask_analysis, enqueue_mutation,
-    get_redis_connection, job_status,
+from ...orchestration.task_orchestrator import (
+    TaskFamily,
+    enqueue_attribution,
+    enqueue_multitask_analysis,
+    enqueue_mutation,
 )
 
 logger = logging.getLogger("audiolit.api.inference")
@@ -65,31 +70,3 @@ async def post_attribution(req: AttributionRequest) -> JobResponse:
 async def post_mutation(req: MutationRequest) -> JobResponse:
     result = enqueue_mutation(audio_ref=req.audio_ref, mutation=req.mutation)
     return JobResponse(**result.as_response())
-
-@router.get("/jobs/{job_id}")
-async def get_job(job_id: str) -> dict[str, Any]:
-    return job_status(job_id)
-
-@router.websocket("/ws/jobs/{job_id}")
-async def job_progress_ws(websocket: WebSocket, job_id: str) -> None:
-    await websocket.accept()
-    conn = get_redis_connection()
-    channel = f"{PROGRESS_CHANNEL_PREFIX}:{job_id}".encode()
-    ps = conn.pubsub()
-    ps.subscribe(channel)
-    loop = asyncio.get_running_loop()
-    try:
-        await websocket.send_text(json.dumps({"job_id": job_id, "stage": "subscribed"}))
-        while True:
-            msg = await loop.run_in_executor(None, ps.get_message, 1.0)
-            if msg is not None and msg.get("type") == "message":
-                await websocket.send_text(msg["data"].decode())
-            await asyncio.sleep(0.01)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        try:
-            ps.unsubscribe(channel)
-            ps.close()
-        except Exception:
-            pass
