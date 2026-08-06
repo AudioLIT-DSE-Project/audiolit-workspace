@@ -37,6 +37,26 @@ dependency graph matches this document.
 > _Status column last reconciled against Linear + `develop`: 2026-08-05 (end of
 > session)._
 
+> **UPDATE (2026-08-06) — the async/frontend tier landed, then needed a
+> cleanup:**
+> - **Merged since:** LIT-128 (ADD classifier, PR #33 — went into `main`
+>   directly, back-merged to `develop` via PR #40), LIT-148 (Grad-CAM, PR #36),
+>   and the whole frontend stack in one go via **PR #39** — LIT-131, LIT-157,
+>   LIT-158, LIT-159 and LIT-149, because #34/#35/#37/#38 were all ancestors
+>   of #39 rather than independent PRs.
+> - **LIT-230** cleans up after that merge: `app/services/queue_service.py`
+>   duplicated the already-merged `rq_broker.py`, because four Tier-C `Path:`
+>   stamps still pointed at `app/services/` after LIT-227 emptied it. Both
+>   collapse into `app/orchestration/task_orchestrator.py`, `app/services/` is
+>   deleted, and the stamps are corrected. **`app/services/` no longer exists —
+>   do not recreate it.**
+> - **Still open on the async path:** the `/upload` HTTP-contract cutover, and
+>   pointing LIT-150's orchestrator at the canonical per-family queues (it
+>   still uses its own `multitask_*` names).
+> - **Highest-leverage unstarted work now:** LIT-208 (SER data), LIT-206/224
+>   (SER model), LIT-126/130/222 (XAI cores), LIT-165 (mutation engine),
+>   LIT-151/152 (ADD follow-ons, now that LIT-128 is on `develop`).
+
 ---
 
 ## How to read the tiers
@@ -81,8 +101,8 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-127 | Deploy RQ broker | FR3 | Rahim | ✅ Done (foundation) | **LIT-225** ✅ | **Merged (PR #25).** Broker foundation: per-family queues (asr/ser/add/xai + cpu mutation) with GPU concurrency pinned to 1 (SAD C2), enqueue + job-id progress pub/sub, and a `python -m app.orchestration.worker <family>` entrypoint (`app/orchestration/rq_broker.py`, `worker.py`). ⚠ **Deliberately not yet done** (follow-on, needs LIT-157): the inference-route rewrite → enqueue + WebSocket relay (changes `/upload`'s contract), removing the old `queue_service.py`, and wiring the LIT-150 orchestrator onto these queues. |
-| LIT-149 | RQ worker scaffolding | FR3 | Rahim | 🟢 | LIT-127 ✅ | Now unblocked (LIT-127 broker merged). Extends `rq_broker.make_worker` / the worker entrypoint. |
+| LIT-127 | Deploy RQ broker | FR3 | Rahim | ✅ Done (foundation) | **LIT-225** ✅ | **Merged (PR #25).** Broker foundation: per-family queues (asr/ser/add/xai + cpu mutation) with GPU concurrency pinned to 1 (SAD C2), enqueue + job-id progress pub/sub, and a `python -m app.orchestration.worker <family>` entrypoint. **Now lives in `app/orchestration/task_orchestrator.py`** — LIT-230 merged `rq_broker.py` with the duplicate `services/queue_service.py` that LIT-149/157 built from this issue's stale `Path:` stamp. ⚠ **Still not done** (follow-on): the `/upload` route rewrite → enqueue + WebSocket relay (changes its HTTP contract), and wiring the LIT-150 orchestrator onto the canonical per-family queues — it still uses its own `multitask_*` queue names. |
+| LIT-149 | RQ worker scaffolding | FR3 | Rahim | ✅ Done | LIT-127 ✅ | **Merged (PR #34, via the #39 stack).** `WorkerContext` (per-process model cache), `AudioLITWorker`, per-family GPU lock. Its code now lives in `app/orchestration/task_orchestrator.py` — LIT-230 moved it out of `app/services/`, where this issue's stale `Path:` stamp had sent it. |
 | LIT-150 | ASR+SER+ADD orchestrator | FR3 | Rahim | ✅ Done | LIT-127, LIT-225 | **Merged (PR #22)** after a churny history (draft #17 → revert #19 → re-apply #20 → revert #21 deleted it → **#22 re-added it with post-migration imports fixed + a determinism fix for its flaky fan-in tests**). ⚠ Draft-level: ADD stubbed, and it isn't wired into the routes yet — the `/upload` → real-RQ cutover it needs is still open (LIT-157). Don't assume it runs end-to-end via HTTP yet. |
 
 ### Tier 3 — Model integration (blocked by the registry + relevant datasets)
@@ -123,10 +143,11 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by (from Linear) | Notes |
 |---|---|---|---|---|---|---|
-| LIT-131 | Connect UI to async API/XAI endpoints | FR3 | Tharusha | 🟢 | LIT-126, LIT-130, LIT-121, LIT-127 *(relation already set in Linear)* | |
-| LIT-157 | WebSocket/polling handlers | FR3 | Rahim | 🟢 | LIT-131 (parent) | |
-| LIT-158 | Frontend XAI overlay binding | FR8/FR9 | Ravindu | 🟢 | LIT-131 (parent) | |
-| LIT-159 | Reactive multi-model analytics widgets | FR3 | Tharusha | 🟢 | LIT-131 (parent) | |
+| LIT-131 | Connect UI to async API/XAI endpoints | FR3 | Tharusha | ✅ Done | LIT-126, LIT-130, LIT-121, LIT-127 | **Merged (PR #39).** #39 was the top of a cumulative stack (#34 ⊂ #35 ⊂ #37 ⊂ #38 ⊂ #39), so merging it closed all four frontend issues plus LIT-149 at once. |
+| LIT-157 | WebSocket/polling handlers | FR3 | Rahim | ✅ Done | LIT-131 (parent) | **Merged in the #39 stack (PR #35).** `useTaskStatus` + `/api/tasks/{id}/status` + `/api/ws/tasks/{id}`. ⚠ Shipped with the hook pointing its WebSocket at `window.location.port` (Vite's 8080, no proxy) and polling a relative path — so the async path submitted jobs but never observed them finish. Fixed in LIT-230. |
+| LIT-158 | Frontend XAI overlay binding | FR8/FR9 | Ravindu | ✅ Done | LIT-131 (parent) | **Merged in the #39 stack (PR #38).** `XAIOverlayCanvas.tsx`. |
+| LIT-159 | Reactive multi-model analytics widgets | FR3 | Tharusha | ✅ Done | LIT-131 (parent) | **Merged in the #39 stack (PR #37).** |
+| LIT-230 | Consolidate duplicated task-orchestrator modules | FR3 | Tharusha | 🟡 | LIT-131 ✅, LIT-149 ✅ | Cleanup after the #39 merge: `app/services/queue_service.py` duplicated the merged `rq_broker.py`. Both collapse into `app/orchestration/task_orchestrator.py` (SAD §5.2 — one Task Orchestrator); `app/services/` deleted; `SimpleWorker` kept over the forking `Worker` per SAD §10's ~8 s multi-task budget; one progress-channel prefix; the `useTaskStatus` URL bug above fixed. Also corrects the stale `Path:` stamps on LIT-127/149/150/225 that caused the duplication. |
 
 ### Security & migration wrap-up (parallel, no strict feature blockers)
 

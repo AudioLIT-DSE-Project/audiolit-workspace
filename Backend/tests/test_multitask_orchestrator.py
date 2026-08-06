@@ -1,5 +1,5 @@
 """Tests for the LIT-150 draft real ASR+SER (+stub ADD) orchestrator
-(app.services.multitask_orchestrator_service).
+(app.orchestration.multitask_orchestrator_service).
 
 Same fakeredis + SimpleWorker(burst=True) pattern as
 test_fanout_orchestrator.py (LIT-225) -- fast, no external Redis, no real
@@ -16,7 +16,7 @@ from fakeredis import FakeServer, FakeStrictRedis
 from rq import Queue, SimpleWorker
 from rq.job import Job, JobStatus
 
-from app.services import multitask_orchestrator_service as multitask
+from app.orchestration import multitask_orchestrator_service as multitask
 
 
 def _drain(conn, *queue_names) -> None:
