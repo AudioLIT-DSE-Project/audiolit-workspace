@@ -1,7 +1,10 @@
 # RQ fan-out/fan-in pattern (LIT-225)
 
-Prototype: `Backend/app/services/fanout_orchestrator_service.py`
+Prototype: `Backend/app/orchestration/fanout_orchestrator_service.py`
 Tests: `Backend/tests/test_fanout_orchestrator.py`
+
+The production fabric this pattern feeds is
+`Backend/app/orchestration/task_orchestrator.py` (LIT-230).
 
 ## Why this exists
 
