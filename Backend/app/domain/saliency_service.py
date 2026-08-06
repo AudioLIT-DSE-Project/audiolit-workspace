@@ -589,3 +589,68 @@ def compute_grad_cam(
     finally:
         fwd_handle.remove()
         bwd_handle.remove()
+
+
+# --- Spectrogram-patch LIME/SHAP-style attribution (LIT-130, FR8) -------------
+# Occlusion-based explanation over a 2D STFT spectrogram: divide it into a
+# time-frequency patch grid, replace each patch with a baseline, and record how
+# far the model's score drops. The result is a [n_freq_patches, n_time_patches]
+# importance grid aligned to the spectrogram — higher = the patch the score
+# depends on most (e.g. which frequency bins drove a deepfake alert). It's
+# model-agnostic (takes a score function), so it works for the deepfake
+# classifier or any other scalar-scoring model.
+
+
+def audio_to_spectrogram(audio, n_fft: int = 512, hop_length: int = 256) -> np.ndarray:
+    """Magnitude STFT spectrogram ``[freq, time]`` for a 1-D audio array."""
+    audio = np.asarray(audio, dtype=np.float32)
+    return np.abs(librosa.stft(audio, n_fft=n_fft, hop_length=hop_length))
+
+
+def spectrogram_patch_bounds(length: int, n_patches: int) -> List[Tuple[int, int]]:
+    """Split range ``[0, length)`` into ``n_patches`` contiguous (start, end) bounds.
+
+    Patch sizes differ by at most 1 so they tile the axis exactly — no gaps or
+    overlaps — even when ``length`` isn't divisible by ``n_patches``. Never emits
+    more patches than there are samples along the axis.
+    """
+    if n_patches < 1:
+        raise ValueError("n_patches must be >= 1")
+    n_patches = min(n_patches, length)
+    edges = np.linspace(0, length, n_patches + 1).astype(int)
+    return [(int(edges[i]), int(edges[i + 1])) for i in range(n_patches)]
+
+
+def occlusion_attribution(
+    score_fn,
+    spectrogram,
+    n_freq_patches: int = 8,
+    n_time_patches: int = 8,
+    baseline: Union[str, float] = "mean",
+) -> np.ndarray:
+    """LIME/SHAP-style patch attribution for a 2-D spectrogram.
+
+    ``score_fn(spectrogram) -> float`` returns the model score to explain (e.g.
+    the deepfake/spoof probability). Each time-frequency patch is occluded with a
+    ``baseline`` value (``"mean"`` of the spectrogram, or a fixed float) and the
+    drop from the un-occluded score is recorded, yielding a
+    ``[n_freq_patches, n_time_patches]`` importance grid: positive where a patch
+    supported the score, negative where it suppressed it.
+    """
+    spectrogram = np.asarray(spectrogram, dtype=np.float32)
+    if spectrogram.ndim != 2:
+        raise ValueError("spectrogram must be 2-D [freq, time]")
+
+    base_score = float(score_fn(spectrogram))
+    fill = float(spectrogram.mean()) if baseline == "mean" else float(baseline)
+
+    freq_bounds = spectrogram_patch_bounds(spectrogram.shape[0], n_freq_patches)
+    time_bounds = spectrogram_patch_bounds(spectrogram.shape[1], n_time_patches)
+    importance = np.zeros((len(freq_bounds), len(time_bounds)), dtype=np.float32)
+
+    for i, (f0, f1) in enumerate(freq_bounds):
+        for j, (t0, t1) in enumerate(time_bounds):
+            occluded = spectrogram.copy()
+            occluded[f0:f1, t0:t1] = fill
+            importance[i, j] = base_score - float(score_fn(occluded))
+    return importance
