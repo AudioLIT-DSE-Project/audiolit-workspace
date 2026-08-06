@@ -9,9 +9,8 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from rq.job import JobStatus
 
-from app.services.queue_service import (
-    PROGRESS_CHANNEL_PREFIX, fetch_job, get_redis_connection
-)
+from ...infrastructure.rq_connection import get_redis_connection
+from ...orchestration.task_orchestrator import fetch_job, progress_channel
 
 logger = logging.getLogger("audiolit.api.tasks")
 router = APIRouter()
@@ -54,7 +53,7 @@ async def task_progress_ws(websocket: WebSocket, task_id: str) -> None:
     """
     await websocket.accept()
     conn = get_redis_connection()
-    channel = f"{PROGRESS_CHANNEL_PREFIX}:{task_id}".encode()
+    channel = progress_channel(task_id).encode()
     ps = conn.pubsub()
     ps.subscribe(channel)
     loop = asyncio.get_running_loop()
