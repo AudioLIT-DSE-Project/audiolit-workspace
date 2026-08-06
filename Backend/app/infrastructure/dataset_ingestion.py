@@ -563,6 +563,252 @@ class L2ArcticLoader(DatasetLoader):
         return None
 
 
+#: Canonical SER label vocabulary (LIT-208).
+#:
+#: Every SER corpus is normalised onto these names so ground truth is directly
+#: comparable with model output. They deliberately match the label strings the
+#: default SER checkpoint emits (LIT-224) -- note "fearful"/"surprised" rather
+#: than "fear"/"surprise" -- because the whole point of this corpus is measuring
+#: the model against known labels, and a vocabulary mismatch there silently
+#: scores every fear clip wrong.
+#:
+#: "calm" is RAVDESS-only and has no counterpart in the classifier. It is kept
+#: because it is genuine ground truth; an accuracy harness must decide whether
+#: to exclude those clips rather than have the loader quietly drop them.
+EMOTION_LABELS = (
+    "angry", "calm", "disgust", "fearful", "happy", "neutral", "sad", "surprised",
+)
+
+CREMA_D_LICENSE = "Open Database License (ODbL) - research use"
+RAVDESS_LICENSE = "CC-BY-NC-SA-4.0 - non-commercial research use"
+
+#: CREMA-D encodes emotion as the third underscore-delimited filename field.
+_CREMA_D_EMOTION = {
+    "ANG": "angry", "DIS": "disgust", "FEA": "fearful",
+    "HAP": "happy", "NEU": "neutral", "SAD": "sad",
+}
+_CREMA_D_INTENSITY = {"LO": "low", "MD": "medium", "HI": "high", "XX": "unspecified"}
+
+#: RAVDESS encodes emotion as the third dash-delimited filename field.
+_RAVDESS_EMOTION = {
+    "01": "neutral", "02": "calm", "03": "happy", "04": "sad",
+    "05": "angry", "06": "fearful", "07": "disgust", "08": "surprised",
+}
+_RAVDESS_INTENSITY = {"01": "normal", "02": "strong"}
+_RAVDESS_STATEMENT = {
+    "01": "Kids are talking by the door",
+    "02": "Dogs are sitting by the door",
+}
+
+
+class CremaDLoader(DatasetLoader):
+    """Loader for the CREMA-D crowd-sourced emotional speech corpus (LIT-208; FR2/FR6).
+
+    Audio lives flat in ``<root>/AudioWAV/`` with the label encoded in the
+    filename: ``<actor>_<sentence>_<emotion>_<intensity>.wav``, e.g.
+    ``1001_DFA_ANG_XX.wav``. Emotion is normalised onto ``EMOTION_LABELS``.
+
+    Speaker demographics (age, sex, race, ethnicity) come from the corpus's
+    ``VideoDemographics.csv`` when present -- CREMA-D is the one SER corpus that
+    ships them, which makes it the natural input for the FR15 accent/demographic
+    bias work later. The loader still works without that file; the demographic
+    dict is simply sparse.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "crema_d"
+    AUDIO_SUBDIR = "AudioWAV"
+    DEMOGRAPHICS_FILE = "VideoDemographics.csv"
+
+    def __init__(self, root_dir: Optional[Path | str] = None, *, name: str = "crema-d"):
+        super().__init__(name=name, task_family=TaskFamily.SER, license=CREMA_D_LICENSE)
+        self.root_dir = Path(root_dir or self.DEFAULT_DIR)
+
+    def iter_metadata(self) -> Iterator[SampleMetadata]:
+        audio_dir = self.root_dir / self.AUDIO_SUBDIR
+        if not audio_dir.is_dir():
+            raise FileNotFoundError(
+                f"CREMA-D audio directory for '{self.name}' not found: {audio_dir}"
+            )
+        demographics = self._load_demographics()
+        for wav_path in sorted(audio_dir.glob("*.wav")):
+            parsed = self._parse_filename(wav_path.stem)
+            if parsed is None:
+                logger.warning("crema-d: skipping unparseable filename %s", wav_path.name)
+                continue
+            actor_id, sentence, emotion, intensity = parsed
+            demo = dict(demographics.get(actor_id, {}))
+            demo["intensity"] = intensity
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=wav_path.stem,
+                audio_path=wav_path,
+                task_family=TaskFamily.SER,
+                label=emotion,
+                speaker_id=actor_id,
+                language="en",
+                license=self.license,
+                demographic=demo,
+                extra={"sentence_code": sentence, "intensity": intensity},
+            )
+
+    @staticmethod
+    def _parse_filename(stem: str) -> Optional[tuple[str, str, str, str]]:
+        """``1001_DFA_ANG_XX`` -> (actor, sentence, canonical emotion, intensity)."""
+        parts = stem.split("_")
+        if len(parts) != 4:
+            return None
+        actor_id, sentence, emotion_code, intensity_code = parts
+        emotion = _CREMA_D_EMOTION.get(emotion_code.upper())
+        if emotion is None:
+            return None
+        return (
+            actor_id,
+            sentence,
+            emotion,
+            _CREMA_D_INTENSITY.get(intensity_code.upper(), intensity_code.lower()),
+        )
+
+    def _load_demographics(self) -> Dict[str, Dict[str, str]]:
+        path = self.root_dir / self.DEMOGRAPHICS_FILE
+        if not path.exists():
+            return {}
+        out: Dict[str, Dict[str, str]] = {}
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                actor = (row.get("ActorID") or "").strip()
+                if not actor:
+                    continue
+                out[actor] = {
+                    key: (row.get(column) or "").strip()
+                    for key, column in (
+                        ("age", "Age"), ("sex", "Sex"),
+                        ("race", "Race"), ("ethnicity", "Ethnicity"),
+                    )
+                    if (row.get(column) or "").strip()
+                }
+        return out
+
+
+class RavdessLoader(DatasetLoader):
+    """Loader for the RAVDESS emotional speech corpus (LIT-208; FR2/FR6).
+
+    Audio sits under per-actor directories (``<root>/Actor_01/*.wav``) with a
+    seven-field dash-delimited filename, e.g. ``03-01-05-01-02-01-12.wav``:
+    modality, vocal channel, emotion, intensity, statement, repetition, actor.
+    Emotion (field 3) is normalised onto ``EMOTION_LABELS``.
+
+    Only speech is yielded. RAVDESS also ships a *song* vocal channel (field 2 =
+    ``02``), which is out of scope for an SER demo and would otherwise be scored
+    as if it were speech. Actor gender follows the corpus convention that
+    odd-numbered actors are male and even-numbered female.
+
+    Non-commercial research licence (CC-BY-NC-SA-4.0), so the audio is not
+    vendored -- ``Backend/data/`` is gitignored and paths are injectable.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "ravdess"
+    SPEECH_CHANNEL = "01"
+
+    def __init__(
+        self,
+        root_dir: Optional[Path | str] = None,
+        *,
+        name: str = "ravdess",
+        include_song: bool = False,
+    ):
+        super().__init__(name=name, task_family=TaskFamily.SER, license=RAVDESS_LICENSE)
+        self.root_dir = Path(root_dir or self.DEFAULT_DIR)
+        self.include_song = include_song
+
+    def iter_metadata(self) -> Iterator[SampleMetadata]:
+        if not self.root_dir.is_dir():
+            raise FileNotFoundError(
+                f"RAVDESS root for '{self.name}' not found: {self.root_dir}"
+            )
+        # Actor_* subdirectories are the documented layout, but tolerate a flat
+        # dump too -- both appear in the wild depending on how it was unzipped.
+        wav_paths = sorted(self.root_dir.glob("Actor_*/*.wav")) or sorted(
+            self.root_dir.glob("*.wav")
+        )
+        for wav_path in wav_paths:
+            parsed = self._parse_filename(wav_path.stem)
+            if parsed is None:
+                logger.warning("ravdess: skipping unparseable filename %s", wav_path.name)
+                continue
+            channel, emotion, intensity, statement, repetition, actor = parsed
+            if channel != self.SPEECH_CHANNEL and not self.include_song:
+                continue
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=wav_path.stem,
+                audio_path=wav_path,
+                task_family=TaskFamily.SER,
+                label=emotion,
+                speaker_id=f"actor_{actor}",
+                language="en",
+                license=self.license,
+                demographic={
+                    "sex": "male" if int(actor) % 2 == 1 else "female",
+                    "intensity": intensity,
+                },
+                extra={
+                    "statement": _RAVDESS_STATEMENT.get(statement, statement),
+                    "repetition": repetition,
+                    "vocal_channel": "speech" if channel == self.SPEECH_CHANNEL else "song",
+                },
+            )
+
+    @staticmethod
+    def _parse_filename(stem: str) -> Optional[tuple[str, str, str, str, str, str]]:
+        """``03-01-05-01-02-01-12`` -> (channel, emotion, intensity, statement, rep, actor)."""
+        parts = stem.split("-")
+        if len(parts) != 7:
+            return None
+        _, channel, emotion_code, intensity_code, statement, repetition, actor = parts
+        emotion = _RAVDESS_EMOTION.get(emotion_code)
+        if emotion is None or not actor.isdigit():
+            return None
+        return (
+            channel,
+            emotion,
+            _RAVDESS_INTENSITY.get(intensity_code, intensity_code),
+            statement,
+            repetition,
+            actor,
+        )
+
+
+def demo_clips_by_emotion(
+    loader: DatasetLoader, per_class: int = 2, seed: int = 0
+) -> Dict[str, List[SampleMetadata]]:
+    """Pick up to ``per_class`` clips for each emotion present in ``loader``.
+
+    Backs the mid-evaluation walkthrough ("a handful of demo clips per emotion
+    class") and gives LIT-224's outstanding accuracy check a balanced, known-label
+    sample instead of whatever the catalog happens to list first. Deterministic
+    for a given ``seed``; streams rather than materialising the corpus.
+    """
+    if per_class < 0:
+        raise ValueError("per_class must be non-negative")
+    rng = random.Random(seed)
+    seen: Dict[str, int] = {}
+    picked: Dict[str, List[SampleMetadata]] = {}
+    for meta in loader.iter_metadata():
+        if meta.label is None:
+            continue
+        count = seen[meta.label] = seen.get(meta.label, 0) + 1
+        bucket = picked.setdefault(meta.label, [])
+        if len(bucket) < per_class:
+            bucket.append(meta)
+        else:
+            # Reservoir-sample within the class so the choice is spread across
+            # the corpus rather than biased to its first few actors.
+            j = rng.randint(0, count - 1)
+            if j < per_class:
+                bucket[j] = meta
+    return picked
+
+
 @dataclass
 class CorpusSpec:
     """A registry entry: what a corpus is, and how (or whether yet) to load it.
@@ -586,8 +832,12 @@ class CorpusSpec:
 CORPUS_REGISTRY: Dict[str, CorpusSpec] = {
     "common-voice": CorpusSpec("common-voice", TaskFamily.ASR, "CC0-1.0", loader_factory=CommonVoiceLoader, owner_issue="LIT-141"),
     "librispeech": CorpusSpec("librispeech", TaskFamily.ASR, "CC-BY-4.0", loader_factory=LibriSpeechLoader, owner_issue="LIT-141"),
-    "crema-d": CorpusSpec("crema-d", TaskFamily.SER, "Open Database License", owner_issue="LIT-208"),
-    "ravdess": CorpusSpec("ravdess", TaskFamily.SER, "CC-BY-NC-SA-4.0", owner_issue="LIT-208"),
+    "crema-d": CorpusSpec("crema-d", TaskFamily.SER, CREMA_D_LICENSE, loader_factory=CremaDLoader, owner_issue="LIT-208"),
+    "ravdess": CorpusSpec("ravdess", TaskFamily.SER, RAVDESS_LICENSE, loader_factory=RavdessLoader, owner_issue="LIT-208"),
+    # ESD is the third SER corpus in the LIT-106 inventory but is out of LIT-208's
+    # scope (that issue covers CREMA-D + RAVDESS only, which is enough for the MVP
+    # demo). Left unwired deliberately: get_loader raises naming the issue rather
+    # than returning empty data.
     "esd": CorpusSpec("esd", TaskFamily.SER, "Research-only", owner_issue="LIT-208"),
     "l2-arctic": CorpusSpec("l2-arctic", TaskFamily.ASR, L2_ARCTIC_LICENSE, loader_factory=L2ArcticLoader, owner_issue="LIT-181"),
     "asvspoof-2021": CorpusSpec("asvspoof-2021", TaskFamily.DEEPFAKE, ASVSPOOF_LICENSE, loader_factory=ASVspoofLoader, owner_issue="LIT-142"),
