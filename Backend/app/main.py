@@ -2,10 +2,10 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .infrastructure.session import SessionMiddleware
-
+from .api.routes import inference as inference_routes
 from .api.routes import session as session_routes, results as results_routes, inferences as inferences_routes, upload as upload_routes, health as health_routes
 from .api.routes import datasets as datasets_routes, saliency as saliency_routes, perturbations as perturbations_routes, dataset_management as dataset_management_routes, debug as debug_routes
-
+from .api.routes import tasks as tasks_routes
 app = FastAPI(title="LIT for Voice – API")
 
 # Configure CORS origins - default to common development origins if not set
@@ -27,8 +27,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(SessionMiddleware)
 
+app.add_middleware(SessionMiddleware)
+app.include_router(tasks_routes.router)
+app.include_router(inference_routes.router)
 app.include_router(session_routes.router, tags=["Session"])
 app.include_router(results_routes.router, tags=["Results"])
 app.include_router(inferences_routes.router, tags=["Inferences"])

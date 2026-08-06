@@ -61,6 +61,16 @@ number, constraint ID, or class name you didn't just read yourself in this
 session, `grep`/read the actual file first.** Convention docs and prior Tier-C
 stamps can be wrong; the source documents are ground truth.
 
+The same applies to tooling output. **`gh pr view --json
+additions,deletions,changedFiles` can return stale counts** captured when the PR
+was opened — on PRs #34/#36 it reported ~180 files/+38k when the real diffs were
+5 files/+577 and 2 files/+188, and a review round confidently repeated both
+numbers before anyone measured. Use `git diff --shortstat
+origin/develop...<head>`. Likewise, **don't reason about what a merge will do —
+run it**: `git worktree add --detach /tmp/x <base> && git merge --no-commit
+<head>` answers "will this conflict / will this revert X" in seconds, and in
+this repo it disproved a confident "merging this reverts LIT-128".
+
 Similarly: LIT-7 ("Setup the Echo 1.0") was marked Done in Linear, but the
 real ECHO 1.0 codebase had never actually been merged into this repo —
 `develop` carried a parallel from-scratch scaffold instead. This was caught
@@ -76,18 +86,24 @@ The real ECHO 1.0 baseline is merged (PR #7), and the SAD §5.1/§5.2 five-layer
 layout landed via PR #16 (LIT-227). Structure on `develop` as of 2026-08-05:
 
 ```
-Backend/app/{api/routes, domain, orchestration, infrastructure, services}
+Backend/app/{api/routes, domain, orchestration, infrastructure}
 Frontend/src/{pages, contexts, components/{layout,panels,audio,visualization,ui,analysis,dataset,predictions}, hooks, lib}
 ```
 
-`app/core/` is **gone** — `settings`/`redis`/`session` now live in
-`app/infrastructure/`. Model + explanation logic is in `app/domain/`, RQ
-fan-out/fan-in in `app/orchestration/`. One file has **not** been moved yet:
-`app/services/multitask_orchestrator_service.py` (the LIT-150 orchestrator
-draft) — it's the next migration target, not the seed of a second parallel
-tree. **Don't trust this block over the repo** — `ls Backend/app/` settles the
-current shape in one command, and this doc drifts the moment someone forgets to
-update it (the whole reason the previous version of this section was wrong).
+`app/core/` **and** `app/services/` are both **gone** (LIT-230 removed the last
+of `services/`). The tree now matches SAD §5.1's five layers exactly:
+`settings`/`redis`/`session`/`rq_connection` in `app/infrastructure/`, model +
+explanation logic in `app/domain/`, the RQ fabric in `app/orchestration/`,
+routes in `app/api/routes/`. **If you find yourself adding a file to
+`app/services/`, stop** — that directory is ECHO 1.0 legacy and its return is
+the exact bug LIT-230 fixed. **Don't trust this block over the repo** — `ls
+Backend/app/` settles the current shape in one command, and this doc drifts the
+moment someone forgets to update it (the whole reason the previous version of
+this section was wrong).
+
+Inside `app/orchestration/`, `task_orchestrator.py` is the SAD §5.2 Task
+Orchestrator — **one** queue fabric, worker and enqueue API. Extend it; do not
+add a parallel one (see the duplicate-module incident below).
 
 Per SAD §8.2 the migration is incremental ("infra services set up first, then
 model-loading reorganised, then explanation code tidied, then background-
@@ -122,18 +138,32 @@ left and why.
    `cd Backend && pip install -r requirements.txt && pytest`). Don't assume
    green — CI on this project has genuinely failed before due to dependency
    version drift (see PR #7 history).
-6. **Push, open the PR into `develop`**, title/body referencing the LIT-id.
-7. **Wait for `gh pr checks <n>` to report an actual terminal pass/fail for
-   every check** before treating CI as verified — "opened" is not "green."
-   If a check fails, diagnose and fix the root cause (don't disable the
-   check, don't skip hooks, don't force-merge).
+6. **Do NOT run `git commit` — the developer makes the commits.** Stage the
+   work (`git add` the intended files, and check nothing stray got swept in),
+   then hand over a ready-to-paste `git commit` with the message already
+   written. Say plainly that nothing is committed yet. Commits carry the
+   developer's name and are the permanent record of who wrote what — they
+   want that authorship, and a last look at the diff before it is sealed into
+   history. If you have already committed by reflex, offer `git reset --soft
+   <branch-point>` so they can make the commit themselves; the work stays
+   staged and nothing is lost.
+7. **Once they have committed, pushing and opening the PR is yours to do** —
+   `git push -u origin <branch>` and `gh pr create --base develop` with the
+   LIT-id in the title and body. A PR is a wrapper around commits that already
+   exist, so it does not carry the authorship weight a commit does. Then wait
+   for `gh pr checks <n>` to report an actual terminal pass/fail for every
+   check before treating CI as verified — "opened" is not "green." If a check
+   fails, diagnose and fix the root cause (don't disable the check, don't skip
+   hooks, don't force-merge).
 8. **Stop there. Do not merge the PR yourself.** Every PR needs at least one
    approving review from a different team member before merging into
    `develop` — this is mandatory on this project regardless of CI status.
    Opening the PR already moved the Linear issue to **In Review**
    automatically (LIT-134's automation) — that's the correct, expected
    state; don't try to advance it further. Only merge if a human explicitly
-   asks you to merge that specific PR.
+   asks you to merge that specific PR. **A PR with zero recorded reviews
+   still isn't mergeable just because the user asked** — say so and let them
+   approve or merge it themselves.
 9. **Update `docs/ISSUE_PLAN.md`'s status column** for the issue (and any
    issue it unblocks) so the next session/developer sees accurate state.
 10. If you find a conflict along the way (issue body contradicts SAD/SRS, a
@@ -142,6 +172,22 @@ left and why.
     user, don't silently resolve it** by guessing which side is right.
 
 ## Known open items (check before assuming these need fresh triage)
+
+- **A stale Tier-C `Path:` stamp caused a whole module to be built twice
+  (LIT-230).** LIT-149's stamp said `Path: Backend/app/services/queue_service.py`
+  — written before LIT-227 emptied that directory. The developer followed it
+  exactly as step 4 above says to, and `app/services/queue_service.py` (383
+  lines) landed duplicating `app/orchestration/rq_broker.py`, already merged as
+  LIT-127. Two individually-green PRs, no git conflict, one silently duplicated
+  task fabric with **two different progress-channel prefixes**, so a job
+  published by one was invisible to a subscriber on the other. LIT-127, LIT-149,
+  LIT-150 and LIT-225 all carried the same stale path.
+  **The lesson: a `Path:` field is a claim about the tree, and stale stamps are
+  a known failure mode here — `ls` the directory before you write to it, and if
+  the stamp points somewhere that no longer exists, fix the stamp and flag it
+  rather than recreating the directory.** This is the same class of bug as the
+  fabricated SAD section numbers above: convention metadata drifted from the
+  source, and nobody checked.
 
 - LIT-124/143/144 — flagged as superseded duplicates of LIT-207/210/211,
   not stamped, recommended for closing. Don't resume work on them without
