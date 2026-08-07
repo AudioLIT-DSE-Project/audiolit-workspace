@@ -1,21 +1,26 @@
-"""Unit tests for SaliencyService (SRS FR9, SAD §5.2)."""
+"""Unit tests for SaliencyService & Core (SRS FR9, SAD §5.2)."""
 import pytest
 import numpy as np
 import torch
+import torch.nn as nn
 import soundfile as sf
+import librosa
 from pathlib import Path
 
-# Import pure helper functions
+# Import pure helper functions and core IG/Grad-CAM
 from app.domain.saliency_service import (
     audio_to_spectrogram,
     spectrogram_patch_bounds,
     occlusion_attribution,
-    attribution_timeline
+    attribution_timeline,
+    integrated_gradients,
+    compute_grad_cam,
+    find_last_conv_layer,
+    generate_wav2vec2_saliency
 )
 
 # Mock the model_loader_service to avoid downloading HuggingFace models in CI
 import app.domain.model_loader_service as model_loader_service
-from app.domain.saliency_service import generate_wav2vec2_saliency
 
 class MockFeatureExtractor:
     def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
@@ -40,7 +45,6 @@ class MockEmoModel(torch.nn.Module):
         x = input_values[:, :16000]
         if x.shape[-1] < 16000:
             x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
-        # x shape is [1, 16000], linear produces [1, 6]
         logits = self.linear(x)
         
         class MockOutput:
@@ -49,7 +53,6 @@ class MockEmoModel(torch.nn.Module):
         return MockOutput(logits)
 
     def wav2vec2(self, input_values, attention_mask=None):
-        # Mock internal wav2vec2 for the fallback energy map
         x = input_values[:, :16000]
         if x.shape[-1] < 16000:
             x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
@@ -76,15 +79,28 @@ def dummy_audio_file(tmp_path: Path) -> Path:
     sf.write(file_path, y, sr)
     return file_path
 
+class DummyAudioModel(nn.Module):
+    """Dummy model mimicking an audio classifier for testing hooks."""
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Conv1d(1, 16, 3, padding=1)
+        self.linear = nn.Linear(16000, 6)  # 6 output classes
+        
+    def forward(self, x):
+        # x shape: [1, time] -> [1, 1, time] for Conv1d
+        x = x.unsqueeze(1)
+        x = self.conv(x)
+        x = x.squeeze(1) # back to [1, time]
+        logits = self.linear(x[:, :16000])
+        return logits
+
 
 class TestPureHelperFunctions:
     """Test the mathematical helpers used for spectrogram mapping and occlusion."""
     
     def test_audio_to_spectrogram(self, dummy_audio_file):
-        import librosa
         audio, sr = librosa.load(str(dummy_audio_file), sr=16000)
         spect = audio_to_spectrogram(audio)
-        
         assert spect.ndim == 2
         assert spect.shape[0] == 257  # n_fft/2 + 1
         assert spect.shape[1] > 0
@@ -99,25 +115,66 @@ class TestPureHelperFunctions:
         bounds = spectrogram_patch_bounds(105, 10)
         assert len(bounds) == 10
         assert bounds[0] == (0, 10)
-        assert bounds[-1] == (94, 105)  # Last patch takes the remainder
+        assert bounds[-1] == (94, 105)
 
     def test_occlusion_attribution(self):
-        # Create a dummy 2D spectrogram
         spect = np.random.rand(32, 32).astype(np.float32)
-        
-        # Mock score function: returns the sum of the spectrogram
         def mock_score_fn(s):
             return float(np.sum(s))
-        
         importance = occlusion_attribution(mock_score_fn, spect, n_freq_patches=4, n_time_patches=4)
-        
         assert importance.shape == (4, 4)
-        # Importance can be positive or negative depending on whether the patch 
-        # supported or suppressed the score. Just verify it computed successfully.
         assert importance.dtype == np.float32
 
+
+class TestSaliencyCore:
+    """Test IntegratedGradients, Grad-CAM, and Timeline mapping (SRS FR9)."""
+    
+    @pytest.fixture
+    def dummy_inputs(self):
+        return torch.randn(1, 16000, requires_grad=True)
+
+    def test_integrated_gradients(self, dummy_inputs):
+        """Test IG maps output scores back to input dimensions."""
+        model = DummyAudioModel()
+        def forward_fn(x):
+            return model(x)
+            
+        attributions = integrated_gradients(
+            forward_fn=forward_fn,
+            inputs=dummy_inputs,
+            target=0,
+            n_steps=10
+        )
+        assert isinstance(attributions, torch.Tensor)
+        # Should match input shape exactly
+        assert attributions.shape == dummy_inputs.shape
+
+    def test_compute_grad_cam(self, dummy_inputs):
+        """Test Grad-CAM isolates spatial activation shifts."""
+        model = DummyAudioModel()
+        target_layer = model.conv
+        
+        cam_map = compute_grad_cam(
+            model=model,
+            inputs=dummy_inputs,
+            target_layer=target_layer,
+            target_index=0
+        )
+        assert isinstance(cam_map, np.ndarray)
+        # Conv1d output spatial dim should be 16000
+        assert cam_map.ndim == 1
+        assert len(cam_map) == 16000
+        # Values should be normalized 0-1
+        assert np.max(cam_map) <= 1.0
+        assert np.min(cam_map) >= 0.0
+
+    def test_find_last_conv_layer(self):
+        model = DummyAudioModel()
+        layer = find_last_conv_layer(model)
+        assert isinstance(layer, nn.Conv1d)
+
     def test_attribution_timeline(self):
-        # Create dummy attributions: [batch, channels, time]
+        """Test gradient arrays are wrapped into ms-aligned JSON streams."""
         attributions = torch.randn(1, 16, 100)
         timeline = attribution_timeline(attributions, sample_rate=16000, hop_length=512)
         
@@ -127,6 +184,8 @@ class TestPureHelperFunctions:
         assert "weight" in timeline[0]
         assert 0.0 <= timeline[0]["weight"] <= 1.0
         assert timeline[0]["t_ms"] == 0.0
+        # Check ms mapping (1 hop = 512/16000 sec = 32 ms)
+        assert timeline[1]["t_ms"] == round((512 / 16000) * 1000, 3)
 
 
 class TestWav2Vec2Saliency:
