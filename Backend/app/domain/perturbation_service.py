@@ -1,12 +1,18 @@
+import io
 import torch
 import soundfile as sf
 import os
 import uuid
 import librosa
 import numpy as np
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from ..infrastructure.dataset_service import resolve_file
+
+# Setup logger
+logger = logging.getLogger("audiolit.perturbation")
+logger.setLevel(logging.INFO)
 
 def _load_waveform(path: str) -> Tuple[torch.Tensor, int]:
     """
@@ -67,15 +73,8 @@ def apply_time_masking(waveform: torch.Tensor, mask_start_percent: float, mask_e
     masked_waveform[:, start_idx:end_idx] = 0
     return masked_waveform
 
-def apply_frequency_masking(waveform, sample_rate, mask_freq_start, mask_freq_end):
-    """
-    Apply frequency masking to the waveform
-    waveform: Tensor [channels, time]
-    sample_rate: Sample rate of the audio
-    mask_freq_start: Start frequency in Hz
-    mask_freq_end: End frequency in Hz
-    """
-    # Convert to frequency domain
+def apply_frequency_masking(waveform: torch.Tensor, sample_rate: int, mask_freq_start: float, mask_freq_end: float) -> torch.Tensor:
+    """Apply frequency masking to the waveform."""
     fft = torch.fft.fft(waveform, dim=-1)
     freqs = torch.fft.fftfreq(waveform.shape[-1], 1/sample_rate)
     freq_mask = (freqs >= mask_freq_start) & (freqs <= mask_freq_end)
@@ -136,108 +135,35 @@ def apply_pitch_shift(waveform: torch.Tensor, sample_rate: int, pitch_shift_semi
     """Apply pitch shifting to the waveform using Librosa."""
     pitch_shift_semitones = max(-6, min(6, pitch_shift_semitones))
     if abs(pitch_shift_semitones) < 0.1:
-        print("DEBUG: Skipping pitch shift - too small")
         return waveform
     
     max_length = sample_rate * 30
     if waveform.shape[-1] > max_length:
-        print(f"DEBUG: Truncating audio to {max_length} samples to prevent long processing")
         waveform = waveform[..., :max_length]
     
     try:
-        # Use librosa directly as it's more reliable and faster
-        # Convert to numpy for librosa
-        if waveform.dim() > 1:
-            # Take first channel if stereo
-            audio_np = waveform[0].numpy()
-        else:
-            audio_np = waveform.numpy()
-        
-        print(f"DEBUG: Using librosa.effects.pitch_shift with n_steps={pitch_shift_semitones}")
-        print(f"DEBUG: Audio length: {len(audio_np)} samples")
-        
-        # Apply pitch shift using librosa with timeout protection
-        import signal
-        import time
-        
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Pitch shift operation timed out")
-        
-        # Set a timeout of 30 seconds
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(30)
-        
-        try:
-            shifted_audio = librosa.effects.pitch_shift(
-                y=audio_np, 
-                sr=sample_rate, 
-                n_steps=pitch_shift_semitones
-            )
-            signal.alarm(0)  # Cancel the alarm
-            
-            # Convert back to torch tensor
-            result = torch.from_numpy(shifted_audio).unsqueeze(0)  # Add channel dimension
-            print(f"DEBUG: Librosa pitch shift completed successfully, output shape: {result.shape}")
-            return result
-            
-        except TimeoutError:
-            signal.alarm(0)  # Cancel the alarm
-            print("DEBUG: Pitch shift timed out, returning original waveform")
-            return waveform
-            
+        audio_np = waveform[0].numpy() if waveform.dim() > 1 else waveform.numpy()
+        shifted_audio = librosa.effects.pitch_shift(y=audio_np, sr=sample_rate, n_steps=pitch_shift_semitones)
+        return torch.from_numpy(shifted_audio).unsqueeze(0)
     except Exception as e:
-        print(f"DEBUG: Pitch shift failed with error: {e}")
-        print("DEBUG: Returning original waveform")
+        logger.error(f"Pitch shift failed: {e}. Returning original waveform.")
         return waveform
 
-def apply_time_stretch(waveform, stretch_factor):
-    """
-    Apply time stretching to the waveform
-    waveform: Tensor [channels, time]
-    stretch_factor: Factor to stretch time (1.0 = no change, >1.0 = slower, <1.0 = faster)
-    """
-    print(f"DEBUG: apply_time_stretch called with stretch_factor={stretch_factor}")
-    print(f"DEBUG: Input waveform shape: {waveform.shape}")
-    
-    # Skip if no stretch needed
+def apply_time_stretch(waveform: torch.Tensor, stretch_factor: float) -> torch.Tensor:
+    """Apply time stretching to the waveform using Librosa."""
     if abs(stretch_factor - 1.0) < 0.01:
-        print("DEBUG: Skipping time stretch - factor too close to 1.0")
         return waveform
     
     try:
-        # Use librosa for time stretching as it's more reliable
-        # Convert to numpy for librosa
-        if waveform.dim() > 1:
-            # Take first channel if stereo
-            audio_np = waveform[0].numpy()
-        else:
-            audio_np = waveform.numpy()
-        
-        print(f"DEBUG: Using librosa.effects.time_stretch with rate={stretch_factor}")
-        # Apply time stretch using librosa
-        stretched_audio = librosa.effects.time_stretch(
-            y=audio_np, 
-            rate=stretch_factor
-        )
-        
-        # Convert back to torch tensor
-        result = torch.from_numpy(stretched_audio).unsqueeze(0)  # Add channel dimension
-        print(f"DEBUG: Time stretch completed successfully, output shape: {result.shape}")
-        return result
-        
+        audio_np = waveform[0].numpy() if waveform.dim() > 1 else waveform.numpy()
+        stretched_audio = librosa.effects.time_stretch(y=audio_np, rate=stretch_factor)
+        return torch.from_numpy(stretched_audio).unsqueeze(0)
     except Exception as e:
-        print(f"DEBUG: Time stretch failed with error: {e}")
-        print("DEBUG: Returning original waveform")
+        logger.error(f"Time stretch failed: {e}. Returning original waveform.")
         return waveform
 
-def apply_perturbations(waveform, sample_rate, perturbations: List[Dict[str, Any]]) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
-    """
-    Apply multiple perturbations to a waveform
-    waveform: Tensor [channels, time]
-    sample_rate: Sample rate of the audio
-    perturbations: List of perturbation dictionaries
-    Returns: (perturbed_waveform, applied_perturbations)
-    """
+def apply_perturbations(waveform: torch.Tensor, sample_rate: int, perturbations: List[Dict[str, Any]]) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
+    """Apply multiple perturbations to a waveform sequentially."""
     perturbed_waveform = waveform.clone()
     applied_perturbations = []
     
@@ -273,14 +199,8 @@ def apply_perturbations(waveform, sample_rate, perturbations: List[Dict[str, Any
                 
             elif perturbation_type == "pitch_shift":
                 pitch_shift_semitones = params.get("pitch_shift_semitones", 2)
-                print(f"DEBUG: Processing pitch_shift perturbation with {pitch_shift_semitones} semitones")
                 perturbed_waveform = apply_pitch_shift(perturbed_waveform, sample_rate, pitch_shift_semitones)
-                applied_perturbations.append({
-                    "type": "pitch_shift",
-                    "params": {"pitch_shift_semitones": pitch_shift_semitones},
-                    "status": "applied"
-                })
-                print(f"DEBUG: Pitch shift perturbation completed")
+                applied_perturbations.append({"type": "pitch_shift", "params": {"pitch_shift_semitones": pitch_shift_semitones}, "status": "applied"})
                 
             elif perturbation_type == "time_stretch":
                 stretch_factor = params.get("stretch_factor", 1.1)
@@ -296,22 +216,11 @@ def apply_perturbations(waveform, sample_rate, perturbations: List[Dict[str, Any
     return perturbed_waveform, applied_perturbations
 
 def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output_dir: str = "uploads", dataset: str = None, session_id: str = None) -> Dict[str, Any]:
-    """
-    Apply perturbations to an audio file and save the result
-    file_path: Path to the input audio file (can be dataset path or absolute path)
-    perturbations: List of perturbation dictionaries
-    output_dir: Directory to save the perturbed audio
-    dataset: Dataset name if file_path is a dataset file
-    session_id: Session ID for custom dataset resolution
-    Returns: Dictionary with file info and metadata
-    """
-    # Resolve the file path - handle both dataset files and uploaded files
+    """Apply perturbations to an audio file and save the derived clip non-destructively."""
     try:
         if dataset and not Path(file_path).is_absolute():
-            # This is a dataset file, resolve it using the dataset service
             resolved_path = resolve_file(dataset, file_path, session_id)
         else:
-            # This is an uploaded file or absolute path
             resolved_path = Path(file_path)
             if not resolved_path.exists():
                 raise FileNotFoundError(f"Audio file not found: {file_path}")
@@ -331,12 +240,10 @@ def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output
     
     perturbed_waveform, applied_perturbations = apply_perturbations(waveform, sample_rate, perturbations)
     
-    # Generate output filename
     input_path = Path(file_path)
-    output_filename = f"{input_path.stem}_perturbed_{uuid.uuid4().hex[:8]}{input_path.suffix}"
+    output_filename = f"{input_path.stem}_perturbed_{uuid.uuid4().hex[:8]}.wav"
     output_path = Path(output_dir) / output_filename
     
-    # Ensure output directory exists
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     try:
@@ -359,5 +266,6 @@ def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output
         "duration_ms": duration_ms,
         "sample_rate": sample_rate,
         "applied_perturbations": applied_perturbations,
+        "preview_bytes": preview_bytes, 
         "success": True
     }
