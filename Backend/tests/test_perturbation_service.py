@@ -1,10 +1,3 @@
-To fully satisfy the Definition of Done (DoD) — which explicitly requires verifying the **channel-orientation adapter** and ensuring it returns **correctly shaped 16 kHz mono arrays** — I have updated the test file. 
-
-I modified the `sample_audio_file` fixture to generate a **stereo, 22050 Hz** WAV file. This allows the tests to explicitly prove that the adapter transposes `(samples, channels)` to `(channels, samples)`, downmixes to mono, and resamples to 16kHz. I also added the test for the new `apply_band_pass_filter` routine.
-
-Here is the final, complete `Backend/tests/test_perturbation_service.py`:
-
-```python
 """
 Perturbation service — soundfile I/O & NumPy-Driven Masking (LIT-226 / LIT-175)
 
@@ -226,4 +219,3 @@ class TestMutationEngines:
         
         # Check non-destructive: original file should still exist
         assert sample_audio_file.exists()
-```
