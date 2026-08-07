@@ -29,7 +29,6 @@ class MockFeatureExtractor:
                 self.input_values = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
                 self.attention_mask = torch.ones_like(self.input_values)
             
-            # HuggingFace BatchEncoding supports `in` operator, so we must too
             def __contains__(self, key):
                 return key in ["input_values", "attention_mask"]
                 
@@ -38,7 +37,7 @@ class MockFeatureExtractor:
 class MockEmoModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear = torch.nn.Linear(16000, 6)  # 6 emotion classes
+        self.linear = torch.nn.Linear(16000, 6)
         self.config = type('obj', (object,), {'id2label': {0: 'neutral', 1: 'happy', 2: 'sad'}})()
 
     def forward(self, input_values, attention_mask=None):
@@ -84,14 +83,14 @@ class DummyAudioModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Conv1d(1, 16, 3, padding=1)
-        self.linear = nn.Linear(16000, 6)  # 6 output classes
+        self.linear = nn.Linear(16, 6)  # 6 output classes
         
     def forward(self, x):
         # x shape: [1, time] -> [1, 1, time] for Conv1d
         x = x.unsqueeze(1)
-        x = self.conv(x)
-        x = x.squeeze(1) # back to [1, time]
-        logits = self.linear(x[:, :16000])
+        x = self.conv(x)        # [1, 16, time]
+        x = x.mean(dim=-1)     # Global average pool -> [1, 16]
+        logits = self.linear(x)# [1, 6]
         return logits
 
 
@@ -102,7 +101,7 @@ class TestPureHelperFunctions:
         audio, sr = librosa.load(str(dummy_audio_file), sr=16000)
         spect = audio_to_spectrogram(audio)
         assert spect.ndim == 2
-        assert spect.shape[0] == 257  # n_fft/2 + 1
+        assert spect.shape[0] == 257
         assert spect.shape[1] > 0
 
     def test_spectrogram_patch_bounds_exact(self):
@@ -136,17 +135,16 @@ class TestSaliencyCore:
     def test_integrated_gradients(self, dummy_inputs):
         """Test IG maps output scores back to input dimensions."""
         model = DummyAudioModel()
+        # Return the score for class 0 directly to satisfy Captum's scalar requirement
         def forward_fn(x):
-            return model(x)
+            return model(x)[:, 0]
             
         attributions = integrated_gradients(
             forward_fn=forward_fn,
             inputs=dummy_inputs,
-            target=0,
             n_steps=10
         )
         assert isinstance(attributions, torch.Tensor)
-        # Should match input shape exactly
         assert attributions.shape == dummy_inputs.shape
 
     def test_compute_grad_cam(self, dummy_inputs):
@@ -164,7 +162,6 @@ class TestSaliencyCore:
         # Conv1d output spatial dim should be 16000
         assert cam_map.ndim == 1
         assert len(cam_map) == 16000
-        # Values should be normalized 0-1
         assert np.max(cam_map) <= 1.0
         assert np.min(cam_map) >= 0.0
 
@@ -184,7 +181,6 @@ class TestSaliencyCore:
         assert "weight" in timeline[0]
         assert 0.0 <= timeline[0]["weight"] <= 1.0
         assert timeline[0]["t_ms"] == 0.0
-        # Check ms mapping (1 hop = 512/16000 sec = 32 ms)
         assert timeline[1]["t_ms"] == round((512 / 16000) * 1000, 3)
 
 
@@ -199,24 +195,18 @@ class TestWav2Vec2Saliency:
         assert result["method"] == "gradcam"
         assert "emotion" in result
         
-        # Verify 1D series exists
         assert "series" in result
         assert len(result["series"]) > 0
         
-        # Verify 2D matrices exist
         assert "base_spectrogram" in result
         assert "saliency_matrix" in result
         
         base_spect = np.array(result["base_spectrogram"])
         saliency_matrix = np.array(result["saliency_matrix"])
         
-        # Both must be 2D
         assert base_spect.ndim == 2
         assert saliency_matrix.ndim == 2
-        
-        # The shapes MUST match for UI canvas overlay (DoD requirement)
         assert base_spect.shape == saliency_matrix.shape
         
-        # Values should be normalized
         assert np.max(saliency_matrix) <= 1.0
         assert np.min(saliency_matrix) >= 0.0
