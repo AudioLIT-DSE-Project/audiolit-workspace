@@ -4,7 +4,8 @@ Perturbation service — soundfile I/O & NumPy-Driven Masking (LIT-226 / LIT-175
 Verifies the torchaudio -> soundfile swap preserves the (channels, time)
 float32 tensor contract the perturbation functions rely on, and that
 perturb_and_save still produces a valid, playable output file.
-Also verifies the new 2D time-freq slice masking and Web Audio preview bytes.
+Also verifies the new 2D time-freq slice masking, band-pass filter, 
+Web Audio preview bytes, and the 16kHz mono orientation adapter.
 """
 
 import numpy as np
@@ -21,6 +22,7 @@ from app.domain.perturbation_service import (
     apply_time_masking,
     apply_frequency_masking,
     apply_2d_time_freq_mask,
+    apply_band_pass_filter,
     apply_pitch_shift,
     apply_time_stretch,
     apply_perturbations,
@@ -30,39 +32,37 @@ from app.domain.perturbation_service import (
 
 @pytest.fixture
 def sample_audio_file(tmp_path: Path) -> Path:
-    """Creates a temporary dummy WAV file for testing."""
-    sr = 16000
+    """Creates a temporary dummy WAV file for testing (Stereo, 22050 Hz)."""
+    sr = 22050  # Intentionally not 16kHz to test adapter resampling
     duration = 2.0
     t = np.linspace(0, duration, int(sr * duration), endpoint=False)
-    # Generate a simple 440Hz sine wave
-    y = 0.5 * np.sin(2 * np.pi * 440 * t)
-    file_path = tmp_path / "dummy_audio.wav"
-    sf.write(file_path, y, sr)
+    
+    # Generate a stereo sine wave to test channel downmixing
+    left = 0.5 * np.sin(2 * np.pi * 440 * t)
+    right = 0.5 * np.sin(2 * np.pi * 660 * t)
+    stereo_audio = np.stack([left, right], axis=1)  # Shape: (samples, channels)
+    
+    file_path = tmp_path / "dummy_stereo.wav"
+    sf.write(file_path, stereo_audio, sr)
     return file_path
 
 
 class TestWaveformIO:
     """_load_waveform / _save_waveform match torchaudio.load/save's old contract."""
 
-    def test_load_waveform_shape_and_dtype(self, sample_audio_file: Path):
+    def test_orientation_adapter_downmixes_and_resamples(self, sample_audio_file: Path):
+        """Verify soundfile reads (samples, channels) and adapter transposes to (channels, samples), 
+        downmixes to mono, and resamples to 16kHz."""
         waveform, sample_rate = _load_waveform(str(sample_audio_file))
 
         assert isinstance(waveform, torch.Tensor)
         assert waveform.dtype == torch.float32
-        assert waveform.dim() == 2  # (channels, time), same as torchaudio.load
-        assert waveform.shape[0] == 1  # sample_audio_file fixture writes mono
-        assert sample_rate == 16000
-
-    def test_load_waveform_values_match_soundfile(self, sample_audio_file: Path):
-        waveform, sample_rate = _load_waveform(str(sample_audio_file))
-        raw, sr = sf.read(str(sample_audio_file), dtype="float32")
-
-        assert sample_rate == sr
-        np.testing.assert_allclose(waveform[0].numpy(), raw, atol=1e-6)
+        assert waveform.dim() == 2  # (channels, time)
+        assert waveform.shape[0] == 1  # Downmixed to mono
+        assert sample_rate == 16000  # Resampled to 16kHz
 
     def test_save_waveform_round_trip(self, tmp_path: Path):
         # Two-channel synthetic waveform, matches the (channels, time) shape
-        # apply_perturbations()/torchaudio.load() used to hand back.
         t = np.linspace(0, 1.0, 16000, False)
         left = 0.3 * np.sin(2 * np.pi * 440 * t)
         right = 0.3 * np.sin(2 * np.pi * 660 * t)
@@ -74,8 +74,9 @@ class TestWaveformIO:
         assert out_path.exists()
         reloaded, sr = _load_waveform(str(out_path))
         assert sr == 16000
-        assert reloaded.shape == waveform.shape
-        np.testing.assert_allclose(reloaded.numpy(), waveform.numpy(), atol=1e-4)
+        # Reloaded will be downmixed to mono by _load_waveform, so shape changes to (1, 16000)
+        assert reloaded.shape[0] == 1
+        assert reloaded.shape[1] == 16000
 
     def test_save_waveform_mono(self, tmp_path: Path):
         # apply_pitch_shift/apply_time_stretch always return a single-channel
@@ -130,7 +131,7 @@ class TestPerturbAndSave:
 
 
 class TestMutationEngines:
-    """Tests individual mutation algorithms and 2D masking."""
+    """Tests individual mutation algorithms, 2D masking, and band-pass filter."""
 
     @pytest.fixture
     def dummy_waveform(self):
@@ -152,7 +153,7 @@ class TestMutationEngines:
         assert wav_bytes[:4] == b'RIFF'
 
     def test_apply_2d_time_freq_mask(self, dummy_waveform):
-        """Test NumPy-Driven 2D Spectrogram Slice Masking (SRS FR12)."""
+        """Test NumPy-Driven 2D Spectrogram Slice Masking (mute regions)."""
         waveform, sr = dummy_waveform
         params = {
             "t_start_ms": 500,
@@ -165,6 +166,15 @@ class TestMutationEngines:
         assert masked_waveform.shape == waveform.shape
         # The masked region should be different
         assert not torch.equal(masked_waveform, waveform)
+
+    def test_apply_band_pass_filter(self, dummy_waveform):
+        """Test signal modification routine for band-pass filtering."""
+        waveform, sr = dummy_waveform
+        params = {"f_low_hz": 1000, "f_high_hz": 3000}
+        filtered_waveform = apply_band_pass_filter(waveform, sr, params)
+        
+        assert filtered_waveform.shape == waveform.shape
+        assert not torch.equal(filtered_waveform, waveform)
 
     def test_apply_pitch_shift(self, dummy_waveform):
         """Test pitch shifting via librosa."""
