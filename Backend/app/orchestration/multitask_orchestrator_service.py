@@ -26,7 +26,7 @@ from ..infrastructure.rq_connection import get_redis_connection
 from .fanout_orchestrator_service import CHILD_JOB_RETRY, _publish_progress
 from ..domain.model_loader_service import (
     predict_deepfake,
-    predict_emotion_wave2vec,
+    predict_ser,
     transcribe_whisper_base,
     transcribe_whisper_large,
 )
@@ -53,13 +53,13 @@ def run_asr_job(file_path: str, model: str = "whisper-base") -> dict[str, Any]:
 
 
 def run_ser_job(file_path: str) -> dict[str, Any]:
-    """Real Wav2Vec2 emotion prediction, run as an RQ child job."""
+    """Real Wav2Vec2 emotion prediction (LIT-206), run as an RQ child job."""
     conn = get_redis_connection()
     job = get_current_job()
     if job is not None:
         _publish_progress(conn, job.id, "ser", 0.5)
 
-    prediction = predict_emotion_wave2vec(file_path)
+    prediction = predict_ser(file_path)
 
     if job is not None:
         _publish_progress(conn, job.id, "ser", 1.0)
