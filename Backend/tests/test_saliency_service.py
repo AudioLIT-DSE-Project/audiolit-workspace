@@ -21,7 +21,62 @@ from app.domain.saliency_service import (
 
 # Mock the model_loader_service to avoid downloading HuggingFace models in CI
 import app.domain.model_loader_service as model_loader_service
+import time
+from app.domain.saliency_service import generate_perturbation_matrix, audio_to_spectrogram
 
+class TestPerturbationMatrixEngine:
+    """Test 2D Spectrogram Patch Segmentation & Perturbation Matrix Engine (SRS FR8)."""
+
+    def test_generate_500_variants_within_duration(self, dummy_audio_file):
+        """Verify DoD: Perturbation routine generates 500 masked variants successfully."""
+        import librosa
+        audio, sr = librosa.load(str(dummy_audio_file), sr=16000)
+        spectrogram = audio_to_spectrogram(audio)
+        
+        start_time = time.time()
+        
+        # Generate 500 variants using zero masking
+        variants = generate_perturbation_matrix(
+            spectrogram=spectrogram,
+            n_patches_freq=8,
+            n_patches_time=8,
+            n_variants=500,
+            perturbation_type="zero",
+            random_state=42
+        )
+        
+        duration = time.time() - start_time
+        
+        # Should return a 3D array: (500, freq_bins, time_bins)
+        assert variants.ndim == 3
+        assert variants.shape[0] == 500
+        assert variants.shape[1] == spectrogram.shape[0]
+        assert variants.shape[2] == spectrogram.shape[1]
+        
+        # The base spectrogram was modified (contains zeros)
+        assert not np.array_equal(variants[0], spectrogram)
+        
+        # DoD: "within expected duration thresholds". 500 variants of a 2s audio 
+        # spectrogram should take less than 2 seconds even on CPU.
+        assert duration < 5.0, f"Perturbation generation took too long: {duration:.2f}s"
+        
+    def test_noise_perturbation_type(self, dummy_audio_file):
+        """Verify noise perturbation applies random values instead of zeros."""
+        import librosa
+        audio, sr = librosa.load(str(dummy_audio_file), sr=16000)
+        spectrogram = audio_to_spectrogram(audio)
+        
+        variants = generate_perturbation_matrix(
+            spectrogram=spectrogram,
+            n_variants=10,
+            perturbation_type="noise",
+            noise_level=0.5,
+            random_state=42
+        )
+        
+        # Check that the variants contain noise (values not strictly zero or original)
+        assert np.any(variants != 0.0)
+        assert not np.array_equal(variants[0], spectrogram)
 class MockFeatureExtractor:
     def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
         class Inputs:
