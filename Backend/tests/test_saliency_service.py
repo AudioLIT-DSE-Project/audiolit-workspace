@@ -23,6 +23,11 @@ class MockFeatureExtractor:
             def __init__(self, audio):
                 self.input_values = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
                 self.attention_mask = torch.ones_like(self.input_values)
+            
+            # HuggingFace BatchEncoding supports `in` operator, so we must too
+            def __contains__(self, key):
+                return key in ["input_values", "attention_mask"]
+                
         return Inputs(audio)
 
 class MockEmoModel(torch.nn.Module):
@@ -38,7 +43,7 @@ class MockEmoModel(torch.nn.Module):
             x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
         x = x.unsqueeze(1)  # [B, 1, T]
         x = self.conv(x)
-        x = x.squeeze(1)     # [B, T]
+        x = x.squeeze(1)    # [B, T]
         logits = self.linear(x)
         
         class MockOutput:
@@ -103,14 +108,16 @@ class TestPureHelperFunctions:
         # Create a dummy 2D spectrogram
         spect = np.random.rand(32, 32).astype(np.float32)
         
-        # Mock score function: returns the mean of the spectrogram
+        # Mock score function: returns the sum of the spectrogram.
+        # Replacing a patch with the mean will strictly decrease the sum, 
+        # guaranteeing positive importance (base_score - occluded_score > 0).
         def mock_score_fn(s):
-            return float(np.mean(s))
+            return float(np.sum(s))
         
         importance = occlusion_attribution(mock_score_fn, spect, n_freq_patches=4, n_time_patches=4)
         
         assert importance.shape == (4, 4)
-        # Occluding a patch should reduce the score, so importance (base - occluded) should be positive
+        # Sum is guaranteed to decrease when replacing values with the mean
         assert np.all(importance >= 0)
 
     def test_attribution_timeline(self):
