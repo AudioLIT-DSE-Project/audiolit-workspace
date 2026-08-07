@@ -751,3 +751,70 @@ def attribution_timeline(attributions, sample_rate: int = 16000, hop_length: int
 
     step_s = (hop_length / sample_rate) if hop_length else (1.0 / sample_rate)
     return [{"t_ms": round(i * step_s * 1000.0, 3), "weight": float(w)} for i, w in enumerate(weights)]
+
+
+def generate_perturbation_matrix(
+    spectrogram: np.ndarray,
+    n_patches_freq: int = 8,
+    n_patches_time: int = 8,
+    n_variants: int = 500,
+    perturbation_type: str = "zero",
+    noise_level: float = 0.1,
+    random_state: Optional[int] = None
+) -> np.ndarray:
+    """
+    Generate a matrix of perturbed spectrograms for LIME/SHAP evaluation (SRS FR8).
+    
+    Divides the base spectrogram into a grid of time-frequency patches, then 
+    generates ``n_variants`` copies where random subsets of patches are perturbed
+    to evaluate performance degradation.
+    
+    Args:
+        spectrogram: 2D numpy array [freq, time].
+        n_patches_freq: Number of frequency patches.
+        n_patches_time: Number of time patches.
+        n_variants: Number of perturbed spectrograms to generate (DoD: 500).
+        perturbation_type: "zero", "mean", or "noise".
+        noise_level: Std dev for noise if perturbation_type="noise".
+        random_state: Optional seed for reproducibility.
+        
+    Returns:
+        A 3D numpy array of shape (n_variants, freq, time).
+    """
+    if spectrogram.ndim != 2:
+        raise ValueError("spectrogram must be 2-D [freq, time]")
+        
+    rng = np.random.default_rng(random_state)
+    freq_bounds = spectrogram_patch_bounds(spectrogram.shape[0], n_patches_freq)
+    time_bounds = spectrogram_patch_bounds(spectrogram.shape[1], n_patches_time)
+    
+    total_patches = len(freq_bounds) * len(time_bounds)
+    
+    # Vectorized generation: create a 3D tensor of shape (n_variants, freq, time)
+    variants = np.tile(spectrogram, (n_variants, 1, 1))
+    
+    # Determine perturbation fill value
+    if perturbation_type == "mean":
+        fill_val = float(spectrogram.mean())
+    else:
+        fill_val = 0.0
+        
+    for i in range(n_variants):
+        # Randomly select ~50% of patches to perturb (standard LIME/SHAP practice)
+        n_perturb = total_patches // 2
+        patch_indices = rng.choice(total_patches, size=n_perturb, replace=False)
+        
+        for idx in patch_indices:
+            f_idx = idx // n_patches_time
+            t_idx = idx % n_patches_time
+            f0, f1 = freq_bounds[f_idx]
+            t0, t1 = time_bounds[t_idx]
+            
+            if perturbation_type == "noise":
+                variants[i, f0:f1, t0:t1] = rng.normal(
+                    loc=fill_val, scale=noise_level, size=(f1-f0, t1-t0)
+                ).astype(np.float32)
+            else:
+                variants[i, f0:f1, t0:t1] = fill_val
+                
+    return variants
