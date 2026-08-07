@@ -654,3 +654,57 @@ def occlusion_attribution(
             occluded[f0:f1, t0:t1] = fill
             importance[i, j] = base_score - float(score_fn(occluded))
     return importance
+
+
+# --- Integrated Gradients core (LIT-126, FR9) --------------------------------
+# The primary gradient-based attribution: run Captum IntegratedGradients over an
+# input tensor and map the model's output score back onto each input dimension,
+# then collapse to a millisecond-aligned 1-D timeline. Model-agnostic (takes a
+# forward function returning a per-batch score), so it explains the deepfake /
+# emotion / any scalar-scoring model.
+
+
+def integrated_gradients(
+    forward_fn,
+    inputs: "torch.Tensor",
+    baselines: "torch.Tensor" = None,
+    target=None,
+    n_steps: int = 50,
+) -> "torch.Tensor":
+    """Integrated Gradients attribution via Captum (FR9).
+
+    ``forward_fn(inputs)`` returns either a per-batch scalar score or a
+    ``[batch, n_outputs]`` tensor (then pass ``target`` to pick the output).
+    Returns an attribution tensor shaped like ``inputs``, crediting the score to
+    each input dimension; the baseline defaults to zeros (the standard IG
+    reference).
+    """
+    ig = IntegratedGradients(forward_fn)
+    if baselines is None:
+        baselines = torch.zeros_like(inputs)
+    return ig.attribute(inputs, baselines=baselines, target=target, n_steps=n_steps)
+
+
+def attribution_timeline(attributions, sample_rate: int = 16000, hop_length: int = None) -> list:
+    """Collapse an attribution tensor to a normalized, time-aligned saliency stream.
+
+    Non-time dimensions are reduced by ``mean(|·|)``, the result is scaled to
+    ``[0, 1]``, and returned as ``[{"t_ms": float, "weight": float}, ...]`` — the
+    millisecond-aligned JSON stream FR9 asks for. Each step spans one STFT frame
+    (``hop_length / sample_rate``) when ``hop_length`` is given, else one input
+    sample (``1 / sample_rate``).
+    """
+    arr = attributions
+    if hasattr(arr, "detach"):
+        arr = arr.detach().cpu().numpy()
+    arr = np.squeeze(np.asarray(arr, dtype=np.float64))
+    while arr.ndim > 1:                      # collapse all but the time axis
+        arr = np.mean(np.abs(arr), axis=0)
+    weights = np.abs(np.atleast_1d(arr))
+
+    peak = float(weights.max()) if weights.size else 0.0
+    if peak > 0:
+        weights = weights / peak
+
+    step_s = (hop_length / sample_rate) if hop_length else (1.0 / sample_rate)
+    return [{"t_ms": round(i * step_s * 1000.0, 3), "weight": float(w)} for i, w in enumerate(weights)]
