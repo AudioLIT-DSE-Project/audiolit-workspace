@@ -474,8 +474,8 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
     # Final normalization across segments for visibility
     if len(segments) > 0:
         # Use robust intensity calculation
-        raw_saliencies = [s.get("saliency", 0.0) for s in segments]
-        abs_vals = np.abs(raw_saliencies)
+        raw_saliancies = [s.get("saliency", 0.0) for s in segments]
+        abs_vals = np.abs(raw_saliancies)
         
         # Robust normalization to prevent all-zero intensities
         max_abs = float(np.max(abs_vals)) if len(abs_vals) > 0 else 0.0
@@ -494,13 +494,56 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
         for segment in segments:
             segment["intensity"] = max(0.1, segment["intensity"])  # Minimum 10% intensity
     
+    # --- NEW: 2D Spectrogram-aligned saliency mapping (SRS FR9 / FR8.2) ---
+    # Generate the base log-mel spectrogram for visual reference
+    mel_spect = librosa.feature.melspectrogram(y=audio, sr=16000, n_fft=2048, hop_length=512, n_mels=128)
+    log_mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
+    
+    # Normalize log mel spectrogram to 0-1 for UI canvas rendering
+    log_mel_spect_norm = (log_mel_spect - log_mel_spect.min()) / (log_mel_spect.max() - log_mel_spect.min() + 1e-9)
+    
+    # Map 1D time-domain attributions to 2D time-frequency spectrogram bins
+    stft = np.abs(librosa.stft(audio, n_fft=2048, hop_length=512))
+    n_frames = stft.shape[1]
+    
+    # Ensure attribution length matches STFT frames
+    attr_resampled = np.interp(
+        np.linspace(0, len(saliency_scores) - 1, n_frames),
+        np.arange(len(saliency_scores)),
+        np.abs(saliency_scores)
+    )
+    
+    # Broadcast 1D attribution across frequency bins to create 2D mask
+    attr_2d = np.tile(attr_resampled, (stft.shape[0], 1))
+    
+    # Weight the STFT bins by the attribution mask
+    saliency_2d = stft * attr_2d
+    max_val_2d = np.max(saliency_2d)
+    if max_val_2d > 0:
+        saliency_2d = saliency_2d / max_val_2d
+        
+    # Downsample to mel bins to match base spectrogram shape
+    mel_saliency = np.zeros_like(log_mel_spect)
+    fft_bins_per_mel = stft.shape[0] // log_mel_spect.shape[0] + 1 if log_mel_spect.shape[0] > 0 else 1
+    for i in range(log_mel_spect.shape[0]):
+        start = i * fft_bins_per_mel
+        end = start + fft_bins_per_mel
+        if end > stft.shape[0]:
+            end = stft.shape[0]
+        if start < end:
+            mel_saliency[i, :] = np.mean(saliency_2d[start:end, :], axis=0)
+        else:
+            mel_saliency[i, :] = 0.0
+
     return {
         "model": "wav2vec2",
         "method": method,
         "emotion": emotion,
         "segments": segments,
         "total_duration": segment_duration,
-        "series": series.tolist()
+        "series": series.tolist(),
+        "base_spectrogram": log_mel_spect_norm.tolist(),  # Added for XAI canvas
+        "saliency_matrix": mel_saliency.tolist()          # Added for XAI canvas
     }
 
 def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
