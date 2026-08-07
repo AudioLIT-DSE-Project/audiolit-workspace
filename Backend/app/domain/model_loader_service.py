@@ -385,7 +385,53 @@ def predict_emotion_wave2vec_with_attention(audio_path):
     return result
 
 
-_EMO_MODEL_ID = "r-f/wav2vec-english-speech-emotion-recognition"
+# Default SER checkpoint (LIT-224, resolves SRS TBD-1).
+#
+# ECHO's inherited default was `r-f/wav2vec-english-speech-emotion-recognition`.
+# It is unusable here for two independent reasons, both verified against the hub:
+#
+#   1. It publishes only `pytorch_model.bin` — no safetensors. The registry
+#      fetches safetensors exclusively (SAD constraint C3), so it refuses the
+#      checkpoint outright: every SER call raised ModelRegistryError.
+#   2. Even loaded directly, its head does not match the class we load it with.
+#      Its config declares `Wav2Vec2ForCTC` and `finetuning_task: wav2vec2_clf`,
+#      and its weights carry a custom `classifier.dense` / `classifier.out_proj`
+#      head. `Wav2Vec2ForSequenceClassification` expects `projector` +
+#      `classifier`, so all four head tensors are randomly initialised and all
+#      four trained ones discarded — predictions become chance-level noise that
+#      changes with the torch seed.
+#
+# This replacement was selected because it satisfies both, plus SRS FR6.1's
+# "at least six emotion categories (angry, disgust, fear, happy, neutral, sad)":
+# it ships `model.safetensors`, loads its head with zero missing keys, and
+# covers all six plus surprise. Rejected alternatives: `superb/
+# wav2vec2-base-superb-er` (head loads, but only 4 classes — fails FR6.1);
+# `ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition` and
+# `Dpngtm/wav2vec2-emotion-recognition` (declare SequenceClassification but ship
+# the same custom head, so they random-init exactly like the old default);
+# `harshit345`, `m3hrdadfi`, `Aniemore`, `audeering` (custom
+# Wav2Vec2ForSpeechClassification class, non-English, or dimensional rather than
+# categorical).
+#
+# Pinned by commit sha for reproducibility (SAD §5.2 Model Registry records the
+# exact version). Do not float this to "main" — the head layout is the thing
+# that broke last time, and a silent upstream re-upload would break it again.
+_EMO_MODEL_ID = "firdhokk/speech-emotion-recognition-with-facebook-wav2vec2-large-xlsr-53"
+_EMO_MODEL_REVISION = "611e6db8ee667aa07fe66596f9fc761e036ff5b9"
+
+#: Head parameters that must come from the checkpoint. If any of these is
+#: missing at load time the classifier is random and every prediction is noise.
+_EMO_REQUIRED_HEAD_KEYS = ("projector.weight", "projector.bias",
+                           "classifier.weight", "classifier.bias")
+
+#: Labels this pinned revision ships, in index order. Recorded here so FR6.1
+#: coverage can be asserted offline; the opt-in hub test checks it still matches
+#: what the revision actually publishes. Runtime code reads `config.id2label`
+#: rather than this tuple - note "fearful"/"surprised" where the old default
+#: said "fear"/"surprise", so nothing may hardcode the old spellings.
+_EMO_PINNED_LABELS = ("angry", "disgust", "fearful", "happy",
+                      "neutral", "sad", "surprised")
+
 emo_device = "cuda:0" if torch.cuda.is_available() else "cpu"
 feature_extractor = None
 emo_model = None
@@ -407,8 +453,14 @@ def ensure_emo_model_loaded():
     """
     global feature_extractor, emo_model
     if emo_model is None:
-        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(_EMO_MODEL_ID)
-        loaded = _model_registry.get(_EMO_MODEL_ID, model_class=Wav2Vec2ForSequenceClassification)
+        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+            _EMO_MODEL_ID, revision=_EMO_MODEL_REVISION
+        )
+        loaded = _model_registry.get(
+            _EMO_MODEL_ID,
+            revision=_EMO_MODEL_REVISION,
+            model_class=Wav2Vec2ForSequenceClassification,
+        )
         emo_model = loaded.model
     return feature_extractor, emo_model, emo_device
 
@@ -796,6 +848,48 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
         
         logger.debug("Emotion logits shape=%s, predicted=%s, label=%s", tuple(logits.shape), label_idx, predicted_emotion)
     return result
+
+# --- Speech Emotion Recognition (SER) inference (LIT-206, FR6) ---------------
+# Lean scoring entry point for the multi-task response: predicted emotion class,
+# the full class distribution, and a confidence (top-class probability). Uses the
+# same lazily-loaded emotion model / ModelRegistry path as everything else
+# (predict_emotion_wave2vec is kept for the heavier attention/saliency path).
+
+
+def predict_ser(audio_path):
+    """Speech Emotion Recognition inference (FR6).
+
+    Returns the predicted emotion, the full class probability distribution, and a
+    confidence (the top class probability):
+
+        {
+          "predicted_emotion": str,
+          "probabilities": {emotion: float, ...},
+          "confidence": float,
+        }
+    """
+    ensure_emo_model_loaded()
+    audio, rate = librosa.load(audio_path, sr=16000)
+    inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(emo_device)
+    attention_mask = inputs.attention_mask.to(emo_device) if "attention_mask" in inputs else None
+
+    with torch.no_grad():
+        logits = emo_model(input_values=input_values, attention_mask=attention_mask).logits
+        probs = torch.nn.functional.softmax(logits, dim=-1)[0]
+
+    id2label = emo_model.config.id2label if isinstance(emo_model.config.id2label, dict) else {}
+    probabilities = {
+        id2label.get(i, id2label.get(str(i), f"emotion_{i}")): float(p)
+        for i, p in enumerate(probs)
+    }
+    predicted_emotion = max(probabilities, key=probabilities.get) if probabilities else None
+    return {
+        "predicted_emotion": predicted_emotion,
+        "probabilities": probabilities,
+        "confidence": float(probs.max()),
+    }
+
 
 # --- Audio deepfake (ADD) binary classifier (LIT-128, FR7) -------------------
 # Binary bona-fide vs synthetic detector, loaded lazily through the same
