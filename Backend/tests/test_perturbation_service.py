@@ -1,5 +1,5 @@
 """
-Perturbation service — soundfile I/O & NumPy-Driven Masking (LIT-226 / LIT-175)
+Perturbation service — soundfile I/O (LIT-226)
 
 Verifies the torchaudio -> soundfile swap preserves the (channels, time)
 float32 tensor contract the perturbation functions rely on, and that
@@ -12,7 +12,6 @@ import numpy as np
 import soundfile as sf
 import torch
 from pathlib import Path
-import pytest
 
 from app.domain.perturbation_service import (
     _load_waveform,
@@ -61,14 +60,14 @@ class TestWaveformIO:
         assert waveform.shape[0] == 1  # Downmixed to mono
         assert sample_rate == 16000  # Resampled to 16kHz
 
-    def test_save_waveform_round_trip(self, tmp_path: Path):
+    def test_save_waveform_round_trip(self, temp_dir: Path):
         # Two-channel synthetic waveform, matches the (channels, time) shape
         t = np.linspace(0, 1.0, 16000, False)
         left = 0.3 * np.sin(2 * np.pi * 440 * t)
         right = 0.3 * np.sin(2 * np.pi * 660 * t)
         waveform = torch.from_numpy(np.stack([left, right]).astype("float32"))
 
-        out_path = tmp_path / "roundtrip.wav"
+        out_path = temp_dir / "roundtrip.wav"
         _save_waveform(str(out_path), waveform, 16000)
 
         assert out_path.exists()
@@ -78,14 +77,14 @@ class TestWaveformIO:
         assert reloaded.shape[0] == 1
         assert reloaded.shape[1] == 16000
 
-    def test_save_waveform_mono(self, tmp_path: Path):
+    def test_save_waveform_mono(self, temp_dir: Path):
         # apply_pitch_shift/apply_time_stretch always return a single-channel
         # (1, time) tensor regardless of input channel count — confirm that
         # still saves and reloads correctly.
         t = np.linspace(0, 0.5, 8000, False)
         mono = torch.from_numpy((0.2 * np.sin(2 * np.pi * 220 * t)).astype("float32")).unsqueeze(0)
 
-        out_path = tmp_path / "mono.wav"
+        out_path = temp_dir / "mono.wav"
         _save_waveform(str(out_path), mono, 16000)
 
         reloaded, sr = _load_waveform(str(out_path))
@@ -97,11 +96,11 @@ class TestWaveformIO:
 class TestPerturbAndSave:
     """End-to-end perturb_and_save, unchanged behaviour via the new I/O path."""
 
-    def test_noise_perturbation_succeeds(self, sample_audio_file: Path, tmp_path: Path):
+    def test_noise_perturbation_succeeds(self, sample_audio_file: Path, temp_dir: Path):
         result = perturb_and_save(
             file_path=str(sample_audio_file),
             perturbations=[{"type": "noise", "params": {"noise_level": 0.01}}],
-            output_dir=str(tmp_path),
+            output_dir=str(temp_dir),
         )
 
         assert result["success"] is True
@@ -119,11 +118,11 @@ class TestPerturbAndSave:
         assert perturbed.shape == original.shape
         assert not torch.allclose(perturbed, original)
 
-    def test_missing_file_reports_failure_not_exception(self, tmp_path: Path):
+    def test_missing_file_reports_failure_not_exception(self, temp_dir: Path):
         result = perturb_and_save(
-            file_path=str(tmp_path / "does-not-exist.wav"),
+            file_path=str(temp_dir / "does-not-exist.wav"),
             perturbations=[{"type": "noise", "params": {}}],
-            output_dir=str(tmp_path),
+            output_dir=str(temp_dir),
         )
 
         assert result["success"] is False
