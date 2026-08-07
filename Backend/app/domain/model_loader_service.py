@@ -849,6 +849,48 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
         logger.debug("Emotion logits shape=%s, predicted=%s, label=%s", tuple(logits.shape), label_idx, predicted_emotion)
     return result
 
+# --- Speech Emotion Recognition (SER) inference (LIT-206, FR6) ---------------
+# Lean scoring entry point for the multi-task response: predicted emotion class,
+# the full class distribution, and a confidence (top-class probability). Uses the
+# same lazily-loaded emotion model / ModelRegistry path as everything else
+# (predict_emotion_wave2vec is kept for the heavier attention/saliency path).
+
+
+def predict_ser(audio_path):
+    """Speech Emotion Recognition inference (FR6).
+
+    Returns the predicted emotion, the full class probability distribution, and a
+    confidence (the top class probability):
+
+        {
+          "predicted_emotion": str,
+          "probabilities": {emotion: float, ...},
+          "confidence": float,
+        }
+    """
+    ensure_emo_model_loaded()
+    audio, rate = librosa.load(audio_path, sr=16000)
+    inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(emo_device)
+    attention_mask = inputs.attention_mask.to(emo_device) if "attention_mask" in inputs else None
+
+    with torch.no_grad():
+        logits = emo_model(input_values=input_values, attention_mask=attention_mask).logits
+        probs = torch.nn.functional.softmax(logits, dim=-1)[0]
+
+    id2label = emo_model.config.id2label if isinstance(emo_model.config.id2label, dict) else {}
+    probabilities = {
+        id2label.get(i, id2label.get(str(i), f"emotion_{i}")): float(p)
+        for i, p in enumerate(probs)
+    }
+    predicted_emotion = max(probabilities, key=probabilities.get) if probabilities else None
+    return {
+        "predicted_emotion": predicted_emotion,
+        "probabilities": probabilities,
+        "confidence": float(probs.max()),
+    }
+
+
 # --- Audio deepfake (ADD) binary classifier (LIT-128, FR7) -------------------
 # Binary bona-fide vs synthetic detector, loaded lazily through the same
 # ModelRegistry path as every other model (never an import-time singleton).

@@ -3,7 +3,7 @@
 
 Same fakeredis + SimpleWorker(burst=True) pattern as
 test_fanout_orchestrator.py (LIT-225) -- fast, no external Redis, no real
-model downloads (transcribe_whisper_base / predict_emotion_wave2vec are
+model downloads (transcribe_whisper_base / predict_ser are
 mocked at the call site).
 """
 
@@ -67,7 +67,7 @@ class TestRealAsrJob:
 class TestRealSerJob:
     def test_returns_real_emotion_prediction(self, fake_conn):
         fake_prediction = {"predicted_emotion": "happy", "probabilities": {"happy": 0.9}, "confidence": 0.9}
-        with patch.object(multitask, "predict_emotion_wave2vec", return_value=fake_prediction) as mock_predict:
+        with patch.object(multitask, "predict_ser", return_value=fake_prediction) as mock_predict:
             result = multitask.run_ser_job("clip.wav")
 
         mock_predict.assert_called_once_with("clip.wav")
@@ -110,7 +110,7 @@ class TestMultitaskFanOutFanIn:
              patch.object(multitask, "predict_deepfake", return_value=FAKE_ADD), \
              patch.object(
                  multitask,
-                 "predict_emotion_wave2vec",
+                 "predict_ser",
                  return_value={"predicted_emotion": "neutral", "probabilities": {}, "confidence": 0.5},
              ):
             result = multitask.enqueue_multitask("clip.wav")
@@ -140,7 +140,7 @@ class TestMultitaskFanOutFanIn:
              patch.object(multitask, "predict_deepfake", return_value=FAKE_ADD), \
              patch.object(
                  multitask,
-                 "predict_emotion_wave2vec",
+                 "predict_ser",
                  return_value={"predicted_emotion": "sad", "probabilities": {}, "confidence": 0.7},
              ):
             result = multitask.enqueue_multitask("clip.wav")
