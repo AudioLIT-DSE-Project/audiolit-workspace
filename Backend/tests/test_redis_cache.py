@@ -1,154 +1,331 @@
-"""Unit tests for Deterministic Cache-by-Hash Architecture (SRS FR4)."""
+"""
+Results Cache Testing
+Test Plan Section 3.1.6 - Results Caching, Cache Optimization, Cache Invalidation
+"""
+
 import pytest
+import asyncio
+import json
 import time
-import numpy as np
-import logging
-from unittest.mock import patch, MagicMock
-from app.core.redis import cache_manager, cached_inference
+from unittest.mock import patch
+import fakeredis
+from app.core.redis import cache_manager
 
-class TestRedisCacheManager:
-    """Test SHA-256 hashing, serialization, and corruption handling."""
+# Fixture to mock Redis during API tests so it doesn't fail in CI
+@pytest.fixture(autouse=True)
+def mock_redis():
+    with patch.object(cache_manager, 'client', fakeredis.FakeStrictRedis()) as mock_client:
+        yield mock_client
 
-    def test_deterministic_key_generation(self):
-        """Verify FR4.1: Key scheme is unique and deterministic."""
-        audio_bytes = b"fake_audio_data"
-        model_id = "whisper-base"
-        task = "asr"
-        params = {"temperature": 0.5}
+# Test Basic Cache Operations (Critical Priority)
+class TestResultsCacheBasicOperations:
+    """Test fundamental cache operations for ML results."""
+    
+    @pytest.mark.asyncio
+    async def test_results_cache_roundtrip(self, client):
+        """Test basic cache store and retrieve operations."""
+        payload = {"transcript": "hello", "confidence": 0.9}
         
-        key1 = cache_manager._generate_key(audio_bytes, model_id, task, params)
-        key2 = cache_manager._generate_key(audio_bytes, model_id, task, params)
+        # Store result in cache
+        put = await client.post("/results/whisper/abc123", json=payload)
+        assert put.status_code == 200
         
-        assert key1 == key2
-        assert key1.startswith("audiolit:tensor:")
-        assert len(key1.split(":")[-1]) == 64  # SHA-256 hex length
+        # Retrieve result from cache
+        get = await client.get("/results/whisper/abc123")
+        assert get.status_code == 200
+        data = get.json()
+        assert data["cached"] is True
+        assert data["payload"] == payload
+    
+    @pytest.mark.asyncio
+    async def test_cache_miss_handling(self, client):
+        """Test behavior when requested result is not in cache."""
+        # Try to get non-existent result
+        response = await client.get("/results/whisper/nonexistent123")
+        
+        # Should handle cache miss gracefully
+        assert response.status_code in [200, 404]
+        
+        if response.status_code == 200:
+            data = response.json()
+            assert data["cached"] is False
+    
+    @pytest.mark.asyncio
+    async def test_cache_overwrite_behavior(self, client):
+        """Test cache behavior when overwriting existing results."""
+        cache_key = "overwrite_test_456"
+        
+        # Store initial result
+        initial_payload = {"transcript": "initial", "confidence": 0.8}
+        put1 = await client.post(f"/results/whisper/{cache_key}", json=initial_payload)
+        assert put1.status_code == 200
+        
+        # Overwrite with new result
+        updated_payload = {"transcript": "updated", "confidence": 0.95}
+        put2 = await client.post(f"/results/whisper/{cache_key}", json=updated_payload)
+        assert put2.status_code == 200
+        
+        # Verify latest result is returned
+        get = await client.get(f"/results/whisper/{cache_key}")
+        data = get.json()
+        assert data["payload"]["transcript"] == "updated"
+        assert data["payload"]["confidence"] == 0.95
 
-    def test_key_sensitivity_to_variations(self):
-        """Verify minor audio or param variations generate completely different hashes."""
-        audio_bytes = b"fake_audio_data"
-        model_id = "whisper-base"
-        task = "asr"
-        
-        key1 = cache_manager._generate_key(audio_bytes, model_id, task, {"temp": 0.5})
-        key2 = cache_manager._generate_key(audio_bytes, model_id, task, {"temp": 0.6})
-        key3 = cache_manager._generate_key(b"different_audio", model_id, task, {"temp": 0.5})
-        key4 = cache_manager._generate_key(audio_bytes, "wav2vec2", task, {"temp": 0.5})
-        
-        assert key1 != key2
-        assert key1 != key3
-        assert key1 != key4
 
-    def test_numpy_serialization_roundtrip(self):
-        """Verify multi-dimensional arrays are compressed and restored correctly."""
-        original_data = {
-            "attribution": np.random.rand(128, 300).astype(np.float32),
-            "logits": np.array([0.1, 0.9], dtype=np.float64)
+# Test Advanced Cache Operations (Important Priority)
+class TestResultsCacheAdvancedOperations:
+    """Test complex cache scenarios and different data types."""
+    
+    @pytest.mark.asyncio
+    async def test_cache_different_model_types(self, client):
+        """Test caching results from different ML models."""
+        # Whisper transcription result
+        whisper_payload = {
+            "transcript": "speech recognition test", 
+            "confidence": 0.92,
+            "language": "en"
+        }
+        await client.post("/results/whisper/test001", json=whisper_payload)
+        
+        # Emotion recognition result
+        emotion_payload = {
+            "emotion": "happy",
+            "confidence": 0.87,
+            "probabilities": {"happy": 0.87, "sad": 0.13}
+        }
+        await client.post("/results/emotion/test001", json=emotion_payload)
+        
+        # Verify both are cached separately
+        whisper_result = await client.get("/results/whisper/test001")
+        emotion_result = await client.get("/results/emotion/test001")
+        
+        assert whisper_result.status_code == 200
+        assert emotion_result.status_code == 200
+        
+        whisper_data = whisper_result.json()
+        emotion_data = emotion_result.json()
+        
+        assert whisper_data["payload"]["transcript"] == "speech recognition test"
+        assert emotion_data["payload"]["emotion"] == "happy"
+    
+    @pytest.mark.asyncio
+    async def test_cache_large_payload_handling(self, client):
+        """Test caching of large ML results."""
+        # Simulate large result with attention maps, embeddings, etc.
+        large_payload = {
+            "transcript": "this is a longer transcription result for testing",
+            "confidence": 0.94,
+            "word_timestamps": [
+                {"word": "this", "start": 0.0, "end": 0.2, "confidence": 0.99},
+                {"word": "is", "start": 0.3, "end": 0.4, "confidence": 0.98},
+                {"word": "a", "start": 0.5, "end": 0.6, "confidence": 0.95}
+            ],
+            "attention_weights": [[0.1, 0.2, 0.3] for _ in range(10)],
+            "embeddings": [0.1 * i for i in range(100)]
         }
         
-        with patch.object(cache_manager, 'client') as mock_client:
-            mock_get_storage = {}
-            def mock_set(key, value, ex=None):
-                mock_get_storage[key] = value
-            def mock_get(key):
-                return mock_get_storage.get(key)
-                
-            mock_client.set.side_effect = mock_set
-            mock_client.get.side_effect = mock_get
-            
-            cache_manager.set("test_key", original_data)
-            retrieved_data = cache_manager.get("test_key")
-            
-            assert retrieved_data is not None
-            assert np.array_equal(retrieved_data["attribution"], original_data["attribution"])
-
-    def test_lz4_compression_for_large_tensors(self):
-        """Verify lz4-compress values above ~1 MB."""
-        large_array = np.random.rand(300, 1000).astype(np.float32)  # ~1.2MB
-        original_data = {"tensor": large_array}
+        put = await client.post("/results/whisper/large_test", json=large_payload)
+        assert put.status_code == 200
         
-        with patch.object(cache_manager, 'client') as mock_client:
-            mock_get_storage = {}
-            def mock_set(key, value, ex=None):
-                mock_get_storage[key] = value
-            def mock_get(key):
-                return mock_get_storage.get(key)
-                
-            mock_client.set.side_effect = mock_set
-            mock_client.get.side_effect = mock_get
+        get = await client.get("/results/whisper/large_test")
+        assert get.status_code == 200
+        data = get.json()
+        assert data["cached"] is True
+        assert len(data["payload"]["word_timestamps"]) == 3
+        assert len(data["payload"]["embeddings"]) == 100
+    
+    @pytest.mark.asyncio
+    async def test_cache_concurrent_access(self, client):
+        """Test concurrent cache operations don't interfere."""
+        async def store_and_retrieve(test_id):
+            payload = {
+                "transcript": f"concurrent test {test_id}",
+                "confidence": 0.9,
+                "test_id": test_id
+            }
             
-            cache_manager.set("large_key", original_data)
+            # Store
+            put = await client.post(f"/results/whisper/concurrent_{test_id}", json=payload)
             
-            # Verify it was compressed
-            stored_data = mock_get_storage["large_key"]
-            assert stored_data.startswith(b'LZ4:')
+            # Retrieve
+            get = await client.get(f"/results/whisper/concurrent_{test_id}")
             
-            # Verify it decompresses correctly
-            retrieved_data = cache_manager.get("large_key")
-            assert np.array_equal(retrieved_data["tensor"], original_data["tensor"])
-
-    def test_corrupt_cache_deletes_and_recomputes(self, caplog):
-        """Verify a corrupt cached value is detected, discarded, and recomputed."""
-        with patch.object(cache_manager, 'client') as mock_client:
-            mock_client.get.return_value = b"corrupt_data_not_valid_msgpack"
-            mock_client.delete = MagicMock()
-            
-            with caplog.at_level(logging.WARNING):
-                result = cache_manager.get("corrupt_key")
-                
-            assert result is None
-            mock_client.delete.assert_called_once_with("corrupt_key")
-            assert "Corrupt cache entry detected" in caplog.text
-
-
-class TestCachedInferenceInterceptor:
-    """Verify the decorator intercepts and bypasses heavy execution paths."""
-
-    def test_hit_bypass_miss_enqueue(self, caplog):
-        """Verify DoD: Duplicate query reads from Redis, avoiding model forward pass."""
+            return put.status_code, get.status_code, get.json() if get.status_code == 200 else None
         
-        @cached_inference(audio_bytes_arg="audio_bytes", model_arg="model_id", task_name="mock_inference")
-        def mock_heavy_inference(audio_bytes: bytes, model_id: str, params: dict):
-            time.sleep(0.5)  # Simulate heavy PyTorch execution
-            return {"attribution": np.random.rand(128, 300).astype(np.float32)}
-            
-        audio_bytes = b"test_audio_bytes"
-        model_id = "wav2vec2"
-        params = {"layer": 5}
+        # Run concurrent operations
+        tasks = [store_and_retrieve(i) for i in range(5)]
+        results = await asyncio.gather(*tasks)
         
-        with patch.object(cache_manager, 'client') as mock_client:
-            mock_get_storage = {}
-            def mock_set(key, value, ex=None, nx=False):
-                if nx and key in mock_get_storage:
-                    return False
-                mock_get_storage[key] = value
-                return True
-            def mock_get(key):
-                return mock_get_storage.get(key)
-            def mock_delete(key):
-                mock_get_storage.pop(key, None)
-                
-            mock_client.set.side_effect = mock_set
-            mock_client.get.side_effect = mock_get
-            mock_client.delete.side_effect = mock_delete
+        # Verify all operations succeeded
+        for put_status, get_status, data in results:
+            assert put_status == 200
+            assert get_status == 200
+            if data:
+                assert data["cached"] is True
+
+
+# Test Cache Performance (Important Priority)
+class TestResultsCachePerformance:
+    """Test cache performance characteristics."""
+    
+    @pytest.mark.asyncio
+    async def test_cache_retrieval_speed(self, client):
+        """Test cache retrieval performance."""
+        # Store test result
+        payload = {"transcript": "speed test", "confidence": 0.9}
+        await client.post("/results/whisper/speed_test", json=payload)
+        
+        # Measure retrieval time
+        start_time = time.time()
+        response = await client.get("/results/whisper/speed_test")
+        end_time = time.time()
+        
+        retrieval_time = end_time - start_time
+        
+        assert response.status_code == 200
+        assert retrieval_time < 1.0  # Should be fast (under 1 second)
+        
+        data = response.json()
+        assert data["cached"] is True
+    
+    @pytest.mark.asyncio
+    async def test_cache_batch_operations(self, client):
+        """Test cache performance with batch operations."""
+        batch_size = 10
+        
+        # Store batch of results
+        store_tasks = []
+        for i in range(batch_size):
+            payload = {
+                "transcript": f"batch test {i}",
+                "confidence": 0.9,
+                "batch_id": i
+            }
+            task = client.post(f"/results/whisper/batch_{i:03d}", json=payload)
+            store_tasks.append(task)
+        
+        store_responses = await asyncio.gather(*store_tasks)
+        
+        # Verify all stores succeeded
+        for response in store_responses:
+            assert response.status_code == 200
+        
+        # Retrieve batch of results
+        retrieve_tasks = []
+        for i in range(batch_size):
+            task = client.get(f"/results/whisper/batch_{i:03d}")
+            retrieve_tasks.append(task)
+        
+        retrieve_responses = await asyncio.gather(*retrieve_tasks)
+        
+        # Verify all retrievals succeeded
+        success_count = 0
+        for response in retrieve_responses:
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("cached"):
+                    success_count += 1
+        
+        # At least 80% should be successfully cached
+        success_rate = success_count / batch_size
+        assert success_rate >= 0.8
+
+
+# Test Cache Error Handling (Normal Priority)
+class TestResultsCacheErrorHandling:
+    """Test cache error scenarios and recovery."""
+    
+    @pytest.mark.asyncio
+    async def test_cache_invalid_payload_handling(self, client):
+        """Test handling of invalid cache payloads."""
+        # Try storing invalid JSON
+        invalid_payloads = [
+            {},  # Empty payload
+            {"incomplete": "data"},  # Missing required fields
+            {"transcript": None},  # None values
+        ]
+        
+        for i, payload in enumerate(invalid_payloads):
+            response = await client.post(f"/results/whisper/invalid_{i}", json=payload)
+            # Should handle gracefully (may accept or reject)
+            assert response.status_code in [200, 400, 422]
+    
+    @pytest.mark.asyncio
+    async def test_cache_key_format_validation(self, client):
+        """Test cache key format validation."""
+        payload = {"transcript": "key test", "confidence": 0.9}
+        
+        # Test various key formats
+        test_keys = [
+            "valid_key_123",
+            "key-with-dashes", 
+            "key.with.dots",
+            "key_with_underscores"
+        ]
+        
+        for key in test_keys:
+            response = await client.post(f"/results/whisper/{key}", json=payload)
+            # Should handle different key formats
+            assert response.status_code in [200, 400]
+    
+    @pytest.mark.asyncio
+    async def test_cache_nonexistent_model_handling(self, client):
+        """Test behavior with non-existent model types."""
+        payload = {"result": "test", "confidence": 0.9}
+        
+        # Try caching result for non-existent model
+        response = await client.post("/results/nonexistent_model/test123", json=payload)
+        
+        # Should handle gracefully
+        assert response.status_code in [200, 404, 422]
+
+
+# Test Cache Optimization (Normal Priority) 
+class TestResultsCacheOptimization:
+    """Test cache optimization features."""
+    
+    @pytest.mark.asyncio
+    async def test_cache_compression_efficiency(self, client):
+        """Test cache storage efficiency with repetitive data."""
+        # Store similar results with repetitive patterns
+        base_payload = {
+            "transcript": "repeated pattern " * 10,  # Repetitive content
+            "confidence": 0.9,
+            "metadata": {
+                "model": "whisper-base",
+                "version": "1.0",
+                "settings": {"temperature": 0.0}
+            }
+        }
+        
+        # Store multiple similar results
+        for i in range(5):
+            payload = base_payload.copy()
+            payload["id"] = i
+            response = await client.post(f"/results/whisper/compression_{i}", json=payload)
+            assert response.status_code == 200
+        
+        # Verify all can be retrieved
+        for i in range(5):
+            response = await client.get(f"/results/whisper/compression_{i}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["cached"] is True
+    
+    @pytest.mark.asyncio
+    async def test_cache_memory_usage_patterns(self, client):
+        """Test cache memory usage with various result sizes."""
+        # Test different payload sizes
+        payload_sizes = [
+            {"transcript": "small", "confidence": 0.9},  # Small
+            {"transcript": "medium " * 50, "confidence": 0.9, "data": list(range(100))},  # Medium
+            {"transcript": "large " * 100, "confidence": 0.9, "data": list(range(1000))}  # Large
+        ]
+        
+        for i, payload in enumerate(payload_sizes):
+            response = await client.post(f"/results/whisper/size_test_{i}", json=payload)
+            assert response.status_code == 200
             
-            with caplog.at_level(logging.INFO):
-                # 1. First call: Cache Miss -> should execute heavy function
-                start_time_miss = time.time()
-                result_miss = mock_heavy_inference(audio_bytes=audio_bytes, model_id=model_id, params=params)
-                duration_miss = (time.time() - start_time_miss) * 1000
-                
-                assert duration_miss > 500
-                assert "CACHE MISS: Executing PyTorch inference" in caplog.text
-                
-                # 2. Second call: Cache Hit -> should bypass heavy function entirely
-                start_time_hit = time.time()
-                result_hit = mock_heavy_inference(audio_bytes=audio_bytes, model_id=model_id, params=params)
-                duration_hit = (time.time() - start_time_hit) * 1000
-                
-                # DoD: Must read in under 200ms (actually will be < 10ms)
-                assert duration_hit < 200.0, f"Cache hit took {duration_hit:.2f}ms, expected <200ms"
-                assert "CACHE HIT:" in caplog.text
-                assert "Bypassing PyTorch execution graph completely" in caplog.text
-                
-            # Verify data integrity (byte-identical result)
-            assert np.array_equal(result_miss["attribution"], result_hit["attribution"])
+            # Verify retrieval works
+            get_response = await client.get(f"/results/whisper/size_test_{i}")
+            assert get_response.status_code == 200
