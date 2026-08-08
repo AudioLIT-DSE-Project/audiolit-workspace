@@ -71,7 +71,7 @@ class RedisCacheManager:
     def set(self, key: str, value: Any, ttl: int = CACHE_TTL) -> None:
         """Serialize and store tensors in Redis with LRU eviction TTL."""
         packed_data = msgpack.packb(value, default=self._encode_numpy, use_bin_type=True)
-        self.client.setex(key, ttl, packed_data)
+        self.client.set(key, packed_data, ex=ttl)
 
 # Singleton instance
 cache_manager = RedisCacheManager()
