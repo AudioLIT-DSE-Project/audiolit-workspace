@@ -3,7 +3,7 @@ import pytest
 import time
 import numpy as np
 import logging
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from app.core.redis import cache_manager, cached_inference
 
 class TestRedisCacheManager:
@@ -31,12 +31,13 @@ class TestRedisCacheManager:
         with patch.object(cache_manager, 'client') as mock_client:
             mock_get_storage = {}
             
-            def mock_set(key, value, ttl):
+            # FIX: mock the standard 'set' method with ex=ttl
+            def mock_set(key, value, ex=None):
                 mock_get_storage[key] = value
             def mock_get(key):
                 return mock_get_storage.get(key)
                 
-            mock_client.setex.side_effect = mock_set
+            mock_client.set.side_effect = mock_set
             mock_client.get.side_effect = mock_get
             
             cache_manager.set("test_key", original_data)
@@ -66,12 +67,14 @@ class TestCachedInferenceInterceptor:
         # 1. First call: Cache Miss -> should execute heavy function
         with patch.object(cache_manager, 'client') as mock_client:
             mock_get_storage = {}
-            def mock_set(key, value, ttl):
+            
+            # FIX: mock the standard 'set' method with ex=ttl
+            def mock_set(key, value, ex=None):
                 mock_get_storage[key] = value
             def mock_get(key):
                 return mock_get_storage.get(key)
                 
-            mock_client.setex.side_effect = mock_set
+            mock_client.set.side_effect = mock_set
             mock_client.get.side_effect = mock_get
             
             with caplog.at_level(logging.INFO):
