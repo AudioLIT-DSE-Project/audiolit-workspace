@@ -12,6 +12,9 @@ from typing import Any, Callable, Dict, Optional
 import redis
 import msgpack
 import numpy as np
+import hashlib
+import io
+from fastapi import UploadFile, File, HTTPException, status
 
 logger = logging.getLogger("audiolit.cache")
 
@@ -20,7 +23,47 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 CACHE_TTL = int(os.getenv("AUDIOLIT_CACHE_TTL", 60 * 60 * 24))  # 24 hours
+def generate_audio_hash_from_bytes(audio_bytes: bytes) -> str:
+    """
+    Processing utility that reads arriving audio byte streams in chunks 
+    to calculate a deterministic SHA-256 checksum string.
+    """
+    sha256_hash = hashlib.sha256()
+    buffer = io.BytesIO(audio_bytes)
+    
+    # Process in 8KB chunks to handle large files without OOM
+    chunk_size = 8192
+    while True:
+        chunk = buffer.read(chunk_size)
+        if not chunk:
+            break
+        sha256_hash.update(chunk)
+        
+    return sha256_hash.hexdigest()
 
+
+async def get_audio_hash_dependency(audio_file: UploadFile = File(...)) -> str:
+    """
+    FastAPI Dependency Interceptor: Computes the file hash before the payload 
+    is passed to the FastAPI route handler or RQ queue.
+    """
+    sha256_hash = hashlib.sha256()
+    chunk_size = 8192
+    
+    # Read arriving audio byte streams in chunks
+    while True:
+        chunk = await audio_file.read(chunk_size)
+        if not chunk:
+            break
+        sha256_hash.update(chunk)
+        
+    # Reset file pointer to the beginning so subsequent route handlers can read the file
+    await audio_file.seek(0)
+    
+    audio_hash = sha256_hash.hexdigest()
+    logger.info(f"Computed SHA-256 audio hash: {audio_hash} for file: {audio_file.filename}")
+    
+    return audio_hash
 class RedisCacheManager:
     """
     Data Access Object (DAO) for serializing, compressing, storing, and fetching
