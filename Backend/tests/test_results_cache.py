@@ -7,7 +7,15 @@ import pytest
 import asyncio
 import json
 import time
-from unittest.mock import patch, Mock
+from unittest.mock import patch
+import fakeredis
+from app.core.redis import cache_manager
+
+# Fixture to mock Redis during API tests so it doesn't fail in CI
+@pytest.fixture(autouse=True)
+def mock_redis():
+    with patch.object(cache_manager, 'client', fakeredis.FakeStrictRedis()) as mock_client:
+        yield mock_client
 
 # Test Basic Cache Operations (Critical Priority)
 class TestResultsCacheBasicOperations:
