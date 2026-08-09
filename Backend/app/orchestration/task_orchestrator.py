@@ -381,33 +381,98 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
 # --------------------------------------------------------------------------- #
 # Task functions
 # --------------------------------------------------------------------------- #
-# Scaffolding: these publish progress and return a shape the aggregator can fan
-# in, but do not run real inference yet. The real ASR/SER/ADD implementations
-# live in `multitask_orchestrator_service.py` (LIT-150); wiring them onto these
-# per-family queues is the remaining step of LIT-127's follow-on, and needs the
-# `/upload` contract change that LIT-227/LIT-157 deliberately deferred.
+# These run real inference (LIT-151, completing LIT-127's follow-on). They were
+# scaffolding stubs returning {"_scaffold": True} until now, so every job
+# /api/inference/multitask enqueued reported SUCCESS having computed nothing.
+#
+# Each delegates to the domain layer, which owns model loading through the
+# registry (SAD §5.1: orchestration invokes domain, domain uses infrastructure).
+# The domain functions cache their own loaded models at module level, and the
+# worker is a SimpleWorker running in-process, so a model loads once per worker
+# and is reused across jobs - which is what SAD §10's ~8 s multi-task budget
+# depends on.
+#
+# `audio_ref` is a server-side path today. LIT-163's cache has landed but is
+# keyed on payload hashes, not on this reference, so the gateway still passes the
+# upload path straight through.
+
+def _resolve_audio(audio_ref: str) -> str:
+    """Resolve an audio reference to a local path the domain layer can read.
+
+    A pass-through for now, isolated here so a content-addressed reference has
+    one place to hook in rather than three call sites.
+    """
+    return audio_ref
+
 
 def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
-    ctx = get_worker_context()
+    """Whisper transcription (FR1). Runs on the `asr` queue."""
+    from ..domain.model_loader_service import transcribe_whisper_base, transcribe_whisper_large
+
     publish_progress(_current_job_id(), "asr.running", {"model": model_id})
-    return {"task": "asr", "model_id": model_id, "device": ctx.device, "_scaffold": True}
+    transcribe = transcribe_whisper_large if model_id == "whisper-large" else transcribe_whisper_base
+    transcript = transcribe(_resolve_audio(audio_ref))
+    return {
+        "task": "asr",
+        "model_id": model_id,
+        "transcript": transcript,
+    }
 
 
 def ser_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
-    ctx = get_worker_context()
+    """Wav2Vec2 speech emotion recognition (FR6, LIT-206). Runs on the `ser` queue.
+
+    Returns the full probability distribution, the top-1 label and a confidence
+    score, which is what FR6.2 asks for - not just the argmax.
+    """
+    from ..domain.model_loader_service import predict_emotion_wave2vec
+
     publish_progress(_current_job_id(), "ser.running", {"model": model_id})
-    return {"task": "ser", "model_id": model_id, "device": ctx.device, "_scaffold": True}
+    prediction = predict_emotion_wave2vec(_resolve_audio(audio_ref))
+    return {
+        "task": "ser",
+        "model_id": model_id,
+        # `predicted_emotion` rather than `label`: that is the key the merged
+        # frontend reads (PredictionPanel's UnifiedTaskResult), and it is what the
+        # domain function already returns, so nothing has to be renamed in flight.
+        "predicted_emotion": prediction["predicted_emotion"],
+        "confidence": prediction["confidence"],
+        "probabilities": prediction["probabilities"],
+    }
 
 
 def add_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
-    ctx = get_worker_context()
+    """Binary bona-fide/synthetic detection head (FR7, LIT-151). Runs on `add`.
+
+    `synthetic_probability` is P(spoof) and is carried separately from
+    `confidence` (the max class probability) on purpose: FR7 asks for a fraud
+    probability, and on a bona-fide clip those two numbers are complements, not
+    the same value.
+    """
+    from ..domain.model_loader_service import predict_deepfake
+
     publish_progress(_current_job_id(), "add.running", {"model": model_id})
-    return {"task": "add", "model_id": model_id, "device": ctx.device, "_scaffold": True}
+    prediction = predict_deepfake(_resolve_audio(audio_ref))
+    return {
+        "task": "add",
+        "model_id": model_id,
+        "label": prediction["predicted_label"],
+        "confidence": prediction["confidence"],
+        "synthetic_probability": prediction["synthetic_probability"],
+        "probabilities": prediction["probabilities"],
+    }
 
 
 def xai_task(
     audio_ref: str, model_id: str, method: str, params: Mapping[str, Any]
 ) -> dict[str, Any]:
+    """Attribution for one model + method. Runs on the `xai` queue.
+
+    Reached through /api/inference/attribution, not the multi-task fan-out - an
+    attribution needs a target model and method, which a multi-task request does
+    not carry. Still scaffolding: the attribution cores are LIT-126 (Captum IG)
+    and the merged LIT-130 / LIT-148, and wiring them here is their follow-on.
+    """
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "xai.running", {"model": model_id, "method": method})
     return {"task": "xai", "model_id": model_id, "device": ctx.device, "_scaffold": True}
@@ -440,11 +505,16 @@ def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dic
     return combined
 
 
+#: The families a multi-task analysis fans out to. XAI and MUTATION are
+#: deliberately absent - both need parameters a multi-task request does not
+#: carry (a method, a mutation spec) and have their own endpoints.
 _TASK_FUNCS: dict[WorkerFamily, Callable[..., Any]] = {
     WorkerFamily.ASR: asr_task,
     WorkerFamily.SER: ser_task,
     WorkerFamily.ADD: add_task,
 }
+
+MULTITASK_FAMILIES = tuple(_TASK_FUNCS)
 
 
 # --------------------------------------------------------------------------- #
@@ -486,6 +556,20 @@ def enqueue_multitask_analysis(
     model_ids = model_ids or {}
     params = params or {}
     families = [WorkerFamily(f) if isinstance(f, str) else f for f in tasks]
+
+    # Reject unsupported families explicitly. Previously an unmapped family hit
+    # `_TASK_FUNCS[fam]` and raised KeyError deep inside the enqueue loop, which
+    # surfaced as a 500 - and the frontend was sending "xai", so every real
+    # multi-task call failed that way.
+    unsupported = [f.value for f in families if f not in _TASK_FUNCS]
+    if unsupported:
+        raise ValueError(
+            f"Unsupported multi-task families: {', '.join(unsupported)}. "
+            f"Supported: {', '.join(f.value for f in MULTITASK_FAMILIES)}. "
+            "Attribution and mutation have their own endpoints."
+        )
+    if not families:
+        raise ValueError("At least one task family is required.")
 
     family_job_objs: list[Job] = []
     family_jobs: dict[str, str] = {}

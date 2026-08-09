@@ -313,7 +313,10 @@ export const MainLayout = () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audio_ref: file.file_path,
-          tasks: ["asr", "ser", "add", "xai"]
+          // Multi-task fans out to the three inference families only. "xai" was
+          // sent here too, which the backend rejects — attribution needs a
+          // target model and method, so it goes to /api/inference/attribution.
+          tasks: ["asr", "ser", "add"]
         }),
       });
       if (response.ok) {

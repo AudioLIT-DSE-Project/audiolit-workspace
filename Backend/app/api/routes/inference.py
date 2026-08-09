@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ...orchestration.task_orchestrator import (
@@ -50,13 +50,18 @@ class JobResponse(BaseModel):
 
 @router.post("/inference/multitask", response_model=JobResponse)
 async def post_multitask(req: MultiTaskRequest) -> JobResponse:
-    result = enqueue_multitask_analysis(
-        audio_ref=req.audio_ref,
-        tasks=[TaskFamily(t) for t in req.tasks],
-        model_ids={TaskFamily(k): v for k, v in req.model_ids.items()},
-        params={TaskFamily(k): v for k, v in req.params.items()},
-        cache_key=req.cache_key,
-    )
+    try:
+        result = enqueue_multitask_analysis(
+            audio_ref=req.audio_ref,
+            tasks=[TaskFamily(t) for t in req.tasks],
+            model_ids={TaskFamily(k): v for k, v in req.model_ids.items()},
+            params={TaskFamily(k): v for k, v in req.params.items()},
+            cache_key=req.cache_key,
+        )
+    except ValueError as exc:
+        # An unknown or unsupported task family is a bad request, not a server
+        # fault - it used to surface as a 500 from a KeyError.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JobResponse(**result.as_response())
 
 @router.post("/inference/attribution", response_model=JobResponse)

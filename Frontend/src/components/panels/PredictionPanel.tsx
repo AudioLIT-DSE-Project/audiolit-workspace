@@ -72,8 +72,11 @@ export interface UnifiedTaskResult {
       probabilities: Record<string, number>;
     };
     add?: {
-      label: 'bona-fide' | 'synthetic';
+      // Matches the backend's DEEPFAKE_BONA_FIDE / DEEPFAKE_SPOOF constants.
+      // This previously read 'synthetic', which the backend never emits.
+      label: 'bona-fide' | 'spoof';
       confidence: number;
+      synthetic_probability?: number;
     };
     xai?: XAIResult;
     acoustic?: {
@@ -233,19 +236,19 @@ export const PredictionPanel = ({
       {/* 1. High-Visibility Deepfake (ADD) Warning Banner (Main Viewport Layout) */}
       {addResult && (
         <div className={`p-3 flex items-center justify-between transition-all duration-500 border-b-2 ${
-          addResult.label === 'synthetic'
+          addResult.label === 'spoof'
             ? 'bg-red-50 border-red-500 text-red-700 dark:bg-red-950/50 dark:text-red-400'
             : 'bg-green-50 border-green-500 text-green-700 dark:bg-green-950/50 dark:text-green-400'
         }`}>
           <div className="flex items-center gap-3">
-            {addResult.label === 'synthetic' ? (
+            {addResult.label === 'spoof' ? (
               <AlertTriangle className="h-6 w-6" />
             ) : (
               <ShieldCheck className="h-6 w-6" />
             )}
             <div>
               <h3 className="text-sm font-bold tracking-tight">
-                {addResult.label === 'synthetic' ? 'Deepfake Detected' : 'Bona-fide Audio'}
+                {addResult.label === 'spoof' ? 'Deepfake Detected' : 'Bona-fide Audio'}
               </h3>
               <p className="text-[10px] opacity-80">
                 Binary classification (ASVspoof 2021 DF) - No multi-class fingerprinting (SRS §4.4)
