@@ -83,23 +83,40 @@ evidence are not the same thing — when something matters, check the repo.**
 ## Repo structure — five-layer migration is merged
 
 The real ECHO 1.0 baseline is merged (PR #7), and the SAD §5.1/§5.2 five-layer
-layout landed via PR #16 (LIT-227). Structure on `develop` as of 2026-08-05:
+layout landed via PR #16 (LIT-227). Structure on `develop` as of 2026-08-09:
 
 ```
-Backend/app/{api/routes, domain, orchestration, infrastructure}
+Backend/app/{api/routes, domain, orchestration, infrastructure, core}
 Frontend/src/{pages, contexts, components/{layout,panels,audio,visualization,ui,analysis,dataset,predictions}, hooks, lib}
 ```
 
-`app/core/` **and** `app/services/` are both **gone** (LIT-230 removed the last
-of `services/`). The tree now matches SAD §5.1's five layers exactly:
-`settings`/`redis`/`session`/`rq_connection` in `app/infrastructure/`, model +
-explanation logic in `app/domain/`, the RQ fabric in `app/orchestration/`,
-routes in `app/api/routes/`. **If you find yourself adding a file to
-`app/services/`, stop** — that directory is ECHO 1.0 legacy and its return is
-the exact bug LIT-230 fixed. **Don't trust this block over the repo** — `ls
-Backend/app/` settles the current shape in one command, and this doc drifts the
-moment someone forgets to update it (the whole reason the previous version of
-this section was wrong).
+`app/services/` is **gone** (LIT-230 removed the last of it). **If you find
+yourself adding a file to `app/services/`, stop** — that directory is ECHO 1.0
+legacy and its return is the exact bug LIT-230 fixed.
+
+⚠ **`app/core/` came back on 2026-08-09** and the previous version of this
+section, which said it was gone, was wrong within days of being written.
+`app/core/redis.py` (201 lines, LIT-163/173/174 — content-addressed msgpack/lz4
+tensor cache) reappeared, `results.py` and three test files import
+`app.core.redis`, and it opens its own Redis connection from raw env vars rather
+than going through `app/infrastructure/settings.py`. That is the *same*
+stale-`Path:`-stamp failure mode as the LIT-230 duplicate-orchestrator incident.
+**It is flagged on LIT-163/LIT-230, not silently moved** — check those before
+adding anything to `app/core/` or writing a third cache layer. Note there are
+now two: `app/core/redis.py` (sync, hash-keyed tensor cache) and
+`app/infrastructure/redis.py` (async, session/result JSON store).
+
+Everything else matches SAD §5.1: `settings`/`redis`/`session`/`rq_connection`
+in `app/infrastructure/`, model + explanation logic in `app/domain/`, the RQ
+fabric in `app/orchestration/`, routes in `app/api/routes/`. **Don't trust this
+block over the repo** — `ls Backend/app/` settles the current shape in one
+command, and this doc drifts the moment someone forgets to update it (twice
+now).
+
+In `app/api/routes/`, note that **`inference.py` and `inferences.py` are
+different modules and both are mounted**: `inference.py` is the async gateway
+(enqueue-only, returns a job id), `inferences.py` is the ECHO-legacy synchronous
+route set. Read the filename twice before editing.
 
 Inside `app/orchestration/`, `task_orchestrator.py` is the SAD §5.2 Task
 Orchestrator — **one** queue fabric, worker and enqueue API. Extend it; do not
@@ -173,6 +190,28 @@ left and why.
 
 ## Known open items (check before assuming these need fresh triage)
 
+- **A green pipeline is not a working feature — seven "Done" issues shipped an
+  async path that computed nothing (found 2026-08-09, fixed by LIT-151).** The
+  RQ broker (LIT-127), workers (LIT-149), orchestrator (LIT-150), WebSocket
+  relay (LIT-157) and the whole UI stack (LIT-131/158/159) were all merged and
+  all genuinely worked. But `asr_task`/`ser_task`/`add_task` in
+  `app/orchestration/task_orchestrator.py` were still scaffolding that returned
+  `{"_scaffold": True}`, so `POST /api/inference/multitask` enqueued jobs that
+  ran no model and reported **SUCCESS**. 346 backend tests passed throughout —
+  including LIT-132's "end-to-end system integration" suite, which calls the
+  domain layer directly and never goes through the queue.
+  **The lesson: for anything user-visible, "the tests pass" and "the issue is
+  Done" both fail to detect an empty implementation behind a working pipe. Run
+  the actual path once — start Redis, start a worker, submit a real clip — before
+  believing a feature is delivered.** The same session found two contract bugs of
+  the same silent shape: the UI sent `tasks: [...,"xai"]` (a `KeyError` → 500 on
+  every real call), and `PredictionPanel` compared the deepfake label against
+  `'synthetic'`, which the backend never emits, so a detected deepfake would have
+  rendered the green "Bona-fide Audio" banner. **`npm run build` is `vite build`
+  — esbuild, which does not typecheck — and there is no `typecheck` script, so
+  TypeScript did not catch the second one. Run `npx tsc --noEmit` yourself; it is
+  not in CI.**
+
 - **A stale Tier-C `Path:` stamp caused a whole module to be built twice
   (LIT-230).** LIT-149's stamp said `Path: Backend/app/services/queue_service.py`
   — written before LIT-227 emptied that directory. The developer followed it
@@ -220,7 +259,7 @@ left and why.
   (Linear status ≠ repo evidence) — if you're relying on a Done status for
   something that matters, spend the one command it takes to verify it against
   the actual tree/tests instead of trusting the label.
-- **LIT-150 — removed by #21, being RE-ADDED FIXED via PR #22 (2026-08-05).**
+- **LIT-150 — resolved; PR #22 merged.** Kept below for the failure pattern only.
   History: orchestrator merged (#17) → reverted (#19) → re-applied (#20) →
   **PR #21 merged (by Ravindu, 2026-08-05) which DELETED it** — both
   `app/services/multitask_orchestrator_service.py` and its test are gone from
@@ -241,19 +280,25 @@ left and why.
   (LIT-207/211/225/226/227) is Done, so a large batch of Tier 2–5 work is
   unblocked regardless — see `docs/ISSUE_PLAN.md`. Re-run `gh pr list --state
   open` to confirm current PR state.
-- **AGREED SEQUENCING PLAN (2026-08-05) — read before claiming an issue so
-  concurrent sessions don't collide:** (1) land the LIT-150 re-add/fix PR #22 above first;
-  (2) **then complete LIT-123 (Ravindu, dataset ingestion core) and LIT-127
-  (Rahim, RQ broker, Urgent) FIRST, before anyone starts a downstream critical
-  path** — these two are the shared base that de-risks everything else, so they
-  go through review + merge before the parallel build-out; (3) **then work the
-  LIT-127 critical path step by step** (LIT-127 → LIT-149 workers → real
-  orchestrator wiring → LIT-131/157 frontend async), in parallel with the
-  LIT-123 → LIT-142 → LIT-128 → LIT-148 dataset/ADD path. If you're a fresh
-  session: LIT-150 fix, LIT-123, LIT-127 are already claimed/in-flight — pick
-  genuinely independent unblocked work (e.g. LIT-206/224 SER, LIT-126/130 XAI,
-  LIT-222) rather than touching those, and coordinate per "Multiple concurrent
-  sessions" below.
+- ~~**AGREED SEQUENCING PLAN (2026-08-05)**~~ — **superseded 2026-08-09.** Every
+  issue it sequenced (LIT-150, LIT-123, LIT-127, LIT-149, LIT-131/157, LIT-128,
+  LIT-148) is merged.
+
+- **STATE AS OF 2026-08-09 — read before claiming an issue so concurrent
+  sessions don't collide.** `develop` is at `2e05c5c`; ~20 PRs (#41–#71) landed
+  in the preceding three days. Linear shows 55 Done / 8 Todo / 2 In Review.
+  - **In flight:** PR #68 (LIT-146, Ravindu, In Review); LIT-125 In Review;
+    **LIT-151 (Tharusha) — the task-function wiring described above.**
+  - **Genuinely open and unblocked:** **LIT-152** (typed unified-result
+    serialization — its `Path:` stamp says `results.py`, which is **stale**;
+    that file is now LIT-163's cache endpoint, so the schemas belong in a new
+    `app/api/schemas/` module + `tasks.py`).
+  - **Still open on the async path, and not owned by any issue yet:** the
+    `/upload` HTTP-contract cutover to enqueue-and-poll, and wiring the merged
+    XAI cores (LIT-126/130/148) into `xai_task`, which is still scaffolding.
+  - **Proposed for closure:** LIT-124/143/144 — superseded by LIT-207/210/211,
+    all three of which are now Done, so nothing is left in them.
+  - **Leave alone:** LIT-129/153/154 (stretch, §4.4).
 
 ## Multiple concurrent sessions
 
