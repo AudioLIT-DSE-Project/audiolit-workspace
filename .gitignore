@@ -6,3 +6,9 @@ venv/
 .venv/
 env/
 .env
+
+# Local dev environment
+# HF_HOME target, so model weights are contained in the repo tree rather than
+# %USERPROFILE%\.cache\huggingface and go away with it. Backend/.gitignore's
+# `cache/` rule does not match this name.
+.hf-cache/

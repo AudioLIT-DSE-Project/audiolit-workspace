@@ -1,0 +1,12 @@
+# Keep the build context small. Without this, `docker build` uploads the ~3 GB
+# local .venv/ and the model cache before the first instruction even runs.
+.venv/
+venv/
+.hf-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+data/
+uploads/
+*.log

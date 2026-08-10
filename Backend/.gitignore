@@ -233,6 +233,8 @@ secrets.json
 *.cer
 
 # Docker
-.dockerignore
+# NOTE: `.dockerignore` was listed here (inherited from ECHO 1.0), which kept it
+# untracked — so a fresh clone built with the whole Backend/ tree as context,
+# including a multi-GB local .venv/. It is deliberately tracked now.
 
 /data
