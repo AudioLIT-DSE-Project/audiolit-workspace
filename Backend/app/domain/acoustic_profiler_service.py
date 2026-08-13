@@ -49,3 +49,22 @@ def track_pitch_contour(
     unvoiced = ~np.asarray(voiced_flag, dtype=bool) | (np.asarray(voiced_prob) < voiced_prob_threshold)
     f0[unvoiced] = np.nan
     return f0
+
+
+def estimate_rms_contour(
+    audio: np.ndarray,
+    frame_length: int = DEFAULT_FRAME_LENGTH,
+    hop_length: int = DEFAULT_HOP_LENGTH,
+) -> np.ndarray:
+    """Frame-wise RMS energy / localized amplitude contour (LIT-146, FR10).
+
+    Returns a 1-D array, one value per frame, using the same
+    ``frame_length``/``hop_length`` defaults (and the same STFT-style
+    ``center=True`` framing) as `track_pitch_contour`, so the two contours
+    come out the same length and line up frame-for-frame — the "aligned
+    contours" LIT-125's combined pipeline needs to overlay pitch and
+    intensity on one timeline.
+    """
+    audio = np.asarray(audio, dtype=np.float32)
+    rms = librosa.feature.rms(y=audio, frame_length=frame_length, hop_length=hop_length)[0]
+    return rms.astype(np.float64)
