@@ -68,3 +68,52 @@ def estimate_rms_contour(
     audio = np.asarray(audio, dtype=np.float32)
     rms = librosa.feature.rms(y=audio, frame_length=frame_length, hop_length=hop_length)[0]
     return rms.astype(np.float64)
+
+
+def extract_acoustic_profile(
+    audio: np.ndarray,
+    sr: int,
+    fmin: float = DEFAULT_FMIN,
+    fmax: float = DEFAULT_FMAX,
+    frame_length: int = DEFAULT_FRAME_LENGTH,
+    hop_length: int = DEFAULT_HOP_LENGTH,
+    voiced_prob_threshold: float = 0.5,
+) -> dict:
+    """Combined DSP acoustic profile (LIT-125, FR10): the STFT + pYIN F0 + RMS
+    engine, packaged as one aligned, JSON-serializable timeline for the API
+    serialization layer.
+
+    Runs `track_pitch_contour` (LIT-145) and `estimate_rms_contour` (LIT-146)
+    over the same frames and zips them into a millisecond-aligned timeline —
+    the "aligned contours" both sub-tasks were built to share. Unvoiced F0
+    frames become ``None`` (not NaN, which isn't valid JSON) so the result can
+    go straight into an API response.
+    """
+    audio = np.asarray(audio, dtype=np.float32)
+    f0 = track_pitch_contour(
+        audio,
+        sr=sr,
+        fmin=fmin,
+        fmax=fmax,
+        frame_length=frame_length,
+        hop_length=hop_length,
+        voiced_prob_threshold=voiced_prob_threshold,
+    )
+    rms = estimate_rms_contour(audio, frame_length=frame_length, hop_length=hop_length)
+
+    step_s = hop_length / sr
+    timeline = [
+        {
+            "t_ms": round(i * step_s * 1000.0, 3),
+            "f0_hz": None if np.isnan(f0[i]) else float(f0[i]),
+            "rms": float(rms[i]),
+        }
+        for i in range(len(rms))
+    ]
+    return {
+        "sample_rate": sr,
+        "frame_length": frame_length,
+        "hop_length": hop_length,
+        "duration_s": float(len(audio) / sr),
+        "timeline": timeline,
+    }

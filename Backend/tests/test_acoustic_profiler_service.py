@@ -7,9 +7,15 @@ external fixtures needed.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
-from app.domain.acoustic_profiler_service import estimate_rms_contour, track_pitch_contour
+from app.domain.acoustic_profiler_service import (
+    estimate_rms_contour,
+    extract_acoustic_profile,
+    track_pitch_contour,
+)
 
 SR = 16000
 
@@ -78,3 +84,45 @@ class TestEstimateRmsContour:
         f0 = track_pitch_contour(audio, sr=SR)
         rms = estimate_rms_contour(audio)
         assert f0.shape == rms.shape
+
+
+class TestExtractAcousticProfile:
+    def test_shape_and_metadata(self):
+        audio = _sine(220.0, duration_s=1.0)
+        profile = extract_acoustic_profile(audio, sr=SR)
+        assert profile["sample_rate"] == SR
+        assert profile["frame_length"] == 2048
+        assert profile["hop_length"] == 512
+        assert profile["duration_s"] == len(audio) / SR
+        expected_frames = 1 + len(audio) // profile["hop_length"]
+        assert len(profile["timeline"]) == expected_frames
+
+    def test_timeline_entries_are_time_aligned_and_match_the_component_functions(self):
+        audio = _sine(220.0, duration_s=1.0)
+        profile = extract_acoustic_profile(audio, sr=SR)
+        f0 = track_pitch_contour(audio, sr=SR)
+        rms = estimate_rms_contour(audio)
+        step_ms = (512 / SR) * 1000.0
+
+        for i, entry in enumerate(profile["timeline"]):
+            assert entry["t_ms"] == round(i * step_ms, 3)
+            assert entry["rms"] == float(rms[i])
+            if np.isnan(f0[i]):
+                assert entry["f0_hz"] is None
+            else:
+                assert entry["f0_hz"] == float(f0[i])
+
+    def test_unvoiced_frames_are_none_not_nan(self):
+        # NaN isn't valid JSON — silence must serialize to None, not NaN.
+        silence = np.zeros(SR, dtype=np.float32)
+        profile = extract_acoustic_profile(silence, sr=SR)
+        assert all(entry["f0_hz"] is None for entry in profile["timeline"])
+
+    def test_result_is_json_serializable(self):
+        audio = _sine(220.0, duration_s=1.0)
+        profile = extract_acoustic_profile(audio, sr=SR)
+        # Round-trips cleanly, and produces valid JSON with no NaN/Infinity tokens.
+        encoded = json.dumps(profile, allow_nan=False)
+        decoded = json.loads(encoded)
+        assert decoded["sample_rate"] == SR
+        assert len(decoded["timeline"]) == len(profile["timeline"])
