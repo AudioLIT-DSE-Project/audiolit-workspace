@@ -7,7 +7,7 @@ import { Slider } from "@/components/ui/slider"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { RangeSlider } from "@/components/ui/range-slider"
-import { Volume2, Scissors, Plus, Play, Zap, XCircle } from "lucide-react"
+import { Volume2, VolumeX, Filter, Scissors, Plus, Play, Zap, XCircle } from "lucide-react"
 import { WaveformViewer } from "../audio/WaveformViewer"
 import { API_BASE } from '@/lib/api'
 import { useTaskStatus } from '@/hooks/useTaskStatus'
@@ -351,6 +351,45 @@ export const SpectrogramGridSelector: React.FC<SpectrogramGridSelectorProps> = (
   );
 };
 
+// --- LIT-178: Frontend Mutation Event Trigger & Asynchronous State Dispatcher ---
+
+// Maps onto the perturbation types perturbation_service.py already supports
+// (apply_2d_time_freq_mask / apply_band_pass_filter / noise) — no backend
+// changes needed.
+type FrameMutationType = 'time_freq_mask' | 'band_pass_filter' | 'noise';
+
+const buildFrameMutationPayload = (
+  frame: SpectrogramBoundaryFrame,
+  mutationType: FrameMutationType,
+  noiseLevelPercent: number
+) => {
+  switch (mutationType) {
+    case 'time_freq_mask':
+      return {
+        type: 'time_freq_mask',
+        params: {
+          t_start_ms: frame.startTimeMs,
+          t_end_ms: frame.endTimeMs,
+          f_low_hz: frame.startFreqHz,
+          f_high_hz: frame.endFreqHz,
+        },
+      };
+    case 'band_pass_filter':
+      return {
+        type: 'band_pass_filter',
+        params: {
+          f_low_hz: frame.startFreqHz,
+          f_high_hz: frame.endFreqHz,
+        },
+      };
+    case 'noise':
+      return {
+        type: 'noise',
+        params: { noise_level: noiseLevelPercent / 100 },
+      };
+  }
+};
+
 export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
   selectedFile,
   onPerturbationComplete,
@@ -373,7 +412,14 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
   
   const [error, setError] = useState<string | null>(null)
   const [perturbationResult, setPerturbationResult] = useState<PerturbationResult | null>(null)
-  
+
+  // LIT-178: region-scoped mutation state, driven by LIT-177's spectrogram frames
+  const [spectrogramFrames, setSpectrogramFrames] = useState<SpectrogramBoundaryFrame[]>([])
+  const [activeFrameId, setActiveFrameId] = useState<string | null>(null)
+  const [frameMutationType, setFrameMutationType] = useState<FrameMutationType>('time_freq_mask')
+  const [frameNoiseLevel, setFrameNoiseLevel] = useState([10])
+  const activeFrame = spectrogramFrames.find(f => f.id === activeFrameId) ?? null
+
   // RQ Task IDs
   const [mutationTaskId, setMutationTaskId] = useState<string | null>(null)
   const [inferenceTaskId, setInferenceTaskId] = useState<string | null>(null)
@@ -388,6 +434,8 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
     setError(null);
     setMutationTaskId(null);
     setInferenceTaskId(null);
+    setSpectrogramFrames([]);
+    setActiveFrameId(null);
   }, [selectedFile]);
 
   const handlePerturbationToggle = (perturbationType: keyof typeof selectedPerturbations) => {
@@ -495,6 +543,53 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       const result = await response.json();
       setMutationTaskId(result.job_id); // Start tracking via WebSocket
       
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
+      setError(errorMessage);
+    }
+  };
+
+  // LIT-178: dispatch a mutation scoped to the currently active spectrogram
+  // region (LIT-177's boundary frames), via the same async RQ mutation
+  // endpoint and job-tracking as handleAddPerturbations.
+  const handleApplyFrameMutation = async () => {
+    if (!selectedFile) { setError("No file selected"); return; }
+    if (!activeFrame) { setError("No spectrogram region selected"); return; }
+
+    setError(null);
+
+    try {
+      const perturbation = buildFrameMutationPayload(activeFrame, frameMutationType, frameNoiseLevel[0]);
+
+      const isUploadedFile = selectedFile.file_path && (
+        selectedFile.file_path.includes('uploads/') ||
+        selectedFile.file_path.startsWith('uploads/') ||
+        selectedFile.message === "Perturbed file" ||
+        selectedFile.message === "File uploaded successfully" ||
+        selectedFile.message === "File uploaded and processed successfully"
+      ) && selectedFile.message !== "Selected from dataset";
+
+      const response = await fetch(`${API_BASE}/api/inference/mutation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audio_ref: isUploadedFile ? selectedFile.file_path : selectedFile.filename,
+          mutation: {
+            perturbations: [perturbation],
+            is_uploaded: isUploadedFile,
+            dataset: originalDataset || dataset
+          }
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `Server error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      setMutationTaskId(result.job_id); // Start tracking via WebSocket
+
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
       setError(errorMessage);
@@ -643,12 +738,90 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
           </CardHeader>
           <CardContent>
             <SpectrogramGridSelector
+              key={selectedFile.file_id}
               durationSec={selectedFile.duration}
               maxFreqHz={selectedFile.sample_rate ? selectedFile.sample_rate / 2 : DEFAULT_MAX_FREQ_HZ}
+              onFrameCreated={(frame) => {
+                setSpectrogramFrames((prev) => [...prev, frame]);
+                setActiveFrameId(frame.id);
+              }}
             />
             <p className="text-[10px] text-muted-foreground mt-2">
               Drag to mark a time-frequency region. Resolved bounds are logged to the console.
             </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {spectrogramFrames.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Apply Mutation to Selected Region</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {spectrogramFrames.map((frame) => (
+                <button
+                  key={frame.id}
+                  type="button"
+                  onClick={() => setActiveFrameId(frame.id)}
+                  className={`text-[10px] px-2 py-1 rounded border transition-colors ${
+                    activeFrameId === frame.id
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-muted text-muted-foreground border-border hover:border-blue-400'
+                  }`}
+                >
+                  {(frame.startTimeMs / 1000).toFixed(2)}s–{(frame.endTimeMs / 1000).toFixed(2)}s · {Math.round(frame.startFreqHz)}–{Math.round(frame.endFreqHz)}Hz
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant={frameMutationType === 'time_freq_mask' ? 'default' : 'outline'}
+                onClick={() => setFrameMutationType('time_freq_mask')}
+              >
+                <VolumeX className="h-3.5 w-3.5 mr-1" /> Localized Mute
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={frameMutationType === 'band_pass_filter' ? 'default' : 'outline'}
+                onClick={() => setFrameMutationType('band_pass_filter')}
+              >
+                <Filter className="h-3.5 w-3.5 mr-1" /> Frequency Filter Band
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={frameMutationType === 'noise' ? 'default' : 'outline'}
+                onClick={() => setFrameMutationType('noise')}
+              >
+                <Volume2 className="h-3.5 w-3.5 mr-1" /> Gaussian White Noise
+              </Button>
+            </div>
+
+            {frameMutationType === 'noise' && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs">Noise Level</span>
+                  <Badge variant="outline" className="text-xs border-blue-300 text-blue-700">{frameNoiseLevel[0]}%</Badge>
+                </div>
+                <Slider value={frameNoiseLevel} onValueChange={setFrameNoiseLevel} max={50} step={1} className="w-full [&_[role=slider]]:border-blue-500 [&_[role=slider]]:bg-blue-600" />
+              </div>
+            )}
+
+            <Button
+              onClick={handleApplyFrameMutation}
+              disabled={isProcessing || !activeFrame}
+              className="w-full h-9 bg-blue-600 hover:bg-blue-700 text-white font-medium"
+              size="sm"
+            >
+              <Zap className="h-3.5 w-3.5 mr-1" />
+              {isProcessing ? "Processing..." : "Apply Mutation"}
+            </Button>
           </CardContent>
         </Card>
       )}
