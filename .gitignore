@@ -6,3 +6,9 @@ venv/
 .venv/
 env/
 .env
+
+# Agentic system temporary scratch & runtime outputs
+scratch/
+uploads/
+.antigravity/scratch/
+.antigravity/runtime/
