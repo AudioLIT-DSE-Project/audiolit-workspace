@@ -183,7 +183,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 |---|---|---|---|---|---|---|
 | LIT-169 | Quantitative faithfulness checking | FR16 | Tharusha | 🟡 In flight | **LIT-126** (needs ≥1 attribution method) | **PR #83 opened.** Implemented in `Backend/app/domain/perturbation_service.py` & verified with `test_faithfulness.py`. |
 | LIT-183 | High-saliency masking engine | FR16 | Tharusha | 🟡 In flight | LIT-169 (parent) | **PR #84 opened.** Implemented `HighSaliencyMaskingEngine` in `Backend/app/domain/perturbation_service.py` & verified with `test_high_saliency_masking.py`. |
-| LIT-184 | Downstream degradation scoring (reassigned from FR15 — see LIT-228 comment) | FR16 | Tharusha | 🟢 | LIT-169 (parent) | |
+| LIT-184 | Downstream degradation scoring | FR16 | Tharusha | 🟡 In flight | LIT-169 (parent) | **PR #85 opened.** Implemented `evaluate_downstream_degradation` in `Backend/app/domain/perturbation_service.py` & verified with `test_degradation_scoring.py`. |
 | LIT-212 | Deletion/insertion AUC metric (deletion part only) | FR16 | Tharusha | 🟢 | LIT-169 (parent) | Insertion/AUC part is stretch — do not build. |
 
 ### Tier 9 — Mid-evaluation & integration testing
