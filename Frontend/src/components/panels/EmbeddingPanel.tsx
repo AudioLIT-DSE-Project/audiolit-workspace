@@ -680,7 +680,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                                   className="h-1 my-1"
                                 />
                                 <div className="text-xs-tight text-gray-500">
-                                  Mean: {feature.mean.toFixed(3)} • Std: {feature.std.toFixed(3)} • Stability: {feature.stability_score.toFixed(2)}
+                                  Mean: {feature.mean.toFixed(3)} â€¢ Std: {feature.std.toFixed(3)} â€¢ Stability: {feature.stability_score.toFixed(2)}
                                 </div>
                               </div>
                             ))}

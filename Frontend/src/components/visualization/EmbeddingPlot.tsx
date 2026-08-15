@@ -246,10 +246,10 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     // Calculate dot product
     const dotProduct = vector[0] * planeNormal[0] + vector[1] * planeNormal[1] + vector[2] * planeNormal[2];
     
-    // Calculate angle between vector and plane normal (0° = perpendicular to plane, 90° = in plane)
+    // Calculate angle between vector and plane normal (0Â° = perpendicular to plane, 90Â° = in plane)
     const angleToNormal = Math.acos(Math.abs(dotProduct) / vectorMagnitude) * (180 / Math.PI);
     
-    // Convert to angle from plane (90° - angle to normal)
+    // Convert to angle from plane (90Â° - angle to normal)
     return 90 - angleToNormal;
   };
 
@@ -307,7 +307,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     return (
       <div className="h-full flex items-center justify-center p-4">
         <div className="text-xs text-red-500 text-center">
-          <div className="font-medium">⚠️ Error loading embeddings</div>
+          <div className="font-medium">âš ï¸� Error loading embeddings</div>
           <div className="mt-1">{error}</div>
         </div>
       </div>
@@ -349,7 +349,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     if (is3D && selectedPlane !== 'none' && selectedByAngle.includes(filename) && z) {
       const [px, py, pz] = [x[index], y[index], z[index]];
       const angle = calculateAngleToPlane(px, py, pz, selectedPlane);
-      baseText += `<br>Angle: ${angle.toFixed(1)}°`;
+      baseText += `<br>Angle: ${angle.toFixed(1)}Â°`;
       baseText += `<br>Plane: ${selectedPlane.toUpperCase()}`;
     }
     
@@ -507,7 +507,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Add compact annotation
   if (embeddingData) {
     layout.annotations = [{
-      text: `${embeddingData.total_files} files • ${is3D ? '3D' : '2D'}`,
+      text: `${embeddingData.total_files} files â€¢ ${is3D ? '3D' : '2D'}`,
       xref: 'paper',
       yref: 'paper',
       x: 0.02,
@@ -576,12 +576,12 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
                   onChange={(e) => setAngleMax(Number(e.target.value))}
                   className="w-14 h-6 text-xs text-center px-1"
                 />
-                <span className="text-xs text-gray-500">°</span>
+                <span className="text-xs text-gray-500">Â°</span>
               </div>
               
               {selectedByAngle.length > 0 && (
                 <div className="text-[10px] text-red-600 bg-red-50 px-2 py-1 rounded">
-                  🔴 {selectedByAngle.length} points selected
+                  ðŸ”´ {selectedByAngle.length} points selected
                 </div>
               )}
             </div>
@@ -589,9 +589,9 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
           
           {selectedPlane !== 'none' && (
             <div className="text-[10px] text-gray-500 mt-1">
-              {selectedPlane === 'xy' && '🔵 Blue plane: X-Y (Z=0)'}
-              {selectedPlane === 'xz' && '🟢 Green plane: X-Z (Y=0)'}
-              {selectedPlane === 'yz' && '🔴 Red plane: Y-Z (X=0)'}
+              {selectedPlane === 'xy' && 'ðŸ”µ Blue plane: X-Y (Z=0)'}
+              {selectedPlane === 'xz' && 'ðŸŸ¢ Green plane: X-Z (Y=0)'}
+              {selectedPlane === 'yz' && 'ðŸ”´ Red plane: Y-Z (X=0)'}
             </div>
           )}
         </div>
