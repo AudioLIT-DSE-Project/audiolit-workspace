@@ -373,3 +373,168 @@ def compute_deletion_score(
     except Exception as exc:
         return {"success": False, "error": f"Faithfulness evaluation failed: {exc}"}
 
+
+class HighSaliencyMaskingEngine:
+    """Automated Input Perturbation Engine for High-Saliency Feature Masking (FR16 / LIT-183).
+
+    Parses gradient attribution matrices (Captum/LIME/SHAP), extracts top-K% millisecond intervals,
+    and applies systematic zero, noise, or mean-value masking.
+    """
+
+    @staticmethod
+    def extract_top_k_ms_intervals(
+        attributions: Sequence[float] | np.ndarray,
+        sample_rate: int = 16000,
+        k_percent: float = 10.0,
+        total_samples: int | None = None,
+    ) -> List[Tuple[float, float]]:
+        """Locates precise millisecond timestamp ranges [t_start_ms, t_end_ms] matching top-K% saliency."""
+        attr_np = np.asarray(attributions, dtype=np.float32)
+        if len(attr_np) == 0:
+            return []
+
+        if total_samples is None or total_samples <= 0:
+            total_samples = len(attr_np)
+
+        k_percent = max(0.0, min(100.0, k_percent))
+        k_count = int(np.ceil((k_percent / 100.0) * len(attr_np)))
+        if k_count <= 0:
+            return []
+
+        top_k_indices = np.argpartition(np.abs(attr_np), -k_count)[-k_count:]
+        top_k_indices.sort()
+
+        intervals: List[Tuple[float, float]] = []
+        if len(top_k_indices) == 0:
+            return intervals
+
+        step_sec = (total_samples / sample_rate) / len(attr_np)
+        start_idx = top_k_indices[0]
+        prev_idx = top_k_indices[0]
+
+        for idx in top_k_indices[1:]:
+            if idx == prev_idx + 1:
+                prev_idx = idx
+            else:
+                t_start = round(start_idx * step_sec * 1000, 2)
+                t_end = round((prev_idx + 1) * step_sec * 1000, 2)
+                intervals.append((t_start, t_end))
+                start_idx = idx
+                prev_idx = idx
+
+        t_start = round(start_idx * step_sec * 1000, 2)
+        t_end = round((prev_idx + 1) * step_sec * 1000, 2)
+        intervals.append((t_start, t_end))
+
+        return intervals
+
+    @staticmethod
+    def mask_audio_by_intervals(
+        waveform: torch.Tensor,
+        sample_rate: int,
+        intervals: List[Tuple[float, float]],
+        mode: str = "zero",
+        noise_level: float = 0.005,
+    ) -> torch.Tensor:
+        """Applies systematic interval masking to waveform in zero, noise, or mean-blur mode."""
+        masked = waveform.clone()
+        if masked.dim() == 1:
+            masked = masked.unsqueeze(0)
+
+        channels, length = masked.shape
+
+        for t_start_ms, t_end_ms in intervals:
+            start_sample = max(0, int((t_start_ms / 1000.0) * sample_rate))
+            end_sample = min(length, int((t_end_ms / 1000.0) * sample_rate))
+
+            if start_sample >= end_sample:
+                continue
+
+            if mode.lower() == "noise":
+                noise = torch.randn((channels, end_sample - start_sample)) * noise_level
+                masked[:, start_sample:end_sample] = noise
+            elif mode.lower() in ("mean", "blur"):
+                mean_val = float(masked.mean())
+                masked[:, start_sample:end_sample] = mean_val
+            else:
+                masked[:, start_sample:end_sample] = 0.0
+
+        return masked
+
+    @classmethod
+    def process_high_saliency_mask(
+        cls,
+        waveform: torch.Tensor,
+        sample_rate: int,
+        attributions: Sequence[float] | np.ndarray,
+        k_percent: float = 10.0,
+        mode: str = "zero",
+    ) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
+        """Extracts top-K% intervals and returns masked waveform with interval metadata."""
+        length = waveform.shape[-1]
+        intervals = cls.extract_top_k_ms_intervals(
+            attributions=attributions,
+            sample_rate=sample_rate,
+            k_percent=k_percent,
+            total_samples=length,
+        )
+        masked_waveform = cls.mask_audio_by_intervals(
+            waveform=waveform,
+            sample_rate=sample_rate,
+            intervals=intervals,
+            mode=mode,
+        )
+        return masked_waveform, intervals
+
+
+def apply_high_saliency_mask(
+    audio_path: str,
+    attributions: Sequence[float] | np.ndarray,
+    k_percent: float = 10.0,
+    mode: str = "zero",
+    output_dir: str = "uploads",
+) -> Dict[str, Any]:
+    """High-level service API for applying high-saliency feature masking to an audio file."""
+    resolved_path = Path(audio_path)
+    if not resolved_path.exists():
+        return {"success": False, "error": f"Audio file not found: {audio_path}"}
+
+    try:
+        waveform, sample_rate = _load_waveform(str(resolved_path))
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to load audio file: {exc}"}
+
+    masked_waveform, intervals = HighSaliencyMaskingEngine.process_high_saliency_mask(
+        waveform=waveform,
+        sample_rate=sample_rate,
+        attributions=attributions,
+        k_percent=k_percent,
+        mode=mode,
+    )
+
+    masked_filename = f"saliency_masked_{mode}_{uuid.uuid4().hex[:8]}.wav"
+    output_path = Path(output_dir) / masked_filename
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    try:
+        _save_waveform(str(output_path), masked_waveform, sample_rate)
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to save masked audio: {exc}"}
+
+    preview_bytes = export_to_wav_bytes(masked_waveform, sample_rate)
+    duration_ms = int(masked_waveform.shape[-1] / sample_rate * 1000)
+
+    return {
+        "success": True,
+        "original_file": audio_path,
+        "masked_file": str(output_path).replace("\\", "/"),
+        "filename": masked_filename,
+        "duration_ms": duration_ms,
+        "sample_rate": sample_rate,
+        "k_percent": k_percent,
+        "mode": mode,
+        "masked_intervals_ms": intervals,
+        "preview_bytes": preview_bytes,
+    }
+
+
