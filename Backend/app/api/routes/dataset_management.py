@@ -78,9 +78,18 @@ async def upload_files_to_dataset(
     
     try:
         manager = get_custom_dataset_manager(session_id)
+
+        # Check once, up front: if the dataset itself doesn't exist, every
+        # file would fail identically inside the loop below, but that loop's
+        # broad `except Exception` swallows the resulting ValueError into
+        # `errors` and returns 207 instead of letting it reach the 404
+        # handler below -- inconsistent with every other route in this file.
+        if manager.get_dataset_metadata(dataset_name) is None:
+            raise ValueError(f"Dataset '{dataset_name}' does not exist")
+
         uploaded_files = []
         errors = []
-        
+
         for file in files:
             try:
                 # Read file data
