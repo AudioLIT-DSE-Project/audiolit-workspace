@@ -307,7 +307,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     return (
       <div className="h-full flex items-center justify-center p-4">
         <div className="text-xs text-red-500 text-center">
-          <div className="font-medium">âš ï¸� Error loading embeddings</div>
+          <div className="font-medium">Error loading embeddings</div>
           <div className="mt-1">{error}</div>
         </div>
       </div>
