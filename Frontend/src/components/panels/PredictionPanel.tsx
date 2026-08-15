@@ -72,8 +72,9 @@ export interface UnifiedTaskResult {
       probabilities: Record<string, number>;
     };
     add?: {
-      label: 'bona-fide' | 'synthetic';
+      label: 'bona-fide' | 'spoof' | 'synthetic';
       confidence: number;
+      synthetic_probability?: number;
     };
     xai?: XAIResult;
     acoustic?: {
@@ -231,21 +232,23 @@ export const PredictionPanel = ({
     <div className="h-full bg-panel-background border-t border-border flex flex-col">
       
       {/* 1. High-Visibility Deepfake (ADD) Warning Banner (Main Viewport Layout) */}
-      {addResult && (
+      {addResult && (() => {
+        const isSpoof = addResult.label === 'spoof' || addResult.label === 'synthetic' || (typeof addResult.synthetic_probability === 'number' && addResult.synthetic_probability > 0.5);
+        return (
         <div className={`p-3 flex items-center justify-between transition-all duration-500 border-b-2 ${
-          addResult.label === 'synthetic'
+          isSpoof
             ? 'bg-red-50 border-red-500 text-red-700 dark:bg-red-950/50 dark:text-red-400'
             : 'bg-green-50 border-green-500 text-green-700 dark:bg-green-950/50 dark:text-green-400'
         }`}>
           <div className="flex items-center gap-3">
-            {addResult.label === 'synthetic' ? (
+            {isSpoof ? (
               <AlertTriangle className="h-6 w-6" />
             ) : (
               <ShieldCheck className="h-6 w-6" />
             )}
             <div>
               <h3 className="text-sm font-bold tracking-tight">
-                {addResult.label === 'synthetic' ? 'Deepfake Detected' : 'Bona-fide Audio'}
+                {isSpoof ? 'Deepfake Detected' : 'Bona-fide Audio'}
               </h3>
               <p className="text-[10px] opacity-80">
                 Binary classification (ASVspoof 2021 DF) - No multi-class fingerprinting (SRS §4.4)
@@ -259,7 +262,8 @@ export const PredictionPanel = ({
             <div className="text-[10px] opacity-80">Confidence</div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       <Tabs defaultValue="analytics" className="h-full flex flex-col">
         <div className="bg-panel-header border-b border-border px-3 py-2">
