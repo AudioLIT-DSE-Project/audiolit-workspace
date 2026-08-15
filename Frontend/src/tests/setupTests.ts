@@ -29,3 +29,12 @@ if (typeof HTMLCanvasElement !== "undefined") {
     clip: jest.fn(),
   }) as any;
 }
+
+// Mock ResizeObserver for jsdom compatibility
+if (typeof global.ResizeObserver === "undefined") {
+  global.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
