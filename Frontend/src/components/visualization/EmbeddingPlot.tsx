@@ -14,6 +14,7 @@ interface EmbeddingPlotProps {
   onAngleRangeSelect?: (selectedFiles: string[]) => void;
   selectedFile?: string | null;
   selectionMode?: 'box' | 'lasso';
+  colorCodingMode?: 'emotion' | 'deepfake' | 'accent' | 'default';
   onSelectionChange?: (selectedFiles: string[]) => void;
 }
 
@@ -27,10 +28,11 @@ interface EmbeddingPlotContentProps {
   onAngleRangeSelect?: (selectedFiles: string[]) => void;
   selectedFile?: string | null;
   selectionMode?: 'box' | 'lasso';
+  colorCodingMode?: 'emotion' | 'deepfake' | 'accent' | 'default';
   onSelectionChange?: (selectedFiles: string[]) => void;
 }
 
-const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange }: EmbeddingPlotContentProps) => {
+const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', colorCodingMode = 'default', onSelectionChange }: EmbeddingPlotContentProps) => {
   const { embeddingData, isLoading, error } = useEmbedding();
   const plotRef = useRef<any>(null);
   const [selectedPlane, setSelectedPlane] = useState<PlaneType>('none');
@@ -627,7 +629,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   );
 };
 
-export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange }: EmbeddingPlotProps) => {
+export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', colorCodingMode = 'default', onSelectionChange }: EmbeddingPlotProps) => {
   return (
     <div className="w-full h-full min-h-0 relative">
       <EmbeddingPlotContent
@@ -637,6 +639,7 @@ export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSel
         onAngleRangeSelect={onAngleRangeSelect}
         selectedFile={selectedFile}
         selectionMode={selectionMode}
+        colorCodingMode={colorCodingMode}
         onSelectionChange={onSelectionChange}
       />
     </div>

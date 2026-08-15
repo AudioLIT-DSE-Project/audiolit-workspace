@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/comp
 import { EmbeddingPlot } from "../visualization/EmbeddingPlot";
 import { ScalarPlot } from "../visualization/ScalarPlot";
 import { useEmbedding } from "../../contexts/EmbeddingContext";
-import { RefreshCw, Eye, Box, Square, BarChart3, HelpCircle } from "lucide-react";
+import { RefreshCw, Eye, Box, Square, BarChart3, HelpCircle, Play } from "lucide-react";
 import { getFeatureExplanation } from "@/lib/audioFeatures";
 import { API_BASE } from "@/lib/api";
 
@@ -115,6 +115,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
   const [reductionMethod, setReductionMethod] = useState("pca");
   const [is3D, setIs3D] = useState(false);
   const [selectionMode, setSelectionMode] = useState<'box' | 'lasso'>('box');
+  const [colorCodingMode, setColorCodingMode] = useState<'default' | 'emotion' | 'deepfake' | 'accent'>('default');
   const [analysisType, setAnalysisType] = useState<'predictions' | 'common-terms' | 'audio-features'>('audio-features');
   const [selectedByAngle, setSelectedByAngle] = useState<string[]>([]);
   const [selectedPoints2D, setSelectedPoints2D] = useState<string[]>([]);
@@ -496,6 +497,19 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               </Select>
               )}
 
+              {/* Task Label Color-Coding */}
+              <Select value={colorCodingMode} onValueChange={(value: 'default' | 'emotion' | 'deepfake' | 'accent') => setColorCodingMode(value)}>
+                <SelectTrigger className="w-28 h-8 text-xs border border-gray-200 rounded-md">
+                  <SelectValue placeholder="Color Coding" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">Default</SelectItem>
+                  <SelectItem value="emotion">Emotion</SelectItem>
+                  <SelectItem value="deepfake">Deepfake</SelectItem>
+                  <SelectItem value="accent">Accent</SelectItem>
+                </SelectContent>
+              </Select>
+
               {/* Analysis Type */}
               <Select
               value={analysisType}
@@ -558,6 +572,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               onAngleRangeSelect={handleAngleRangeSelect}
               selectedFile={selectedFile}
               selectionMode={selectionMode}
+              colorCodingMode={colorCodingMode}
               onSelectionChange={handle2DSelectionChange}
             />
           </div>
@@ -884,11 +899,26 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                           </div>
                         </div>
 
-                        {/* Selected Files Summary */}
+                        {/* Selected Files Summary & Clip Playback List */}
                         <div className="space-y-2">
-                          <div className="text-sm-tight font-medium">Selection Summary</div>
-                          <div className="text-xs-tight text-gray-600 bg-blue-50 p-2 rounded border border-blue-200">
-                            {is3D ? selectedByAngle.length : selectedPoints2D.length} files selected
+                          <div className="text-sm-tight font-medium flex items-center justify-between">
+                            <span>Selected Audio Clips ({is3D ? selectedByAngle.length : selectedPoints2D.length})</span>
+                          </div>
+                          <div className="max-h-36 overflow-y-auto space-y-1">
+                            {(is3D ? selectedByAngle : selectedPoints2D).map((filename, index) => (
+                              <div key={index} className="flex items-center justify-between p-1.5 bg-gray-50 hover:bg-gray-100 rounded border text-xs">
+                                <span className="font-mono text-blue-700 truncate max-w-[200px]" title={filename}>{filename}</span>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 w-6 p-0 text-blue-600 hover:text-blue-800"
+                                  onClick={() => handlePointSelect(filename, [])}
+                                  title={`Play ${filename}`}
+                                >
+                                  <Play className="h-3 w-3 fill-current" />
+                                </Button>
+                              </div>
+                            ))}
                           </div>
                         </div>
                       </div>
