@@ -172,7 +172,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-185 | Projection-space lasso handler | FR11 | Tharusha | 🟢 | **LIT-207** | Needs embeddings from a registry-loaded model. |
+| LIT-185 | Projection-space lasso handler | FR11 | Tharusha | 🟡 In flight | **LIT-207** | **PR #86 opened.** Implemented lasso & box selection event handler in `Frontend/src/components/visualization/EmbeddingPlot.tsx`. |
 | LIT-167 | Lasso selection UI (committed part only) | FR11 | Tharusha | 🟢 | LIT-207 | Multi-model comparison part is stretch — do not build. |
 | LIT-168 | Accent bias profiling scripts | FR15 | Ravindu | 🟡 In flight | **LIT-181**, LIT-207 | Needs L2-ARCTIC + a working ASR path for WER. |
 | LIT-182 | Group-wise WER diagnostic runner | FR15 | Ravindu | 🟡 In flight | LIT-168 (parent) | |
