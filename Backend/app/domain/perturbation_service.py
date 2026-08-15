@@ -538,3 +538,120 @@ def apply_high_saliency_mask(
     }
 
 
+def evaluate_downstream_degradation(
+    audio_path: str,
+    attributions: Sequence[float] | np.ndarray,
+    model_type: str = "ser",
+    model_id: str = "default",
+    k_percentages: List[float] | None = None,
+    mode: str = "zero",
+    output_dir: str = "uploads",
+) -> Dict[str, Any]:
+    """Downstream Performance Degradation Scoring Pipeline (FR16 / LIT-184).
+
+    Pipes high-saliency masked speech tracks back through forward model inference across
+    a sequence of top-K percentage thresholds, calculates confidence drops, computes
+    the Area Under Degradation Curve (AUDC), and returns structured faithfulness audit logs.
+    """
+    resolved_path = Path(audio_path)
+    if not resolved_path.exists():
+        return {"success": False, "error": f"Audio file not found: {audio_path}"}
+
+    if k_percentages is None or len(k_percentages) == 0:
+        k_percentages = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 50.0]
+
+    k_percentages = sorted(list(set(max(0.0, min(100.0, float(k))) for k in k_percentages)))
+
+    try:
+        waveform, sample_rate = _load_waveform(str(resolved_path))
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to load audio file: {exc}"}
+
+    try:
+        if model_type.lower() in ("add", "deepfake"):
+            from .model_loader_service import predict_deepfake
+            orig_res = predict_deepfake(str(resolved_path))
+            baseline_conf = float(orig_res.get("confidence", 0.0))
+            target_class = orig_res.get("predicted_label", "bona-fide")
+        else:
+            from .model_loader_service import predict_ser
+            orig_res = predict_ser(str(resolved_path))
+            target_class = orig_res.get("predicted_emotion", "neutral")
+            orig_probs = orig_res.get("probabilities", {})
+            baseline_conf = float(orig_probs.get(target_class, orig_res.get("confidence", 0.0)))
+    except Exception as exc:
+        return {"success": False, "error": f"Baseline model inference failed: {exc}"}
+
+    degradation_steps: List[Dict[str, Any]] = []
+    prev_conf = baseline_conf
+    monotonic_decline = True
+
+    for k_pct in k_percentages:
+        masked_waveform, intervals = HighSaliencyMaskingEngine.process_high_saliency_mask(
+            waveform=waveform,
+            sample_rate=sample_rate,
+            attributions=attributions,
+            k_percent=k_pct,
+            mode=mode,
+        )
+
+        masked_filename = f"degradation_k{int(k_pct)}_{uuid.uuid4().hex[:6]}.wav"
+        masked_path = Path(output_dir) / masked_filename
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        try:
+            _save_waveform(str(masked_path), masked_waveform, sample_rate)
+            if model_type.lower() in ("add", "deepfake"):
+                from .model_loader_service import predict_deepfake
+                m_res = predict_deepfake(str(masked_path))
+                m_conf = float(m_res.get("confidence", 0.0))
+            else:
+                from .model_loader_service import predict_ser
+                m_res = predict_ser(str(masked_path))
+                m_probs = m_res.get("probabilities", {})
+                m_conf = float(m_probs.get(target_class, 0.0))
+        except Exception:
+            m_conf = 0.0
+
+        if m_conf > prev_conf + 1e-4:
+            monotonic_decline = False
+        prev_conf = m_conf
+
+        conf_drop = max(0.0, baseline_conf - m_conf)
+        degradation_ratio = round(conf_drop / baseline_conf, 4) if baseline_conf > 0 else 0.0
+
+        degradation_steps.append({
+            "k_percent": k_pct,
+            "masked_confidence": round(m_conf, 4),
+            "confidence_drop": round(conf_drop, 4),
+            "degradation_ratio": degradation_ratio,
+            "masked_intervals_ms": intervals,
+            "masked_audio_file": str(masked_path).replace("\\", "/"),
+        })
+
+    audc = 0.0
+    if len(degradation_steps) > 1:
+        xs = [s["k_percent"] / 100.0 for s in degradation_steps]
+        ys = [s["degradation_ratio"] for s in degradation_steps]
+        audc = float(np.trapz(ys, xs))
+
+    mean_degradation_score = round(
+        sum(s["degradation_ratio"] for s in degradation_steps) / len(degradation_steps), 4
+    ) if degradation_steps else 0.0
+
+    return {
+        "success": True,
+        "audio_path": audio_path,
+        "model_type": model_type,
+        "model_id": model_id,
+        "target_class": target_class,
+        "baseline_confidence": round(baseline_conf, 4),
+        "degradation_curve": degradation_steps,
+        "audc": round(audc, 4),
+        "mean_degradation_score": mean_degradation_score,
+        "degradation_trend": "monotonic_decline" if monotonic_decline else "non_monotonic",
+        "audit_verdict": "faithful" if (audc >= 0.05 or mean_degradation_score >= 0.10) else "unfaithful",
+    }
+
+
+
