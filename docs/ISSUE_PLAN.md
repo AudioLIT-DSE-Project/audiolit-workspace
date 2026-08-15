@@ -24,15 +24,18 @@ dependency graph matches this document.
 > - **Dataset ingestion is ~complete:** 6 of 7 corpora have loaders in
 >   `app/infrastructure/dataset_ingestion.py`; only the SER trio (CREMA-D /
 >   RAVDESS / ESD, **LIT-208**) is left. There is now one common
->   `DatasetLoader`/registry the SER loader plugs into.
+>   `DatasetLoader`/registry the SER loader plugs into. **[Landed the next
+>   day — PR #44, 2026-08-06: CREMA-D + RAVDESS loaders merged. ESD remains
+>   unwired, but it's stretch scope (LIT-166), not a committed gap.]**
 > - **Next on the dataset→ADD critical path:** **LIT-128** (ADD integration,
 >   Tharusha) is now unblocked (LIT-207 ✅ + LIT-142 ✅) → then LIT-148 Grad-CAM
 >   → LIT-132. On the async path, **LIT-149** (RQ workers) follows the merged
 >   LIT-127, then orchestrator wiring + LIT-131/157 (the `/upload` async cutover
 >   still needs LIT-157 frontend polling).
-> - **Highest-leverage unstarted work:** LIT-128 (ADD), LIT-208 (SER data),
->   LIT-206/224 (SER model), LIT-126/130/222 (XAI cores, unblocked by LIT-211),
->   LIT-149 (workers), LIT-165 (mutation engine, unblocked by LIT-226).
+> - **Highest-leverage unstarted work:** LIT-128 (ADD), ~~LIT-208 (SER
+>   data)~~ (merged next day, PR #44), LIT-206/224 (SER model), LIT-126/130/222
+>   (XAI cores, unblocked by LIT-211), LIT-149 (workers), LIT-165 (mutation
+>   engine, unblocked by LIT-226).
 >
 > _Status column last reconciled against Linear + `develop`: 2026-08-05 (end of
 > session)._
@@ -41,9 +44,10 @@ dependency graph matches this document.
 > cleanup:**
 > - **Merged since:** LIT-128 (ADD classifier, PR #33 — went into `main`
 >   directly, back-merged to `develop` via PR #40), LIT-148 (Grad-CAM, PR #36),
->   and the whole frontend stack in one go via **PR #39** — LIT-131, LIT-157,
->   LIT-158, LIT-159 and LIT-149, because #34/#35/#37/#38 were all ancestors
->   of #39 rather than independent PRs.
+>   LIT-208 (CREMA-D/RAVDESS SER loaders, PR #44), and the whole frontend stack
+>   in one go via **PR #39** — LIT-131, LIT-157, LIT-158, LIT-159 and LIT-149,
+>   because #34/#35/#37/#38 were all ancestors of #39 rather than independent
+>   PRs.
 > - **LIT-230** cleans up after that merge: `app/services/queue_service.py`
 >   duplicated the already-merged `rq_broker.py`, because four Tier-C `Path:`
 >   stamps still pointed at `app/services/` after LIT-227 emptied it. Both
@@ -53,9 +57,159 @@ dependency graph matches this document.
 > - **Still open on the async path:** the `/upload` HTTP-contract cutover, and
 >   pointing LIT-150's orchestrator at the canonical per-family queues (it
 >   still uses its own `multitask_*` names).
-> - **Highest-leverage unstarted work now:** LIT-208 (SER data), LIT-206/224
->   (SER model), LIT-126/130/222 (XAI cores), LIT-165 (mutation engine),
->   LIT-151/152 (ADD follow-ons, now that LIT-128 is on `develop`).
+> - **Highest-leverage unstarted work now:** LIT-206/224 (SER model — LIT-208's
+>   data is in, but its own label-accuracy check is still open),
+>   LIT-126/130/222 (XAI cores), LIT-165 (mutation engine), LIT-151/152 (ADD
+>   follow-ons, now that LIT-128 is on `develop`).
+
+> **UPDATE (2026-08-13) — LIT-164's mutation-suite children implemented,
+> awaiting review; several Tier 7/9 items confirmed unblocked:**
+> - **LIT-165 merged** (backend mutation engine) — unblocked LIT-164 and its
+>   three children. Real path is `Backend/app/domain/perturbation_service.py`;
+>   several open issues' Tier-C stamps still say `Backend/app/services/...`
+>   (deleted by LIT-230) — flagged in Linear comments on LIT-164/168/182
+>   rather than silently worked around.
+> - **LIT-176/177/178 implemented, PRs open, not yet reviewed/merged:** #75
+>   (LIT-176, waveform drag-selection overlay), #76 (LIT-177, 2D spectrogram
+>   grid selector + pixel↔time/frequency resolver), #77 (LIT-178, mutation
+>   trigger wired to LIT-177's frames via the existing `/api/inference/mutation`
+>   async path — not the stale `/api/audio/mutate` its own stamp cites).
+>   **PR #77 is stacked on #76's unmerged commit** (both target `develop`, but
+>   #77's diff won't shrink to just its own ~175 lines until #76 merges) —
+>   **review/merge #76 before #77.** LIT-164 itself (the umbrella) still needs
+>   a closing integration pass after both merge, same shape as LIT-125's own
+>   commit after its 145/146 children landed.
+> - **Confirmed unblocked (deps merged, verified against live Linear, not
+>   just this doc):** LIT-168 + child LIT-182 (accent bias / WER — LIT-181 ✅,
+>   LIT-207 ✅), LIT-170 + child LIT-187 (full testing pass — LIT-132 ✅,
+>   LIT-130 ✅, LIT-126 ✅), LIT-160 (cross-browser QA — parent LIT-132 ✅).
+
+> **UPDATE (2026-08-14) — LIT-168/182 (accent bias) implemented, PRs open;
+> LIT-170 paused (real FR16 gap), pivoted to LIT-187:**
+> - **LIT-168/182 implemented, PRs open, not yet reviewed/merged:** #78
+>   (LIT-168, `Backend/app/domain/accent_bias_profiler.py` — accent-cohort
+>   batching + per-sample WER scoring via jiwer, injectable `TranscribeFn` so
+>   tests never load a real model), #79 (LIT-182,
+>   `Backend/app/domain/accent_bias_runner.py` — orchestrates 168's
+>   primitives into a worst-cohort-first ranked report + JSON export + CLI
+>   entrypoint). **#79 is stacked on #78's unmerged commit** (same shape as
+>   #77 on #76) — **review/merge #78 before #79.**
+> - `jiwer>=4.0.0` added to `Backend/requirements.txt` (only on the #78
+>   branch until it merges).
+> - Both PRs' full backend suites green (357 passed, 7 skipped) with Redis
+>   down, no regressions.
+> - **LIT-170 paused, not started** — its own technical steps ask to
+>   "compute... the deletion-score faithfulness confidence drop (FR16)," but
+>   that engine doesn't exist yet: LIT-169 (Tharusha's, faithfulness checking)
+>   is still Todo, and **LIT-188** ("WER/deletion-score metric computation,"
+>   also Tharusha's, also a LIT-170 child) confirms FR16 computation is
+>   someone else's assigned scope, not something to build under this issue's
+>   banner. Flagged in a Linear comment on LIT-170 rather than faking a
+>   placeholder score or reaching into LIT-169/188. The cache-hit sub-10ms
+>   part of LIT-170's DoD is already covered by the existing
+>   `test_redis_cache.py::test_hit_bypass_miss_enqueue`, and its FR15/WER
+>   part is now coverable via LIT-168/182 — so once LIT-169/188 land, closing
+>   LIT-170 is a much smaller remaining lift than it looks today.
+> - **Found and flagged, not yet fixed:** `Frontend/src/tests/ui-components.test.tsx`
+>   already exists (Jest + Testing Library, even mocks a Web Audio context —
+>   directly relevant to LIT-170's "Web Audio node lifetimes" step) but
+>   `package.json` has no `test` script and no jest/testing-library packages
+>   installed — orphaned, never wired up. Picking this up as part of LIT-187.
+> - **Next:** LIT-187 (backend pytest + UI component boundary testing, no
+>   FR16 dependency) instead of LIT-170. LIT-164's own closing integration
+>   pass and LIT-160 (cross-browser QA) remain queued behind their
+>   prerequisite merges /
+>   lower priority, per the 2026-08-13 note.
+
+> **UPDATE (2026-08-14, later) — LIT-187 implemented, PR not yet opened:**
+> - **Backend**: `Backend/tests/test_dataset_management_routes.py` (20 tests)
+>   — `app/api/routes/dataset_management.py` (custom-dataset CRUD, mounted
+>   under `/upload`) had **zero** route-level test coverage before this;
+>   `Backend/tests/test_debug_and_tasks_routes.py` (3 tests) covers
+>   `/debug/session` and `/api/tasks/{id}/status`, also previously untested.
+> - **Real bug found and fixed while writing these tests**:
+>   `upload_files_to_dataset` caught `add_file_to_dataset`'s "dataset doesn't
+>   exist" `ValueError` inside the per-file loop's broad `except Exception`,
+>   so it returned `207 Multi-Status` with a buried error message instead of
+>   the `404` every other route in this file gives for "not found." Fixed
+>   with an upfront existence check; every other route was already correct.
+> - **Frontend Jest infra actually wired up**: `jest`, `ts-jest`,
+>   `@testing-library/*` added to `package.json`, `Frontend/jest.config.cjs`
+>   added (maps the `@/` alias, same as `vite.config.ts`), `npm test` script
+>   added, and `.github/workflows/ci.yml` now runs it — without this, these
+>   tests (and the pre-existing orphaned file) would just rot again, which is
+>   exactly how the original file got orphaned in the first place.
+> - **The pre-existing `ui-components.test.tsx` never actually ran before**
+>   (no `test` script existed) and had 3 real bugs once it did: two TS type
+>   errors (`global.fetch` mistyped, string `aria-valuemax` vs. the numeric
+>   type React expects) and one logic bug (`user.clear()`/`user.type()`
+>   don't apply to `input[type=range]` — fixed by switching to
+>   `fireEvent.change`, matching how this same file's other range-slider
+>   tests already handle it). All 21 of its tests pass now, but they all
+>   exercise inline mock components defined in the test file itself, not any
+>   real app component — worth knowing before treating it as real coverage.
+> - **Added real-component coverage** `Frontend/src/components/audio/WaveformViewer.test.tsx`
+>   (8 tests) — actually imports and tests the real `WaveformViewer.tsx`
+>   (WaveSurfer mocked, since jsdom has no canvas 2D/audio decoding),
+>   covering mount/unmount lifecycle, event wiring, and play/pause. Does
+>   **not** cover LIT-176's drag-selection overlay — this branch is off bare
+>   `develop` (LIT-187 isn't a child of the 176/177/178 chain in Linear, so
+>   stacking onto an unmerged, unrelated-lineage branch would've been a
+>   worse call than just testing what's actually on this branch).
+> - Full suites green: backend 361 passed / 7 skipped (Redis down); frontend
+>   `npm run lint` (0 errors), `npx jest` (29 passed), `npm run build`, all
+>   clean after a real `npm ci` (not just `npm install`) sanity check.
+> - **Not done**: canvas FPS ("above 45 FPS during complex user scrubbing")
+>   from LIT-187's own technical steps isn't meaningfully measurable in
+>   jsdom (no real rendering pipeline) — component-level interaction tests
+>   substitute for it here rather than a fabricated FPS number.
+
+> **UPDATE (2026-08-15) — full team scan across all three assignees (not just
+> Ravindu), re-checked directly against live Linear, `includeArchived: false`:**
+> - **Open PRs, none merged yet:** #75/#76/#77/#78/#79/#80 (Ravindu, LIT-176/
+>   177/178/168/182/187 — all now show **In Review** in Linear, so LIT-134's
+>   auto-transition-on-PR-open did fire, just with more lag than expected
+>   when last checked) and **#72 (Tharusha, LIT-151, In Progress)** — a PR
+>   already exists there too, running real inference on the ADD RQ task
+>   functions.
+> - **A stray archived issue leaked into an earlier unfiltered scan**:
+>   LIT-214 ("stability", empty body, assigned Tharusha) was created and
+>   archived one minute later on 2026-07-23 — not real work. The
+>   `list_issues` tool's `includeArchived` defaults to `true`; re-ran with
+>   `false` for this scan.
+> - **Confirmed unblocked, committed, genuinely available — Tharusha:**
+>   LIT-169 (FR16 faithfulness checking — this is the one gating Ravindu's
+>   paused LIT-170 and, transitively, Rahim's LIT-171/189), LIT-152 (forensic
+>   feature map API), LIT-162 (code review/walkthrough prep, **Urgent**),
+>   LIT-167 (lasso UI — **committed part only**, its own title already flags
+>   the multi-model-compare half as stretch), LIT-185 (projection lasso
+>   handler). LIT-183/184/188/212 are children of LIT-169/170 and stay
+>   blocked until those land.
+> - **Still open, unassigned, high-priority, real correctness/security
+>   issues nobody's picked up:**
+>   - **LIT-222** (FR17 — replace ECHO's silent fabricated-attention
+>     fallback with an explicit unavailable/synthetic flag; High priority,
+>     unblocked since LIT-211 ✅) has the **same stale `Path:` stamp bug**
+>     already flagged on LIT-164/168/182 — its stamp says
+>     `Backend/app/services/model_loader_service.py` and
+>     `.../saliency_service.py`, but the real files are in
+>     `Backend/app/domain/`. Worth a Linear comment before anyone starts it.
+>   - **LIT-223** (remediate inherited security gaps — debug endpoint, CORS,
+>     cross-session dataset access; High priority, loosely blocked by
+>     LIT-227 ✅).
+> - **Stale bookkeeping, not re-closed despite the earlier documented
+>   decision:** LIT-124/143/144 (Tharusha) are still open/Todo in Linear
+>   despite this doc's own stretch table recommending closure as duplicates
+>   of LIT-207/210/211 (all ✅ Done) since at least 2026-08-05 — ten days
+>   stale now.
+> - **LIT-9** (Rahim, Phase 1 feasibility study) is the only non-Done,
+>   non-stretch issue left anywhere in the Phase 1 project — everything else
+>   in Phase 1 completed. Worth checking whether this is genuinely
+>   outstanding or just stale bookkeeping, same as LIT-124/143/144.
+> - **Rahim's queue is short and mostly downstream-blocked:** LIT-171
+>   (testing/evaluation doc) is blocked by LIT-170, which Ravindu paused —
+>   so Rahim is indirectly blocked by the same FR16 gap; LIT-189 is blocked
+>   by LIT-171 in turn.
 
 ---
 
@@ -94,7 +248,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 |---|---|---|---|---|---|---|
 | LIT-141 | Common Voice / LibriSpeech ingestion | FR2 | Ravindu | ✅ Done | LIT-123 | **Merged (PR #27).** Common Voice loader shipped with the core; this added `LibriSpeechLoader` (walks speaker/chapter `*.trans.txt` + `.flac`, gender from `SPEAKERS.TXT`) + `is_silent()` corruption/silence validation. |
 | LIT-142 | ASVspoof 2021 DF loader | FR2 | Ravindu | ✅ Done | LIT-123 | **Merged (PR #26).** `ASVspoofLoader` — bona-fide/spoof from the protocol/label file (2021-DF + 2019-LA layouts), research-use notice (C5). **Unblocks LIT-128** (FR7 ADD data). |
-| LIT-208 | CREMA-D/RAVDESS demo subset | FR2 | Tharusha | 🟢 | LIT-123 ✅ | **Only remaining corpus loader** — the SER benchmark data (no SER loader exists yet). Plugs into the merged `CORPUS_REGISTRY` (crema-d/ravdess/esd slots are pending). ⚠ **Now also gates LIT-224's last DoD item** — SER label-accuracy cannot be measured without known-label clips, so this is worth more than its tier position suggests. |
+| LIT-208 | CREMA-D/RAVDESS demo subset | FR2 | Tharusha | ✅ Done | LIT-123 ✅ | **Merged (PR #44, 2026-08-06).** `CremaDLoader`/`RavdessLoader` wired into the `CORPUS_REGISTRY` in `app/infrastructure/dataset_ingestion.py`; the `esd` slot in the registry still has no `loader_factory` (out of scope for this issue — ESD only appears in stretch LIT-166, not committed). 6 of 7 approved corpora now have loaders. ⚠ **Unblocks LIT-224's last open DoD item** — SER label-accuracy on known-label clips is measurable now, but hasn't been run yet as far as this doc can confirm. |
 | LIT-181 | L2-ARCTIC ingestion | FR2 | Ravindu | ✅ Done | LIT-123 | **Merged (PR #30).** `L2ArcticLoader` — fixed 24-speaker→L1 accent map (6 L1s) exposed as `accent`/`demographic["l1"]`. **Unblocks LIT-168/182** (FR15 accent bias). |
 
 ### Tier 2 — Async fabric build-out (blocked by the Tier-0 prototype)
@@ -132,12 +286,12 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-165 | Backend mutation engine | FR12 | Rahim | 🟢 | **LIT-226** | Same file (`pertubation_service.py`) as LIT-226 — sequence to avoid conflicting edits. |
-| LIT-175 | Time-frequency slice masking | FR12 | Rahim | 🟢 | LIT-165 (parent) | |
-| LIT-164 | Canvas selection controls (frontend+backend) | FR12 | Ravindu | 🟢 | **LIT-165** | |
-| LIT-176 | Canvas mouse drag/bbox tracker | FR12 | Ravindu | 🟢 | LIT-164 (parent) | |
-| LIT-177 | 2D spectrogram grid selector | FR12 | Ravindu | 🟢 | LIT-164 (parent) | |
-| LIT-178 | Mutation trigger/state dispatcher | FR12 | Ravindu | 🟢 | LIT-164 (parent), LIT-165 | Needs the backend mutation endpoint contract. |
+| LIT-165 | Backend mutation engine | FR12 | Rahim | ✅ Done | **LIT-226** ✅ | Merged. Lives at `Backend/app/domain/perturbation_service.py` (not the stale `app/services/pertubation_service.py` several Tier-C stamps still cite — see below). |
+| LIT-175 | Time-frequency slice masking | FR12 | Rahim | 🟢 | LIT-165 (parent) ✅ | Unblocked. |
+| LIT-164 | Canvas selection controls (frontend+backend) | FR12 | Ravindu | 🔵 In Progress | **LIT-165** ✅ | ⚠ Tier-C `Path:` stamp is stale (`Backend/app/services/pertubation_service.py`, deleted by LIT-230) — flagged in a Linear comment, real path is `Backend/app/domain/perturbation_service.py`. Its three children (176/177/178) are implemented; this umbrella issue itself is not yet closed out — needs a final integration pass once those PRs merge (same pattern as LIT-125 → 145/146 → LIT-125's own combining commit). |
+| LIT-176 | Canvas mouse drag/bbox tracker | FR12 | Ravindu | 🔵 In Progress | LIT-164 (parent) | **PR #75 open**, base `develop`, targets `Frontend/src/components/audio/WaveformViewer.tsx`. Not yet reviewed/merged. |
+| LIT-177 | 2D spectrogram grid selector | FR12 | Ravindu | 🔵 In Progress | LIT-164 (parent) | **PR #76 open**, base `develop`, targets `Frontend/src/components/analysis/PerturbationTools.tsx`. Not yet reviewed/merged. |
+| LIT-178 | Mutation trigger/state dispatcher | FR12 | Ravindu | 🔵 In Progress | LIT-164 (parent), LIT-165 ✅ | **PR #77 open**, base `develop` (stacked on LIT-177's unmerged commit, so its diff currently shows both LIT-177's + LIT-178's changes — 2 commits/470 lines — until PR #76 merges, at which point it'll shrink to LIT-178's own ~175 lines). Maps its 3 mutation types onto `perturbation_service.py`'s existing `time_freq_mask`/`band_pass_filter`/`noise` types rather than the stamp's stale `/api/audio/mutate` reference (real endpoint: `POST /api/inference/mutation`). Review LIT-177's PR first. |
 
 ### Tier 6 — Frontend integration (blocked by the backend features it binds to)
 
@@ -165,8 +319,8 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 |---|---|---|---|---|---|---|
 | LIT-185 | Projection-space lasso handler | FR11 | Tharusha | 🟢 | **LIT-207** | Needs embeddings from a registry-loaded model. |
 | LIT-167 | Lasso selection UI (committed part only) | FR11 | Tharusha | 🟢 | LIT-207 | Multi-model comparison part is stretch — do not build. |
-| LIT-168 | Accent bias profiling scripts | FR15 | Ravindu | 🟢 | **LIT-181**, LIT-207 | Needs L2-ARCTIC + a working ASR path for WER. |
-| LIT-182 | Group-wise WER diagnostic runner | FR15 | Ravindu | 🟢 | LIT-168 (parent) | |
+| LIT-168 | Accent bias profiling scripts | FR15 | Ravindu | 🔵 In Progress | **LIT-181** ✅, LIT-207 ✅ | **PR #78 open**, base `develop`. Lives at `Backend/app/domain/accent_bias_profiler.py` (stale stamp said `app/services/`, flagged in Linear). Core primitives only (accent-cohort batching + per-sample WER scoring) — the ranked/exportable report is LIT-182's job. |
+| LIT-182 | Group-wise WER diagnostic runner | FR15 | Ravindu | 🔵 In Progress | LIT-168 (parent) | **PR #79 open**, base `develop` (stacked on #78's unmerged commit — same situation as #77/#76, diff won't shrink to its own ~336 lines until #78 merges; **review #78 first**). `Backend/app/domain/accent_bias_runner.py` — ranks cohorts worst-WER-first, JSON export uses `None` not `NaN` (most JSON parsers reject a literal NaN token), plus a CLI entrypoint. |
 
 ### Tier 8 — Faithfulness auditing (blocked by at least one attribution method)
 
@@ -185,9 +339,9 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 | LIT-160 | Cross-browser E2E QA | Ravindu | 🟢 | LIT-132 (parent) | |
 | LIT-161 | API stress/memory profiling | Rahim | 🟢 | LIT-132 (parent) | |
 | LIT-162 | Code review & mock walkthrough prep | Tharusha | 🟢 Urgent | LIT-132 (parent) | |
-| LIT-170 | Full software testing + DS evaluation | Ravindu | 🟢 | LIT-132, LIT-130, LIT-126 | |
-| LIT-187 | Backend pytest + UI boundary testing | Ravindu | 🟢 | LIT-170 (parent) | |
-| LIT-188 | WER/deletion-score metric computation | Tharusha | 🟢 | LIT-170 (parent) | |
+| LIT-170 | Full software testing + DS evaluation | Ravindu | 🟢 (paused) | LIT-132 ✅, LIT-130 ✅, LIT-126 ✅ | Formally unblocked, but its own DoD needs FR16 deletion-score, which doesn't exist yet — **LIT-169 and its own child LIT-188 (both Tharusha's) aren't started.** Flagged in a Linear comment; deliberately not attempted here rather than faking a placeholder score. Cache-hit sub-10ms part already covered by `test_redis_cache.py`; FR15/WER part now coverable via LIT-168/182. |
+| LIT-187 | Backend pytest + UI boundary testing | Ravindu | 🔵 In Progress | LIT-170 (parent, paused — not a real blocker for this narrower child) | Implemented, PR not yet opened. 23 new backend route tests (dataset_management.py had zero coverage — found and fixed a real 404-vs-207 bug there), Jest infra actually wired up (was orphaned — no `test` script existed), 8 new real-component tests against `WaveformViewer.tsx`. Canvas FPS assertion from its own technical steps isn't meaningfully testable in jsdom — not attempted, not faked. |
+| LIT-188 | WER/deletion-score metric computation | Tharusha | 🟢 | LIT-170 (parent) | Confirms FR16 computation is Tharusha's assigned scope, not LIT-170's implementer's to build — see LIT-170's note. |
 | LIT-171 | Testing & evaluation document | Rahim | 🟢 | LIT-170 | |
 | LIT-189 | Latency/FPS metric synthesis | Rahim | 🟢 | LIT-171 (parent) | |
 | LIT-190 | Error analysis (accent/faithfulness) | Tharusha | 🟢 | LIT-171 (parent) | |
