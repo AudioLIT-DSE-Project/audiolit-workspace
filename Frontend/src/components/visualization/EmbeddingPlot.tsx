@@ -64,35 +64,47 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     return { x, y, colors, text };
   };
 
+  const [lassoSelectedFiles, setLassoSelectedFiles] = useState<string[]>([]);
+
   // Handle point selection
   const handlePointClick = useCallback((event: any) => {
     if (event.points && event.points.length > 0) {
       const point = event.points[0];
-      // Use customdata[0] which contains the raw filename (not the HTML-formatted text)
-      const filename = point.customdata[0];
+      const filename = point.customdata
+        ? (Array.isArray(point.customdata) ? point.customdata[0] : point.customdata)
+        : (point.text || point.hovertext || '');
       const coordinates = is3D ? [point.x, point.y, point.z] : [point.x, point.y];
-      
-      if (onPointSelect) {
+
+      if (onPointSelect && filename) {
         onPointSelect(filename, coordinates);
       }
     }
   }, [onPointSelect, is3D]);
 
-  // Handle 2D box/lasso selection
+  // Handle 2D/3D box & lasso selection
   const handleSelection = useCallback((event: any) => {
-    if (!is3D && onSelectionChange && event?.points) {
-      // Use customdata[0] which contains the raw filename (not the HTML-formatted text)
-      const selected = event.points.map((p: any) => p.customdata[0]);
-      onSelectionChange(selected);
+    if (event?.points) {
+      const selected = Array.from(new Set(event.points.map((p: any) => {
+        if (p.customdata) {
+          return Array.isArray(p.customdata) ? p.customdata[0] : p.customdata;
+        }
+        return p.text || p.hovertext || '';
+      }).filter((fn: any) => typeof fn === 'string' && fn.length > 0))) as string[];
+
+      setLassoSelectedFiles(selected);
+      if (onSelectionChange) {
+        onSelectionChange(selected);
+      }
     }
-  }, [is3D, onSelectionChange]);
+  }, [onSelectionChange]);
 
   // Handle deselection
   const handleDeselect = useCallback(() => {
-    if (!is3D && onSelectionChange) {
+    setLassoSelectedFiles([]);
+    if (onSelectionChange) {
       onSelectionChange([]);
     }
-  }, [is3D, onSelectionChange]);
+  }, [onSelectionChange]);
 
   // Use real embedding data if available, otherwise fall back to mock data
   const getPlotData = () => {
@@ -305,7 +317,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Create marker sizes based on selection
   const markerSizes = text.map(filename => {
     if (selectedFile === filename) return 12; // Currently selected file (medium-large)
-    if (selectedByAngle.includes(filename)) return 8; // Angle range selected (medium)
+    if (selectedByAngle.includes(filename) || lassoSelectedFiles.includes(filename)) return 9; // Selected range/lasso
     return 6; // Default (smaller)
   });
 
@@ -313,17 +325,17 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   const markerColors = text.map(filename => {
     if (selectedFile === filename) return '#FFD700'; // Gold for selected file
     if (selectedByAngle.includes(filename)) return '#ef4444'; // Red for angle selected
+    if (lassoSelectedFiles.includes(filename)) return '#f59e0b'; // Amber for lasso selection
     return '#3b82f6'; // Blue for all other points
   });
 
   // Create marker opacities based on selection
-  const hasSelection = selectedFile || selectedByAngle.length > 0;
+  const hasSelection = selectedFile || selectedByAngle.length > 0 || lassoSelectedFiles.length > 0;
   const markerOpacities = text.map(filename => {
     if (!hasSelection) return 0.8; // Default opacity when no selection
     if (selectedFile === filename) return 1.0; // Full opacity for selected file
-    if (selectedByAngle.includes(filename)) return 0.9; // High opacity for angle selected
-    // Different transparency for 2D vs 3D unselected points
-    return is3D ? 0.1 : 0.45; // More transparent in 3D, slightly visible in 2D
+    if (selectedByAngle.includes(filename) || lassoSelectedFiles.includes(filename)) return 0.95;
+    return is3D ? 0.1 : 0.45;
   });
 
   // Create traces array - start with main scatter plot
