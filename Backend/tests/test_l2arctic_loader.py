@@ -93,6 +93,12 @@ class TestL2ArcticLoader:
         assert isinstance(loader, L2ArcticLoader)
         assert len(list(loader)) == 4
 
+    def test_default_dir_matches_the_real_data_folder_name(self):
+        # Regression for LIT-235: this was "l2_arctic" (underscore), a
+        # mismatch against the actual Backend/data/l2arctic directory that
+        # made the default loader unable to find any data.
+        assert L2ArcticLoader.DEFAULT_DIR.name == "l2arctic"
+
     def test_speaker_map_has_24_speakers_and_six_l1s(self):
         assert len(L2ArcticLoader.SPEAKER_L1) == 24
         assert set(L2ArcticLoader.SPEAKER_L1.values()) == {
