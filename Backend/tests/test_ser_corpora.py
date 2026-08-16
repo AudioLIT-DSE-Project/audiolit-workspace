@@ -204,10 +204,15 @@ class TestRegistryWiring:
         assert isinstance(get_loader("crema-d", root_dir=crema_root), CremaDLoader)
         assert isinstance(get_loader("ravdess", root_dir=ravdess_root), RavdessLoader)
 
-    def test_esd_still_reports_itself_as_unimplemented(self):
-        """Out of LIT-208's scope; must say so rather than return empty data."""
-        with pytest.raises(NotImplementedError, match="LIT-208"):
-            get_loader("esd")
+    def test_esd_now_resolves_through_get_loader(self):
+        """Was out of LIT-208's scope (raised NotImplementedError); LIT-236
+        added the loader. Full ESDLoader behaviour (BOM handling, label
+        normalisation) is covered in test_dataset_ingestion.py's TestESDLoader,
+        not duplicated here -- this just confirms the registry wiring.
+        """
+        from app.infrastructure.dataset_ingestion import ESDLoader
+
+        assert isinstance(get_loader("esd"), ESDLoader)
 
     def test_corpus_list_is_unchanged(self):
         assert set(list_supported_corpora()) == {
