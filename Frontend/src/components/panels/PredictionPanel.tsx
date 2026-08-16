@@ -7,7 +7,6 @@ import { AttentionVisualization } from "../visualization/AttentionVisualization"
 import { PerturbationTools } from "../analysis/PerturbationTools";
 import { XAIOverlayCanvas, XAIMethod, XAIResult, F0Point } from "../visualization/XAIOverlayCanvas";
 import { useState, useEffect } from "react";
-import { API_BASE } from '@/lib/api';
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 
 interface UploadedFile {
@@ -18,25 +17,6 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
-}
-
-interface Wav2Vec2Prediction {
-  predicted_emotion: string;
-  probabilities: Record<string, number>;
-  confidence: number;
-}
-
-interface WhisperPrediction {
-  predicted_transcript: string;
-  ground_truth: string;
-  accuracy_percentage: number;
-  word_error_rate: number;
-  character_error_rate: number;
-  levenshtein_distance: number;
-  exact_match: number;
-  character_similarity: number;
-  word_count_predicted: number;
-  word_count_truth: number;
 }
 
 interface PerturbationResult {
@@ -111,11 +91,6 @@ export const PredictionPanel = ({
   unifiedResult,
   audioDuration = 10.0
 }: PredictionPanelProps) => {
-  const [wav2vecPrediction, setWav2vecPrediction] = useState<Wav2Vec2Prediction | null>(null);
-  const [whisperPrediction, setWhisperPrediction] = useState<WhisperPrediction | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [perturbedPredictions, setPerturbedPredictions] = useState<Wav2Vec2Prediction | WhisperPrediction | null>(null);
   const [originalFile, setOriginalFile] = useState<UploadedFile | null>(selectedFile || null);
   const [perturbedFile, setPerturbedFile] = useState<UploadedFile | null>(null);
   const [isLoadingPerturbed, setIsLoadingPerturbed] = useState(false);
@@ -146,76 +121,6 @@ export const PredictionPanel = ({
       onPerturbationComplete(result);
     }
   };
-
-  // Fetch wav2vec prediction when model is wav2vec2 and file is selected
-  useEffect(() => {
-    let isMounted = true;
-    const abortController = new AbortController();
-    
-    const fetchWav2vecPrediction = async () => {
-      if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile)) {
-        if (isMounted) {
-          setWav2vecPrediction(null);
-          setError(null);
-          setIsLoading(false);
-        }
-        return;
-      }
-
-      setIsLoading(true);
-      setError(null);
-
-      try {
-        const requestBody: any = {};
-        
-        if (selectedFile) {
-          const isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
-            selectedFile.file_path.startsWith('uploads/') ||
-            selectedFile.message === "Perturbed file" ||
-            selectedFile.message === "File uploaded successfully" ||
-            selectedFile.message === "File uploaded and processed successfully"
-          ) && selectedFile.message !== "Selected from dataset";
-          
-          if (isUploadedFile) {
-            requestBody.file_path = selectedFile.file_path;
-          } else {
-            requestBody.dataset = originalDataset || dataset;
-            requestBody.dataset_file = selectedFile.filename;
-          }
-        } else if (selectedEmbeddingFile && dataset) {
-          requestBody.dataset = originalDataset || dataset;
-          requestBody.dataset_file = selectedEmbeddingFile;
-        }
-
-        const response = await fetch(`${API_BASE}/inferences/wav2vec2-detailed`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: 'include',
-          body: JSON.stringify(requestBody),
-          signal: abortController.signal
-        });
-
-        if (!response.ok) throw new Error(`Failed to fetch prediction: ${response.status}`);
-
-        const prediction = await response.json();
-        if (isMounted) setWav2vecPrediction(prediction);
-        
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-        const errorMessage = err instanceof Error ? err.message : "Unknown error";
-        if (isMounted) setError(errorMessage);
-      } finally {
-        if (isMounted) setIsLoading(false);
-      }
-    };
-
-    fetchWav2vecPrediction();
-    return () => {
-      isMounted = false;
-      abortController.abort();
-    };
-  }, [selectedFile, selectedEmbeddingFile, model, dataset, originalDataset]);
 
   const hasAttention = !!model && model.includes('whisper');
   const addResult = unifiedResult?.tasks?.add;
