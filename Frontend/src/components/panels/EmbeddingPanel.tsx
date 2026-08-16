@@ -9,7 +9,6 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { EmbeddingPlot } from "../visualization/EmbeddingPlot";
-import { ScalarPlot } from "../visualization/ScalarPlot";
 import { useEmbedding } from "../../contexts/EmbeddingContext";
 import { RefreshCw, Eye, Box, Square, BarChart3, HelpCircle } from "lucide-react";
 import { getFeatureExplanation } from "@/lib/audioFeatures";
