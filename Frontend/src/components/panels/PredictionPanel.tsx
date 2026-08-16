@@ -2,12 +2,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Button } from "@/components/ui/button";
 import { SaliencyVisualization } from "../visualization/SaliencyVisualization";
 import { AttentionVisualization } from "../visualization/AttentionVisualization";
 import { PerturbationTools } from "../analysis/PerturbationTools";
+import { AcousticProfilePanel } from "./AcousticProfilePanel";
+import { AccentBiasPanel } from "./AccentBiasPanel";
+import { FaithfulnessAuditPanel } from "./FaithfulnessAuditPanel";
 import { XAIOverlayCanvas, XAIMethod, XAIResult, F0Point } from "../visualization/XAIOverlayCanvas";
 import { useState, useEffect } from "react";
-import { AlertTriangle, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ShieldCheck, ChevronDown, ChevronUp } from "lucide-react";
 
 interface UploadedFile {
   file_id: string;
@@ -95,7 +99,11 @@ export const PredictionPanel = ({
   const [perturbedFile, setPerturbedFile] = useState<UploadedFile | null>(null);
   const [isLoadingPerturbed, setIsLoadingPerturbed] = useState(false);
   const [hoveredToken, setHoveredToken] = useState<ASRToken | null>(null);
-  
+
+  // Progressive disclosure (SRS §3.6.6): Accent Bias / Faithfulness stay
+  // hidden behind this toggle so the default view isn't overloaded.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
   // State for dynamic XAI canvas layer opacity swapping
   const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('saliency');
 
@@ -171,13 +179,31 @@ export const PredictionPanel = ({
       })()}
 
       <Tabs defaultValue="analytics" className="h-full flex flex-col">
-        <div className="bg-panel-header border-b border-border px-3 py-2">
-          <TabsList className={`h-7 grid w-full ${hasAttention ? 'grid-cols-4' : 'grid-cols-3'} bg-muted`}>
+        <div className="bg-panel-header border-b border-border px-3 py-2 flex items-center gap-2">
+          <TabsList
+            className={`h-7 grid flex-1 ${
+              hasAttention
+                ? (showAdvanced ? 'grid-cols-7' : 'grid-cols-4')
+                : (showAdvanced ? 'grid-cols-6' : 'grid-cols-3')
+            } bg-muted`}
+          >
             <TabsTrigger value="analytics" className="text-xs">Analytics</TabsTrigger>
             <TabsTrigger value="saliency" className="text-xs">Saliency</TabsTrigger>
-            {hasAttention && <TabsTrigger value="attention" className="text-xs">Attention</TabsTrigger>}
+            <TabsTrigger value="acoustic" className="text-xs">Acoustic</TabsTrigger>
             <TabsTrigger value="perturbation" className="text-xs">Perturbation</TabsTrigger>
+            {showAdvanced && hasAttention && <TabsTrigger value="attention" className="text-xs">Attention</TabsTrigger>}
+            {showAdvanced && <TabsTrigger value="accent-bias" className="text-xs">Accent Bias</TabsTrigger>}
+            {showAdvanced && <TabsTrigger value="faithfulness" className="text-xs">Faithfulness</TabsTrigger>}
           </TabsList>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-[10px] shrink-0"
+            onClick={() => setShowAdvanced((v) => !v)}
+          >
+            Advanced
+            {showAdvanced ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
+          </Button>
         </div>
 
         <div className="flex-1 overflow-auto bg-background">
@@ -340,7 +366,16 @@ export const PredictionPanel = ({
             </div>
           </TabsContent>
 
-          {hasAttention && (
+          <TabsContent value="acoustic" className="m-0 h-full">
+            <AcousticProfilePanel
+              selectedFile={selectedFile}
+              selectedEmbeddingFile={selectedEmbeddingFile}
+              dataset={dataset}
+              originalDataset={originalDataset}
+            />
+          </TabsContent>
+
+          {showAdvanced && hasAttention && (
             <TabsContent value="attention" className="m-0 h-full">
               <div className="p-3">
                 <AttentionVisualization
@@ -349,6 +384,24 @@ export const PredictionPanel = ({
                   dataset={dataset}
                 />
               </div>
+            </TabsContent>
+          )}
+
+          {showAdvanced && (
+            <TabsContent value="accent-bias" className="m-0 h-full">
+              <AccentBiasPanel model={model} />
+            </TabsContent>
+          )}
+
+          {showAdvanced && (
+            <TabsContent value="faithfulness" className="m-0 h-full">
+              <FaithfulnessAuditPanel
+                selectedFile={selectedFile}
+                selectedEmbeddingFile={selectedEmbeddingFile}
+                model={model}
+                dataset={dataset}
+                originalDataset={originalDataset}
+              />
             </TabsContent>
           )}
 
