@@ -10,121 +10,122 @@ All colors MUST be HSL.
 
 @layer base {
 :root {
-    /* AWS EC2 Console inspired colors - Blue and White theme */
-    --background: 0 0% 98%;
-    --foreground: 213 15% 25%;
+    /* AudioLIT identity: teal (spectrogram waterfall) + violet (attribution
+       highlight) on a cool slate base - replaces the inherited ECHO 1.0
+       "AWS EC2 Console" blue-and-white theme (LIT-234). */
+    --background: 210 25% 98%;
+    --foreground: 222 25% 18%;
 
     --card: 0 0% 100%;
-    --card-foreground: 213 15% 25%;
+    --card-foreground: 222 25% 18%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 213 15% 25%;
+    --popover-foreground: 222 25% 18%;
 
-    /* Primary: AWS Blue */
-    --primary: 210 100% 45%;
+    /* Primary: AudioLIT Teal */
+    --primary: 173 80% 32%;
     --primary-foreground: 0 0% 100%;
-    --primary-hover: 210 100% 40%;
+    --primary-hover: 173 80% 27%;
 
-    /* Secondary: Light gray for secondary actions */
-    --secondary: 210 16% 93%;
-    --secondary-foreground: 213 15% 25%;
+    --secondary: 210 20% 93%;
+    --secondary-foreground: 222 25% 18%;
 
-    --muted: 210 16% 96%;
-    --muted-foreground: 213 10% 50%;
+    --muted: 210 20% 95%;
+    --muted-foreground: 215 12% 46%;
 
-    /* Accent: AWS Info Blue */
-    --accent: 206 100% 50%;
+    /* Accent: Attribution Violet */
+    --accent: 262 70% 58%;
     --accent-foreground: 0 0% 100%;
-    --accent-hover: 206 100% 45%;
+    --accent-hover: 262 70% 52%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 98%;
 
-    --border: 214 15% 91%;
+    --border: 214 20% 89%;
     --input: 0 0% 100%;
-    --ring: 210 100% 45%;
+    --ring: 173 80% 32%;
 
     /* Audio specific colors */
-    --waveform-primary: 210 100% 45%;
-    --waveform-secondary: 206 100% 50%;
-    --saliency-high: 15 86% 58%;
-    --saliency-medium: 45 93% 58%;
-    --saliency-low: 206 100% 85%;
+    --waveform-primary: 173 80% 32%;
+    --waveform-secondary: 262 70% 58%;
+    --saliency-high: 14 90% 55%;
+    --saliency-medium: 40 95% 55%;
+    --saliency-low: 190 55% 85%;
 
-    /* Panel backgrounds - AWS inspired */
+    /* Panel backgrounds */
     --panel-background: 0 0% 100%;
-    --panel-border: 214 15% 91%;
-    --panel-header: 210 20% 98%; /* Very light blue-gray for panel headers */
+    --panel-border: 214 20% 89%;
+    --panel-header: 173 25% 97%; /* Faint teal tint for panel headers */
 
-    --radius: 0.25rem;
+    --radius: 0.5rem;
 
-    --sidebar-background: 0 0% 98%;
+    --sidebar-background: 210 25% 98%;
 
-    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-foreground: 222 20% 26%;
 
-    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary: 173 80% 32%;
 
     --sidebar-primary-foreground: 0 0% 98%;
 
-    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent: 210 20% 95%;
 
-    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-accent-foreground: 222 25% 18%;
 
-    --sidebar-border: 220 13% 91%;
+    --sidebar-border: 214 20% 89%;
 
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --sidebar-ring: 173 80% 32%;
   }
 
 .dark {
-    --background: 213 20% 12%;
+    --background: 222 28% 8%;
     --foreground: 210 20% 95%;
 
-    --card: 213 18% 15%;
+    --card: 222 24% 12%;
     --card-foreground: 210 20% 95%;
 
-    --popover: 213 18% 15%;
+    --popover: 222 24% 12%;
     --popover-foreground: 210 20% 95%;
 
-    --primary: 210 100% 50%;
+    --primary: 173 70% 42%;
     --primary-foreground: 0 0% 100%;
-    --primary-hover: 210 100% 45%;
+    --primary-hover: 173 70% 37%;
 
-    --secondary: 213 18% 20%;
+    --secondary: 222 20% 18%;
     --secondary-foreground: 210 20% 95%;
 
-    --muted: 213 18% 18%;
+    --muted: 222 20% 16%;
     --muted-foreground: 210 15% 65%;
 
-    --accent: 206 100% 55%;
+    --accent: 262 65% 65%;
     --accent-foreground: 0 0% 100%;
-    --accent-hover: 206 100% 50%;
+    --accent-hover: 262 65% 60%;
 
     --destructive: 0 75% 55%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 213 18% 22%;
-    --input: 213 18% 18%;
-    --ring: 210 100% 50%;
+    --border: 222 20% 20%;
+    --input: 222 20% 16%;
+    --ring: 173 70% 42%;
 
     /* Audio specific colors - dark mode */
-    --waveform-primary: 210 100% 50%;
-    --waveform-secondary: 206 100% 55%;
-    --saliency-high: 15 86% 63%;
-    --saliency-medium: 45 93% 63%;
-    --saliency-low: 206 100% 30%;
+    --waveform-primary: 173 70% 45%;
+    --waveform-secondary: 262 65% 68%;
+    --saliency-high: 14 85% 60%;
+    --saliency-medium: 40 90% 60%;
+    --saliency-low: 190 45% 28%;
 
-    /* Panel backgrounds - dark mode AWS inspired */
-    --panel-background: 213 18% 15%;
-    --panel-border: 213 18% 22%;
-    --panel-header: 213 18% 18%; /* Slightly lighter for contrast */
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
+    /* Panel backgrounds - dark mode */
+    --panel-background: 222 24% 12%;
+    --panel-border: 222 20% 20%;
+    --panel-header: 222 22% 15%;
+    --sidebar-background: 222 28% 8%;
+    --sidebar-foreground: 210 20% 92%;
+    --sidebar-primary: 173 70% 42%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --sidebar-accent: 222 20% 16%;
+    --sidebar-accent-foreground: 210 20% 92%;
+    --sidebar-border: 222 20% 20%;
+    --sidebar-ring: 173 70% 42%;
   }
 }
 

@@ -395,9 +395,9 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
 
   return (
     <TooltipProvider>
-      <div className="h-full bg-white border-r border-gray-200 flex flex-col">
-        <div className="panel-header p-3 border-b border-gray-200">
-          <h3 className="font-bold text-sm text-gray-800 flex items-center gap-1.5">
+      <div className="h-full bg-card border-r border-border flex flex-col">
+        <div className="panel-header p-3 border-b border-border">
+          <h3 className="font-bold text-sm text-foreground flex items-center gap-1.5">
         Audio Embeddings
         <Tooltip>
           <TooltipTrigger>
@@ -485,7 +485,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               {/* Selection Mode (2D only) */}
               {!is3D && (
               <Select value={selectionMode} onValueChange={(value: 'box' | 'lasso') => setSelectionMode(value)}>
-                <SelectTrigger className="w-20 h-8 text-xs border border-gray-200 rounded-md">
+                <SelectTrigger className="w-20 h-8 text-xs border border-border rounded-md">
                 <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -506,7 +506,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                 setSelectedPoints2D([]);
               }}
               >
-              <SelectTrigger className="flex-1 h-8 text-xs border border-gray-200 rounded-md">
+              <SelectTrigger className="flex-1 h-8 text-xs border border-border rounded-md">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
