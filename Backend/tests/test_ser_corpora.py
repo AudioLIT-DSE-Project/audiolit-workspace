@@ -101,6 +101,14 @@ class TestCremaD:
         with pytest.raises(FileNotFoundError):
             list(CremaDLoader(tmp_path / "absent"))
 
+    def test_flat_layout_without_audiowav_subfolder_is_tolerated(self, tmp_path: Path):
+        """Real-world distributions sometimes get extracted flat (LIT-235) -
+        mirrors RavdessLoader's existing flat-layout tolerance."""
+        root = tmp_path / "crema_d_flat"
+        _wav(root / "1001_DFA_ANG_XX.wav")
+        samples = list(CremaDLoader(root))
+        assert [m.label for m in samples] == ["angry"]
+
     def test_audio_is_standardised_to_16k_mono(self, crema_root: Path):
         loader = CremaDLoader(crema_root)
         meta = next(iter(loader))

@@ -522,7 +522,10 @@ class L2ArcticLoader(DatasetLoader):
     injectable for tests.
     """
 
-    DEFAULT_DIR = DATA_DIR / "l2_arctic"
+    # Real data directory is "l2arctic" (no underscore) - was "l2_arctic" here,
+    # a mismatch against the actual Backend/data/ layout that made this loader
+    # unable to find its data by default (LIT-235).
+    DEFAULT_DIR = DATA_DIR / "l2arctic"
     SPEAKER_L1 = L2_ARCTIC_SPEAKER_L1
 
     def __init__(self, root_dir: Optional[Path | str] = None, *, name: str = "l2-arctic"):
@@ -626,9 +629,16 @@ class CremaDLoader(DatasetLoader):
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         audio_dir = self.root_dir / self.AUDIO_SUBDIR
         if not audio_dir.is_dir():
-            raise FileNotFoundError(
-                f"CREMA-D audio directory for '{self.name}' not found: {audio_dir}"
-            )
+            # Some CREMA-D distributions get extracted/copied flat, without
+            # the official AudioWAV/ subfolder - fall back to the root itself
+            # if it directly contains the .wav files (LIT-235), rather than
+            # failing on a structural variant that still has real data.
+            if self.root_dir.is_dir() and next(self.root_dir.glob("*.wav"), None) is not None:
+                audio_dir = self.root_dir
+            else:
+                raise FileNotFoundError(
+                    f"CREMA-D audio directory for '{self.name}' not found: {audio_dir}"
+                )
         demographics = self._load_demographics()
         for wav_path in sorted(audio_dir.glob("*.wav")):
             parsed = self._parse_filename(wav_path.stem)
