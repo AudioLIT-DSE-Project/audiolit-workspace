@@ -10,7 +10,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { Upload, HelpCircle } from "lucide-react";
+import { Upload, HelpCircle, Sun, Moon } from "lucide-react";
+import { useTheme } from "next-themes";
 import { API_BASE } from '@/lib/api';
 import { CustomDatasetManager } from '@/components/dataset/CustomDatasetManager';
 import { HFModelSelector } from './HFModelSelector';
@@ -68,6 +69,11 @@ export const Toolbar = ({apiData, setApiData, selectedFile, uploadedFiles, onFil
   const handleTaskToggle = (task: keyof SelectedTasks) => {
     setSelectedTasks({ ...selectedTasks, [task]: !selectedTasks[task] });
   };
+
+  // SRS §3.6.6: dark mode with a manual override on top of the system default.
+  const { resolvedTheme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
 
   const fetchCustomDatasets = async () => {
@@ -134,11 +140,11 @@ const onModelChange = (value: string) => {
 
   return (
     <TooltipProvider>
-      <div className="h-12 bg-white border-b border-border px-5 flex items-center justify-between">
+      <div className="h-12 bg-card border-b border-border px-5 flex items-center justify-between">
         {/* Left side: Model and Dataset selectors */}
         <div className="flex items-center gap-5">
           <div className="flex items-center gap-2.5">
-            <span className="text-base font-bold text-foreground">LIT for Voice</span>
+            <span className="text-base font-bold text-foreground tracking-tight">AudioLIT</span>
             <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
               v1.0
             </Badge>
@@ -280,6 +286,22 @@ const onModelChange = (value: string) => {
 
       {/* Right side: Action buttons */}
       <div className="flex items-center gap-2.5">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 w-7 p-0"
+              onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+            >
+              {mounted && resolvedTheme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>Toggle dark mode</p>
+          </TooltipContent>
+        </Tooltip>
+
         <HFModelSelector />
 
         <CustomDatasetManager

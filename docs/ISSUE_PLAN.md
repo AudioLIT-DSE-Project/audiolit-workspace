@@ -1,5 +1,37 @@
 # AudioLIT — Issue Plan & Dependency Map
 
+> **UPDATE (2026-08-16) — new "frontend actually uses what the backend has"
+> initiative:** an audit found several SRS §3.9.1-committed panels
+> (Acoustic Wave Profiler, Accent Bias Dashboard, Faithfulness Audit) had
+> fully-implemented, tested domain code with **zero HTTP route** wired to
+> it, and the frontend was still ECHO 1.0's unbranded, AWS-console-themed
+> shell running two racing inference pipelines. Four new issues track the
+> fix, in sequence:
+> - **LIT-231** ✅ Done (PR #99, merged) — new routes (`/models/resolve`,
+>   `/acoustic/profile`, `/evaluation/faithfulness`, `/evaluation/accent-bias`)
+>   wrapping the previously-unwired domain modules.
+> - **LIT-232** ✅ Done (PR #100, merged) — consolidated the frontend's two
+>   redundant inference pipelines onto the real async multitask job for
+>   uploads; removed a third, fully dead duplicate fetch found along the way.
+> - **LIT-233** ✅ Done (PR #101, merged) — ASR/SER/ADD task-selection UI +
+>   custom HF model resolve dialog. Also fixed a live bug: every upload's
+>   `POST /api/inference/multitask` call was 500ing (an unconditional
+>   `"xai"` in the tasks array crashed the backend's fan-out dispatch —
+>   XAI isn't a multitask family), so the async job had never actually been
+>   starting until this landed.
+> - **LIT-234** — frontend redesign: new visual identity, dark mode, three
+>   new panels (Acoustic/Accent Bias/Faithfulness), status bar, progressive
+>   disclosure. See its Linear comment for scope decisions (panel layout
+>   kept as-is rather than physically rearranged into SRS's literal
+>   five-band mockup) and a dark-mode contrast bug found + partially fixed
+>   (shared button/tabs primitives + `EmbeddingPanel.tsx`; several lower-
+>   visibility instances left as follow-up, listed there).
+>
+> The mutation-task stub fix (`task_orchestrator.py`'s `mutation_task` was
+> returning fake `_scaffold` data instead of calling `perturb_and_save`) was
+> folded into the existing **LIT-164** rather than a new issue — see its
+> Linear comment.
+
 <!-- ag reconcile: status cells below are machine-updated -->
 > **Status cells reconciled against `origin/develop` by `ag reconcile --fix`.**
 > `Done` means the issue id appears in a commit on that branch - which is evidence,
