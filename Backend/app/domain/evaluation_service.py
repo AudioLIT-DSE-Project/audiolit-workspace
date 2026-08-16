@@ -33,6 +33,36 @@ def compute_deletion_score(original_confidence: float, degraded_confidence: floa
     drop = original_confidence - degraded_confidence
     return float(max(0.0, min(1.0, drop / original_confidence)))
 
+def compute_deletion_auc(degradation_curve: Dict[str, float]) -> float:
+    """
+    Computes the Area Under Curve (AUC) metric for progressive feature deletion trajectory (FR16).
+    Uses trapezoidal numerical integration over top-k removal percentages [0.0, 1.0].
+    """
+    if not degradation_curve:
+        return 0.0
+        
+    x_vals: List[float] = []
+    y_vals: List[float] = []
+    
+    # Always include origin (0% removal = 0 drop)
+    if "top_0pct" not in degradation_curve:
+        x_vals.append(0.0)
+        y_vals.append(0.0)
+        
+    for pct_key, score in sorted(degradation_curve.items(), key=lambda t: int(t[0].split("_")[1].replace("pct", ""))):
+        try:
+            pct_num = int(pct_key.split("_")[1].replace("pct", ""))
+            x_vals.append(pct_num / 100.0)
+            y_vals.append(score)
+        except (ValueError, IndexError):
+            continue
+            
+    if len(x_vals) < 2:
+        return float(y_vals[0]) if y_vals else 0.0
+        
+    auc_val = float(np.trapz(y_vals, x_vals))
+    return round(auc_val, 4)
+
 def calculate_wer(reference: str, hypothesis: str) -> float:
     """
     Computes Word Error Rate (WER) using word-level Levenshtein distance.
@@ -113,15 +143,16 @@ def evaluate_batch_faithfulness_scores(
     top_k_percentages: Optional[List[float]] = None
 ) -> Dict[str, Any]:
     """
-    Runs batch quantitative faithfulness checks by masking high-saliency regions (FR16 deletion score).
+    Runs batch quantitative faithfulness checks by masking high-saliency regions (FR16 deletion score & AUC).
     Expects eval_items with dicts containing: 'file_path', 'saliency_scores', 'original_confidence'.
-    Returns mean deletion score, degradation curve, and per-item scores.
+    Returns mean deletion score, deletion AUC, degradation curve, and per-item scores.
     """
     if top_k_percentages is None:
-        top_k_percentages = [0.1, 0.2, 0.3, 0.5]
+        top_k_percentages = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
         
     item_results: List[Dict[str, Any]] = []
     overall_deletion_scores: List[float] = []
+    overall_deletion_aucs: List[float] = []
     
     for item in eval_items:
         file_path = item.get("file_path", "")
@@ -129,7 +160,7 @@ def evaluate_batch_faithfulness_scores(
         orig_conf = float(item.get("original_confidence", 0.85))
         
         # Calculate degradation for top-k levels
-        degradation_curve: Dict[str, float] = {}
+        degradation_curve: Dict[str, float] = {"top_0pct": 0.0}
         top_k_scores: List[float] = []
         
         for k_pct in top_k_percentages:
@@ -145,19 +176,25 @@ def evaluate_batch_faithfulness_scores(
             top_k_scores.append(del_score)
             
         mean_item_del = float(np.mean(top_k_scores)) if top_k_scores else 0.0
+        item_auc = compute_deletion_auc(degradation_curve)
+        
         overall_deletion_scores.append(mean_item_del)
+        overall_deletion_aucs.append(item_auc)
         
         item_results.append({
             "file_path": file_path,
             "original_confidence": round(orig_conf, 4),
             "mean_deletion_score": round(mean_item_del, 4),
+            "deletion_auc": item_auc,
             "degradation_curve": degradation_curve
         })
         
     mean_batch_deletion_score = float(np.mean(overall_deletion_scores)) if overall_deletion_scores else 0.0
+    mean_batch_deletion_auc = float(np.mean(overall_deletion_aucs)) if overall_deletion_aucs else 0.0
     
     return {
         "mean_deletion_score": round(mean_batch_deletion_score, 4),
+        "mean_deletion_auc": round(mean_batch_deletion_auc, 4),
         "total_audio_evaluated": len(eval_items),
         "item_results": item_results
     }
@@ -168,8 +205,8 @@ def compute_multi_task_performance_summary(
 ) -> Dict[str, Any]:
     """
     Compiles committed data-science performance metrics into structured evaluation store schemas.
-    Note (SRS Ã‚Â§4.4): SER per-demographic confusion matrices and IoU mask validation against ADDSegDiff
-    are non-committed stretch metrics and are excluded here.
+    Note (SRS ?????????4.4 & Scope Note): Insertion score and full insertion AUC curve are stretch extensions
+    and are excluded here.
     """
     return {
         "evaluation_summary": {
@@ -181,6 +218,7 @@ def compute_multi_task_performance_summary(
             },
             "faithfulness_deletion_audit": {
                 "mean_deletion_score": faithfulness_result.get("mean_deletion_score", 0.0),
+                "mean_deletion_auc": faithfulness_result.get("mean_deletion_auc", 0.0),
                 "total_audio_evaluated": faithfulness_result.get("total_audio_evaluated", 0)
             }
         }
