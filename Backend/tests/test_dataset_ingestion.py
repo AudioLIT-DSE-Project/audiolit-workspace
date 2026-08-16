@@ -17,7 +17,10 @@ from app.infrastructure.dataset_ingestion import (
     CORPUS_REGISTRY,
     ColumnMap,
     CommonVoiceLoader,
+    CorpusSpec,
     CsvCatalogLoader,
+    ESDLoader,
+    EMOTION_LABELS,
     TARGET_SAMPLE_RATE,
     TaskFamily,
     get_corpus_spec,
@@ -177,16 +180,19 @@ class TestCorpusRegistry:
         with pytest.raises(ValueError):
             get_corpus_spec("not-a-corpus")
 
-    def test_pending_loader_raises_with_owner_issue(self):
-        # Concrete loaders not yet contributed must signal that honestly.
-        # Pick a still-pending corpus dynamically so this test survives each new
-        # loader landing (rather than hardcoding a name every PR has to update).
-        pending = [n for n, s in CORPUS_REGISTRY.items() if s.loader_factory is None]
-        assert pending, "expected at least one not-yet-implemented loader"
-        name = pending[0]
+    def test_pending_loader_raises_with_owner_issue(self, monkeypatch):
+        # Concrete loaders not yet contributed must signal that honestly. All
+        # seven approved corpora currently have a loader (LIT-236 was the
+        # last), so there's no naturally-pending entry left to pick dynamically
+        # -- inject a synthetic one instead of losing coverage of this path.
+        monkeypatch.setitem(
+            CORPUS_REGISTRY,
+            "fake-pending",
+            CorpusSpec("fake-pending", TaskFamily.ASR, "n/a", owner_issue="LIT-000"),
+        )
         with pytest.raises(NotImplementedError) as exc:
-            get_loader(name)
-        assert CORPUS_REGISTRY[name].owner_issue in str(exc.value)
+            get_loader("fake-pending")
+        assert "LIT-000" in str(exc.value)
 
 
 def _write_cv_catalog(tmp_path: Path, *, columns: str = "processed") -> tuple[Path, Path]:
@@ -268,4 +274,99 @@ class TestCommonVoiceLoader:
         assert first.dataset == "common-voice"
         assert first.label  # every validated CV clip has a transcript
         audio, sr = loader.load_sample_audio(first)
+        assert sr == TARGET_SAMPLE_RATE and audio.ndim == 1
+
+
+def _write_esd_catalog(tmp_path: Path, *, with_bom: bool = True) -> tuple[Path, Path]:
+    """Write a tiny ESD-shaped catalog + clips, mirroring the real corpus's
+    ``filename,sample_id,speaker_id,emotion,emotion_cn,transcription,dataset``
+    schema. ``with_bom=True`` reproduces the real catalog's UTF-8 BOM on the
+    header row (LIT-236) so the encoding fix is actually exercised.
+    """
+    audio_dir = tmp_path / "esd"
+    audio_dir.mkdir()
+    raw_emotions = ["Angry", "Happy", "Neutral", "Sad", "Surprise"]
+    rows = []
+    for i, emotion in enumerate(raw_emotions):
+        fname = f"000{i}_0001{i}.wav"
+        _write_tone(audio_dir / fname, sr=16_000, seconds=0.25)
+        rows.append(
+            {
+                "filename": fname,
+                "sample_id": fname.removesuffix(".wav"),
+                "speaker_id": f"000{i}",
+                "emotion": emotion,
+                "emotion_cn": emotion,
+                "transcription": f"sample sentence {i}",
+                "dataset": "ESD",
+            }
+        )
+    catalog = audio_dir / "esd_test_metadata.csv"
+    encoding = "utf-8-sig" if with_bom else "utf-8"
+    with catalog.open("w", newline="", encoding=encoding) as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    return catalog, audio_dir
+
+
+class TestESDLoader:
+    def test_bom_prefixed_catalog_still_resolves_every_row(self, tmp_path: Path):
+        # This is the LIT-236 bug: CsvCatalogLoader's old hardcoded
+        # encoding="utf-8" merges the BOM into the first column name, so
+        # every row silently fails to resolve a filename and gets skipped.
+        catalog, audio_dir = _write_esd_catalog(tmp_path, with_bom=True)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        samples = list(loader)
+        assert len(samples) == 5
+        assert all(s.audio_path.exists() for s in samples)
+
+    def test_plain_utf8_catalog_also_resolves(self, tmp_path: Path):
+        # utf-8-sig is a strict superset of utf-8 -- a catalog without a BOM
+        # must keep working too.
+        catalog, audio_dir = _write_esd_catalog(tmp_path, with_bom=False)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        assert len(list(loader)) == 5
+
+    def test_emotion_labels_normalize_onto_canonical_vocabulary(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        labels = {s.label for s in loader}
+        # Raw catalog values are Title case and say "Surprise"; every label
+        # produced must already match the classifier's own vocabulary.
+        assert labels == {"angry", "happy", "neutral", "sad", "surprised"}
+        assert labels <= set(EMOTION_LABELS)
+
+    def test_task_family_and_license(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        first = next(iter(loader))
+        assert loader.task_family is TaskFamily.SER
+        assert first.license == "Research-only"
+
+    def test_load_audio_is_16k_mono(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        audio, sr = loader.load_sample_audio(next(iter(loader)))
+        assert sr == TARGET_SAMPLE_RATE
+        assert audio.ndim == 1 and audio.dtype == np.float32
+
+    def test_registry_get_loader_returns_esd_loader(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = get_loader("esd", catalog_path=catalog, audio_base_dir=audio_dir)
+        assert isinstance(loader, ESDLoader)
+        assert len(list(loader)) == 5
+
+    @pytest.mark.skipif(
+        not ESDLoader.DEFAULT_CATALOG.exists(),
+        reason="real ESD data not provisioned (Backend/data/ is gitignored)",
+    )
+    def test_real_catalog_loads_when_present(self):
+        loader = ESDLoader()
+        samples = list(loader.stream(limit=5))
+        assert samples
+        for s in samples:
+            assert s.label in EMOTION_LABELS
+            assert s.audio_path.exists()
+        audio, sr = loader.load_sample_audio(samples[0])
         assert sr == TARGET_SAMPLE_RATE and audio.ndim == 1
