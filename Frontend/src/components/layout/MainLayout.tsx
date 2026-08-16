@@ -126,10 +126,22 @@ export const MainLayout = () => {
     fetchPerturbedPredictions();
   }, [perturbationResult, model]);
 
-  // Fetch wav2vec prediction when model is wav2vec2 and file is selected
+  // Fetch wav2vec prediction for dataset-browsing selections only. Uploaded
+  // files are covered by the async multitask job (startMultiTaskInference)
+  // via `unifiedResult` instead - LIT-232 removed the redundant, racing fetch
+  // this effect used to also make for uploads (it never had an async
+  // equivalent for dataset browsing, so that path stays as-is).
   useEffect(() => {
     const fetchWav2vecPrediction = async () => {
-      if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile)) {
+      const isUploadedFile = !!selectedFile?.file_path && (
+        selectedFile.file_path.includes('uploads/') ||
+        selectedFile.file_path.startsWith('uploads/') ||
+        selectedFile.message === "Perturbed file" ||
+        selectedFile.message === "File uploaded successfully" ||
+        selectedFile.message === "File uploaded and processed successfully"
+      ) && !selectedFile.message.includes("Selected from");
+
+      if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setWav2vecPrediction(null);
         setPredictionError(null);
         setIsLoadingPredictions(false);
@@ -146,16 +158,8 @@ export const MainLayout = () => {
       try {
         const requestBody: any = {};
         if (selectedFile) {
-          const isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
-            selectedFile.file_path.startsWith('uploads/') ||
-            selectedFile.message === "Perturbed file" ||
-            selectedFile.message === "File uploaded successfully" ||
-            selectedFile.message === "File uploaded and processed successfully"
-          ) && !selectedFile.message.includes("Selected from");
-          
-          if (isUploadedFile) requestBody.file_path = selectedFile.file_path;
-          else { requestBody.dataset = dataset; requestBody.dataset_file = selectedFile.filename; }
+          requestBody.dataset = dataset;
+          requestBody.dataset_file = selectedFile.filename;
         } else if (selectedEmbeddingFile && dataset) {
           requestBody.dataset = dataset;
           requestBody.dataset_file = selectedEmbeddingFile;
@@ -173,22 +177,6 @@ export const MainLayout = () => {
         if (!response.ok) throw new Error(`Failed to fetch prediction: ${response.status}`);
         const prediction = await response.json();
         setWav2vecPrediction(prediction);
-        
-        if (selectedFile && prediction) {
-          const isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
-            selectedFile.file_path.startsWith('uploads/') ||
-            selectedFile.message === "Perturbed file" ||
-            selectedFile.message === "File uploaded successfully" ||
-            selectedFile.message === "File uploaded and processed successfully"
-          ) && selectedFile.message !== "Selected from embeddings" && selectedFile.message !== "Selected from dataset";
-          
-          if (isUploadedFile) {
-            const predictionText = typeof prediction === 'string' ? prediction : 
-              prediction?.predicted_emotion || prediction?.prediction || prediction?.emotion || JSON.stringify(prediction);
-            handlePredictionUpdate(selectedFile.file_id, predictionText);
-          }
-        }
       } catch (err) {
         if (err.name === 'AbortError') return;
         const errorMessage = err instanceof Error ? err.message : "Unknown error";
@@ -204,10 +192,22 @@ export const MainLayout = () => {
     return () => { if (wav2vecRequestRef.current) { wav2vecRequestRef.current.abort(); wav2vecRequestRef.current = null; } };
   }, [selectedFile, selectedEmbeddingFile, model, dataset]);
 
-  // Fetch whisper prediction when model includes whisper and file is selected
+  // Fetch whisper prediction for dataset-browsing selections only (built-in
+  // and custom datasets alike). Uploaded files are covered by the async
+  // multitask job (startMultiTaskInference) via `unifiedResult` instead -
+  // LIT-232 removed the redundant, racing fetch this effect used to also
+  // make for uploads.
   useEffect(() => {
     const fetchWhisperPrediction = async () => {
-      if (!model?.includes("whisper") || (!selectedFile && !selectedEmbeddingFile)) {
+      const isUploadedFile = !!selectedFile?.file_path && (
+        selectedFile.file_path.includes('uploads/') ||
+        selectedFile.file_path.startsWith('uploads/') ||
+        selectedFile.message === "Perturbed file" ||
+        selectedFile.message === "File uploaded successfully" ||
+        selectedFile.message === "File uploaded and processed successfully"
+      ) && !selectedFile.message.includes("Selected from");
+
+      if (!model?.includes("whisper") || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setWhisperPrediction(null);
         setPredictionError(null);
         setIsLoadingPredictions(false);
@@ -223,29 +223,17 @@ export const MainLayout = () => {
 
       try {
         const requestBody: any = { model: model };
-        let isUploadedFile = false;
-        
+        const isCustomDataset = dataset?.startsWith('custom:');
+
         if (selectedFile) {
-          isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
-            selectedFile.file_path.startsWith('uploads/') ||
-            selectedFile.message === "Perturbed file" ||
-            selectedFile.message === "File uploaded successfully" ||
-            selectedFile.message === "File uploaded and processed successfully"
-          ) && !selectedFile.message.includes("Selected from");
-          
-          if (isUploadedFile) requestBody.file_path = selectedFile.file_path;
-          else { requestBody.dataset = dataset; requestBody.dataset_file = selectedFile.filename; }
+          requestBody.dataset = dataset;
+          requestBody.dataset_file = selectedFile.filename;
         } else if (selectedEmbeddingFile && dataset) {
           requestBody.dataset = dataset;
           requestBody.dataset_file = selectedEmbeddingFile;
-          isUploadedFile = false;
         }
 
-        let endpoint: string;
-        const isCustomDataset = dataset?.startsWith('custom:');
-        if (isUploadedFile || isCustomDataset) endpoint = `${API_BASE}/inferences/run`;
-        else endpoint = `${API_BASE}/inferences/whisper-accuracy`;
+        const endpoint = isCustomDataset ? `${API_BASE}/inferences/run` : `${API_BASE}/inferences/whisper-accuracy`;
 
         const response = await fetch(endpoint, {
           method: "POST",
@@ -256,9 +244,9 @@ export const MainLayout = () => {
 
         if (!response.ok) throw new Error(`Failed to fetch whisper prediction: ${response.status}`);
         const prediction = await response.json();
-        
+
         let whisperPrediction: WhisperPrediction;
-        if (isUploadedFile || isCustomDataset) {
+        if (isCustomDataset) {
           whisperPrediction = {
             predicted_transcript: typeof prediction === 'string' ? prediction : prediction?.text || JSON.stringify(prediction),
             ground_truth: "", accuracy_percentage: null, word_error_rate: null, character_error_rate: null,
@@ -278,7 +266,6 @@ export const MainLayout = () => {
           };
         }
         setWhisperPrediction(whisperPrediction);
-        if (selectedFile && (isUploadedFile || isCustomDataset)) handlePredictionUpdate(selectedFile.file_id, whisperPrediction.predicted_transcript);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error";
         setPredictionError(errorMessage);
