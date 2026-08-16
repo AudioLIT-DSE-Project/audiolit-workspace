@@ -273,7 +273,7 @@ class TestMutationTask:
     the same function the synchronous `POST /perturb` route already uses.
     """
 
-    def test_delegates_to_perturb_and_save(self, monkeypatch):
+    def test_delegates_to_perturb_and_save(self, broker, monkeypatch):
         from app.domain import perturbation_service
 
         captured = {}
@@ -294,7 +294,7 @@ class TestMutationTask:
         assert captured["perturbations"] == [{"type": "noise", "params": {"noise_level": 0.1}}]
         assert captured["dataset"] is None
 
-    def test_no_longer_returns_scaffold_flag(self, monkeypatch):
+    def test_no_longer_returns_scaffold_flag(self, broker, monkeypatch):
         from app.domain import perturbation_service
 
         monkeypatch.setattr(
@@ -305,7 +305,7 @@ class TestMutationTask:
 
 
 class TestAccentBiasTask:
-    def test_runs_diagnostic_and_returns_json_dict(self, monkeypatch):
+    def test_runs_diagnostic_and_returns_json_dict(self, broker, monkeypatch):
         from app.domain import accent_bias_profiler, accent_bias_runner
 
         class _FakeReport:
