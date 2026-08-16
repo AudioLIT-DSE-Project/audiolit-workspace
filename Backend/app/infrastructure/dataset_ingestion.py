@@ -30,7 +30,7 @@ import csv
 import logging
 import random
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from itertools import islice
 from pathlib import Path
@@ -219,12 +219,19 @@ class CsvCatalogLoader(DatasetLoader):
         *,
         delimiter: str = ",",
         license: Optional[str] = None,
+        encoding: str = "utf-8",
     ):
         super().__init__(name=name, task_family=task_family, license=license)
         self.catalog_path = Path(catalog_path)
         self.audio_base_dir = Path(audio_base_dir)
         self.column_map = column_map
         self.delimiter = delimiter
+        # "utf-8-sig" transparently strips a leading BOM if present and is
+        # otherwise identical to "utf-8" -- corpora whose CSV export carries a
+        # BOM on the header row (LIT-236) would otherwise have every row
+        # silently skipped, since the BOM makes the first column name never
+        # match its ColumnMap entry.
+        self.encoding = encoding
 
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         if not self.catalog_path.exists():
@@ -233,7 +240,7 @@ class CsvCatalogLoader(DatasetLoader):
             )
 
         cmap = self.column_map
-        with self.catalog_path.open("r", encoding="utf-8", newline="") as fh:
+        with self.catalog_path.open("r", encoding=self.encoding, newline="") as fh:
             reader = csv.DictReader(fh, delimiter=self.delimiter)
             for index, raw in enumerate(reader):
                 row = {
@@ -788,6 +795,86 @@ class RavdessLoader(DatasetLoader):
         )
 
 
+#: ESD's raw emotion values are Title case and spell the fifth class
+#: "Surprise" rather than the classifier vocabulary's "surprised" -- resolved
+#: case-insensitively so a stray casing difference in the catalog doesn't
+#: silently drop a class (LIT-236).
+_ESD_EMOTION = {
+    "angry": "angry",
+    "happy": "happy",
+    "neutral": "neutral",
+    "sad": "sad",
+    "surprise": "surprised",
+}
+ESD_LICENSE = "Research-only"
+
+
+class ESDLoader(CsvCatalogLoader):
+    """Loader for the ESD (Emotional Speech Database) corpus (LIT-236; FR2/FR6).
+
+    Catalog-driven like Common Voice, not filename-encoded like CREMA-D/RAVDESS:
+    a single CSV (``filename,sample_id,speaker_id,emotion,emotion_cn,
+    transcription,dataset``) lists every clip, with all ``.wav`` files flat in
+    the corpus root.
+
+    The shipped catalog carries a UTF-8 BOM on its header row, which the base
+    class's default ``encoding="utf-8"`` does not strip -- the BOM merges into
+    the first column name, so it never matches ``ColumnMap.filename`` and every
+    row is silently skipped. Opting into ``encoding="utf-8-sig"`` here fixes
+    that without changing behaviour for any other catalog corpus.
+
+    Raw emotion values are Title case (``Angry``, ``Surprise``, ...); they're
+    remapped onto the canonical ``EMOTION_LABELS`` vocabulary via
+    ``_ESD_EMOTION`` after the base class resolves them, the same normalisation
+    CREMA-D/RAVDESS do from their filename encodings -- otherwise ``"Surprise"``
+    never matches the SER classifier's own ``"surprised"`` output and any
+    accuracy scoring against this corpus is silently wrong.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "esd"
+    DEFAULT_CATALOG = DEFAULT_DIR / "esd_test_100_metadata.csv"
+
+    COLUMN_MAP = ColumnMap(
+        filename="filename",
+        label="emotion",
+        sample_id="sample_id",
+        speaker_id="speaker_id",
+    )
+
+    def __init__(
+        self,
+        catalog_path: Optional[Path | str] = None,
+        audio_base_dir: Optional[Path | str] = None,
+        *,
+        name: str = "esd",
+    ):
+        super().__init__(
+            name=name,
+            task_family=TaskFamily.SER,
+            catalog_path=catalog_path or self.DEFAULT_CATALOG,
+            audio_base_dir=audio_base_dir or self.DEFAULT_DIR,
+            column_map=self.COLUMN_MAP,
+            license=ESD_LICENSE,
+            encoding="utf-8-sig",
+        )
+
+    def iter_metadata(self) -> Iterator[SampleMetadata]:
+        for meta in super().iter_metadata():
+            if meta.label is None:
+                yield meta
+                continue
+            normalized = _ESD_EMOTION.get(meta.label.strip().lower())
+            if normalized is None:
+                logger.warning(
+                    "esd: unrecognised emotion label %r for sample %s -- passing through unmapped",
+                    meta.label,
+                    meta.sample_id,
+                )
+                yield meta
+                continue
+            yield replace(meta, label=normalized)
+
+
 def demo_clips_by_emotion(
     loader: DatasetLoader, per_class: int = 2, seed: int = 0
 ) -> Dict[str, List[SampleMetadata]]:
@@ -844,11 +931,7 @@ CORPUS_REGISTRY: Dict[str, CorpusSpec] = {
     "librispeech": CorpusSpec("librispeech", TaskFamily.ASR, "CC-BY-4.0", loader_factory=LibriSpeechLoader, owner_issue="LIT-141"),
     "crema-d": CorpusSpec("crema-d", TaskFamily.SER, CREMA_D_LICENSE, loader_factory=CremaDLoader, owner_issue="LIT-208"),
     "ravdess": CorpusSpec("ravdess", TaskFamily.SER, RAVDESS_LICENSE, loader_factory=RavdessLoader, owner_issue="LIT-208"),
-    # ESD is the third SER corpus in the LIT-106 inventory but is out of LIT-208's
-    # scope (that issue covers CREMA-D + RAVDESS only, which is enough for the MVP
-    # demo). Left unwired deliberately: get_loader raises naming the issue rather
-    # than returning empty data.
-    "esd": CorpusSpec("esd", TaskFamily.SER, "Research-only", owner_issue="LIT-208"),
+    "esd": CorpusSpec("esd", TaskFamily.SER, ESD_LICENSE, loader_factory=ESDLoader, owner_issue="LIT-236"),
     "l2-arctic": CorpusSpec("l2-arctic", TaskFamily.ASR, L2_ARCTIC_LICENSE, loader_factory=L2ArcticLoader, owner_issue="LIT-181"),
     "asvspoof-2021": CorpusSpec("asvspoof-2021", TaskFamily.DEEPFAKE, ASVSPOOF_LICENSE, loader_factory=ASVspoofLoader, owner_issue="LIT-142"),
 }

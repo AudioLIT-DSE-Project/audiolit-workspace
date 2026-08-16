@@ -22,11 +22,23 @@ class TestListDatasets:
         assert "crema-d" in body["datasets"]
 
     @pytest.mark.asyncio
-    async def test_excludes_corpora_with_no_loader(self, client):
-        # "esd" is registered (LIT-106 inventory) but LIT-208 deliberately
-        # left it unwired - listing it would offer a dataset that 404s.
+    async def test_includes_esd_now_that_it_has_a_loader(self, client):
+        # Was excluded pre-LIT-236 (registered but unwired, would have 404d
+        # on every request); ESDLoader landing means it belongs in the list now.
         r = await client.get("/datasets/list")
-        assert "esd" not in r.json()["datasets"]
+        assert "esd" in r.json()["datasets"]
+
+    @pytest.mark.asyncio
+    async def test_exclusion_filter_still_works_for_a_future_unwired_corpus(self, client, monkeypatch):
+        # Exercises the filter mechanism itself, independent of any one
+        # corpus's current wiring state (unlike the ESD case above, which is
+        # now permanently wired and can't cover this path anymore).
+        monkeypatch.setattr(
+            datasets_routes.dataset_ingestion, "list_supported_corpora", lambda: ["loadable-a", "unloadable-b"]
+        )
+        monkeypatch.setattr(datasets_routes, "_UNLOADABLE_CORPORA", {"unloadable-b"})
+        r = await client.get("/datasets/list")
+        assert r.json()["datasets"] == ["loadable-a"]
 
     @pytest.mark.asyncio
     async def test_does_not_shadow_the_per_dataset_metadata_route(self, client, monkeypatch):

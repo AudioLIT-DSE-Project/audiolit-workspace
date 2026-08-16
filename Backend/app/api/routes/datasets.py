@@ -16,8 +16,10 @@ from app.api.dependencies import get_session_id
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Corpora with no loader registered yet (e.g. "esd", LIT-208) are excluded -
-# listing them would offer a dataset that 404s on every request.
+# Corpora with no loader registered yet are excluded - listing them would
+# offer a dataset that 404s on every request. Empty as of LIT-236 (ESD was
+# the last of the seven approved corpora left unwired); kept as a guard for
+# whatever gets added to CORPUS_REGISTRY next.
 _UNLOADABLE_CORPORA = {
     name for name, spec in dataset_ingestion.CORPUS_REGISTRY.items()
     if spec.loader_factory is None
