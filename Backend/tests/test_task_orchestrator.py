@@ -26,12 +26,15 @@ from app.orchestration.task_orchestrator import (
     QUEUE_CONFIGS,
     AudioLITWorker,
     WorkerFamily,
+    accent_bias_task,
     enqueue,
+    enqueue_accent_bias,
     enqueue_multitask_analysis,
     get_queue,
     get_queue_config,
     health_check,
     make_worker,
+    mutation_task,
     progress_channel,
     publish_progress,
     run_worker,
@@ -262,6 +265,85 @@ class TestHealthCheck:
 
         monkeypatch.setattr(task_orchestrator, "get_redis_connection", _fail)
         assert health_check()["ok"] is False
+
+
+class TestMutationTask:
+    """LIT-164/LIT-231: `mutation_task` was a `_scaffold` stub that never
+    touched the audio - it now delegates to `perturbation_service.perturb_and_save`,
+    the same function the synchronous `POST /perturb` route already uses.
+    """
+
+    def test_delegates_to_perturb_and_save(self, monkeypatch):
+        from app.domain import perturbation_service
+
+        captured = {}
+
+        def _fake_perturb_and_save(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "perturbed_file": "uploads/x_perturbed.wav"}
+
+        monkeypatch.setattr(perturbation_service, "perturb_and_save", _fake_perturb_and_save)
+
+        result = mutation_task(
+            "uploads/original.wav",
+            {"perturbations": [{"type": "noise", "params": {"noise_level": 0.1}}], "dataset": None},
+        )
+
+        assert result == {"success": True, "perturbed_file": "uploads/x_perturbed.wav"}
+        assert captured["file_path"] == "uploads/original.wav"
+        assert captured["perturbations"] == [{"type": "noise", "params": {"noise_level": 0.1}}]
+        assert captured["dataset"] is None
+
+    def test_no_longer_returns_scaffold_flag(self, monkeypatch):
+        from app.domain import perturbation_service
+
+        monkeypatch.setattr(
+            perturbation_service, "perturb_and_save", lambda **kwargs: {"success": True}
+        )
+        result = mutation_task("uploads/original.wav", {"perturbations": []})
+        assert "_scaffold" not in result
+
+
+class TestAccentBiasTask:
+    def test_runs_diagnostic_and_returns_json_dict(self, monkeypatch):
+        from app.domain import accent_bias_profiler, accent_bias_runner
+
+        class _FakeReport:
+            def to_json_dict(self):
+                return {"corpus": "l2-arctic", "model_id": "openai/whisper-base", "cohorts": []}
+
+        captured = {}
+
+        def _fake_transcriber(model_id):
+            captured["model_id"] = model_id
+            return lambda path: "hello world"
+
+        def _fake_run_diagnostic(transcribe, corpus, model_id, samples_per_cohort):
+            captured["corpus"] = corpus
+            captured["samples_per_cohort"] = samples_per_cohort
+            return _FakeReport()
+
+        monkeypatch.setattr(accent_bias_profiler, "make_whisper_transcriber", _fake_transcriber)
+        monkeypatch.setattr(accent_bias_runner, "run_accent_bias_diagnostic", _fake_run_diagnostic)
+
+        result = accent_bias_task("openai/whisper-base", "l2-arctic", 5)
+
+        assert result == {"corpus": "l2-arctic", "model_id": "openai/whisper-base", "cohorts": []}
+        assert captured["model_id"] == "openai/whisper-base"
+        assert captured["samples_per_cohort"] == 5
+
+
+class TestEnqueueAccentBias:
+    def test_places_job_on_asr_queue(self, broker):
+        result = enqueue_accent_bias("openai/whisper-base", corpus="l2-arctic", samples_per_cohort=3)
+
+        asr_queue = get_queue(WorkerFamily.ASR)
+        assert result.job_id in asr_queue.job_ids
+        assert result.family_jobs == {"accent_bias": result.job_id}
+
+    def test_websocket_url_matches_the_tasks_route(self, broker):
+        result = enqueue_accent_bias("openai/whisper-base")
+        assert result.websocket_url == f"/api/ws/tasks/{result.job_id}"
 
 
 class TestWorkerEntrypoint:

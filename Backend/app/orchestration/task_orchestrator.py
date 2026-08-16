@@ -475,8 +475,50 @@ def xai_task(
 
 
 def mutation_task(audio_ref: str, mutation: Mapping[str, Any]) -> dict[str, Any]:
-    publish_progress(_current_job_id(), "mutation.running", {"kind": mutation.get("kind")})
-    return {"task": "mutation", "_scaffold": True}
+    """Apply a non-destructive audio mutation (SAD Use Case 4, FR12, LIT-164).
+
+    Was a `_scaffold` stub that never touched the audio (flagged on LIT-164);
+    now delegates to `perturbation_service.perturb_and_save`, the same
+    implementation already used by the synchronous `POST /perturb` route.
+    """
+    perturbations = list(mutation.get("perturbations", []))
+    publish_progress(
+        _current_job_id(), "mutation.running", {"perturbation_count": len(perturbations)}
+    )
+    from ..domain.perturbation_service import perturb_and_save
+
+    return perturb_and_save(
+        file_path=audio_ref,
+        perturbations=perturbations,
+        output_dir="uploads",
+        dataset=mutation.get("dataset"),
+        session_id=None,
+    )
+
+
+def accent_bias_task(
+    model_id: str, corpus: str, samples_per_cohort: Optional[int]
+) -> dict[str, Any]:
+    """Group-wise WER accent-bias diagnostic (SRS Use Case 6, FR15, LIT-231).
+
+    Enqueued rather than run inline because it streams a whole cohort of a
+    dataset through ASR sequentially (SRS: "the system streams through the
+    dataset rather than loading it all at once") - not a single-request-sized
+    piece of work.
+    """
+    publish_progress(_current_job_id(), "accent_bias.running", {"model": model_id, "corpus": corpus})
+    from ..domain.accent_bias_profiler import make_whisper_transcriber
+    from ..domain.accent_bias_runner import run_accent_bias_diagnostic
+
+    transcribe = make_whisper_transcriber(model_id)
+    report = run_accent_bias_diagnostic(
+        transcribe,
+        corpus=corpus,
+        model_id=model_id,
+        samples_per_cohort=samples_per_cohort,
+    )
+    publish_progress(_current_job_id(), "accent_bias.completed", {"model": model_id})
+    return report.to_json_dict()
 
 
 def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dict[str, Any]:
@@ -612,6 +654,38 @@ def enqueue_mutation(
         job_id=job.id,
         websocket_url=_ws_url(job.id, ws_base_url),
         family_jobs={"mutation": job.id},
+    )
+
+
+#: Accent-bias runs sequentially transcribe every sample in a cohort with a
+#: fresh Whisper pipeline - longer-running than a single-file job, so it gets
+#: its own timeout rather than the default 10-minute job budget.
+ACCENT_BIAS_JOB_TIMEOUT: int = DEFAULT_JOB_TIMEOUT * 3
+
+
+def enqueue_accent_bias(
+    model_id: str,
+    corpus: str = "l2-arctic",
+    samples_per_cohort: Optional[int] = None,
+    *,
+    ws_base_url: str | None = None,
+) -> EnqueueResult:
+    # Reuses the ASR queue/worker family rather than adding a new
+    # WorkerFamily - it is, mechanically, a batch of ASR jobs (SRS Use Case 6),
+    # so it belongs on the same GPU-bound, concurrency-1 queue as `asr_task`.
+    job = get_queue(WorkerFamily.ASR).enqueue(
+        accent_bias_task,
+        model_id,
+        corpus,
+        samples_per_cohort,
+        job_timeout=ACCENT_BIAS_JOB_TIMEOUT,
+        result_ttl=DEFAULT_RESULT_TTL,
+        failure_ttl=DEFAULT_FAILURE_TTL,
+    )
+    return EnqueueResult(
+        job_id=job.id,
+        websocket_url=_ws_url(job.id, ws_base_url),
+        family_jobs={"accent_bias": job.id},
     )
 
 
