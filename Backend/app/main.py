@@ -6,6 +6,7 @@ from .api.routes import inference as inference_routes
 from .api.routes import session as session_routes, results as results_routes, inferences as inferences_routes, upload as upload_routes, health as health_routes
 from .api.routes import datasets as datasets_routes, saliency as saliency_routes, perturbations as perturbations_routes, dataset_management as dataset_management_routes, debug as debug_routes
 from .api.routes import tasks as tasks_routes
+from .api.routes import models as models_routes, acoustic as acoustic_routes, evaluation as evaluation_routes
 app = FastAPI(title="LIT for Voice – API")
 
 # Configure CORS origins - default to common development origins if not set
@@ -41,3 +42,6 @@ app.include_router(saliency_routes.router, tags=["Saliency"])
 app.include_router(perturbations_routes.router, tags=["Perturbations"])
 app.include_router(health_routes.router, tags=["Health"])
 app.include_router(debug_routes.router, tags=["Debug"])
+app.include_router(models_routes.router, tags=["Models"])
+app.include_router(acoustic_routes.router, tags=["Acoustic"])
+app.include_router(evaluation_routes.router, tags=["Evaluation"])
