@@ -3,9 +3,10 @@ from typing import Dict, List, Optional
 import csv
 import librosa
 import logging
+from . import dataset_ingestion
 from .custom_dataset_service import (
-    get_custom_dataset_manager, 
-    is_custom_dataset, 
+    get_custom_dataset_manager,
+    is_custom_dataset,
     parse_custom_dataset_name
 )
 
@@ -15,19 +16,69 @@ logger = logging.getLogger(__name__)
 # Resolve paths relative to repo structure: Backend/data/
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
-# CSV metadata files per dataset
+# CSV metadata files per dataset. Only common-voice is handled here directly -
+# every other corpus (including ravdess, whose path used to be hardcoded to a
+# stale "ravdess_subset" directory that no longer exists) falls back to
+# dataset_ingestion.py's CORPUS_REGISTRY/DatasetLoader system below (LIT-235).
+# That system was built by LIT-123/141/142/181/208 but was never actually
+# reachable from these live routes until now.
 DATASET_PATHS: Dict[str, Path] = {
     "common-voice": DATA_DIR / "common_voice_valid_dev" / "common_voice_valid_data_metadata.csv",
     "cv-valid-dev": DATA_DIR / "common_voice_valid_dev" / "common_voice_valid_data_metadata.csv",
-    "ravdess": DATA_DIR / "ravdess_subset" / "ravdess_subset_metadata.csv",
 }
 
 # Base directories for dataset audio files
 DATASET_BASE_DIRS: Dict[str, Path] = {
     "common-voice": DATA_DIR / "common_voice_valid_dev",
-    "cv-valid-dev": DATA_DIR / "common_voice_valid_dev", 
-    "ravdess": DATA_DIR / "ravdess_subset",
+    "cv-valid-dev": DATA_DIR / "common_voice_valid_dev",
 }
+
+
+def _registry_metadata_rows(dataset: str) -> List[Dict[str, str]]:
+    """Metadata rows for any dataset_ingestion-registered corpus (LIT-235).
+
+    Converts each SampleMetadata into the same dict-row shape the frontend
+    already reads generically (checks "path"/"filepath"/"file"/"filename" in
+    that order, per AudioDatasetPanel.tsx) so no frontend contract changes.
+    """
+    try:
+        loader = dataset_ingestion.get_loader(dataset)
+    except (ValueError, NotImplementedError) as e:
+        raise ValueError(str(e))
+
+    rows: List[Dict[str, str]] = []
+    for sample in loader.iter_metadata():
+        row: Dict[str, str] = {
+            "filename": sample.audio_path.name,
+            "label": sample.label or "",
+        }
+        if sample.speaker_id:
+            row["speaker_id"] = sample.speaker_id
+        if sample.accent:
+            row["accent"] = sample.accent
+        rows.append(row)
+    return rows
+
+
+def _registry_resolve_file(dataset: str, file_path: str) -> Path:
+    """Resolve one file's path for a dataset_ingestion-registered corpus.
+
+    Linear scan over the loader's catalog matching by filename - simple and
+    correct for the demo-scale corpora this project uses; revisit with an
+    index if a corpus grows large enough for this to matter.
+    """
+    try:
+        loader = dataset_ingestion.get_loader(dataset)
+    except (ValueError, NotImplementedError) as e:
+        raise ValueError(str(e))
+
+    target = Path(file_path).name
+    for sample in loader.iter_metadata():
+        if sample.audio_path.name == target:
+            if not sample.audio_path.exists():
+                raise FileNotFoundError(f"Dataset file not found: {target}")
+            return sample.audio_path
+    raise FileNotFoundError(f"Dataset file not found: {target}")
 
 
 def calculate_audio_duration(audio_path: Path) -> float:
@@ -62,7 +113,7 @@ def load_metadata(dataset: str, session_id: Optional[str] = None) -> List[Dict[s
     # Handle global datasets (existing logic)
     ds = dataset.lower()
     if ds not in DATASET_PATHS:
-        raise ValueError(f"Unknown dataset: {dataset}")
+        return _registry_metadata_rows(ds)
 
     csv_path = DATASET_PATHS[ds]
     if not csv_path.exists():
@@ -128,7 +179,7 @@ def resolve_file(dataset: str, file_path: str, session_id: Optional[str] = None)
     # Handle global datasets (existing logic)
     ds = dataset.lower()
     if ds not in DATASET_BASE_DIRS:
-        raise ValueError(f"Unknown dataset: {dataset}")
+        return _registry_resolve_file(ds, file_path)
 
     base_dir = DATASET_BASE_DIRS[ds]
     safe_name = Path(file_path).name

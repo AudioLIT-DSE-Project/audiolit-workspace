@@ -11,9 +11,31 @@ from app.infrastructure.dataset_service import (
     resolve_file,
     media_type_for,
 )
+from app.infrastructure import dataset_ingestion
 from app.api.dependencies import get_session_id
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Corpora with no loader registered yet (e.g. "esd", LIT-208) are excluded -
+# listing them would offer a dataset that 404s on every request.
+_UNLOADABLE_CORPORA = {
+    name for name, spec in dataset_ingestion.CORPUS_REGISTRY.items()
+    if spec.loader_factory is None
+}
+
+
+@router.get("/datasets/list")
+async def list_datasets() -> JSONResponse:
+    """Built-in corpora available to select in the dataset dropdown (LIT-235).
+
+    Distinct from GET /upload/dataset/list, which lists the session's custom
+    (user-uploaded) datasets.
+    """
+    corpora = [
+        name for name in dataset_ingestion.list_supported_corpora()
+        if name not in _UNLOADABLE_CORPORA
+    ]
+    return JSONResponse(content={"datasets": sorted(corpora)})
 
 
 @router.get("/{dataset}/metadata")
