@@ -1,5 +1,5 @@
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { Toolbar } from "./Toolbar";
+import { Toolbar, SelectedTasks } from "./Toolbar";
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTaskStatus } from '@/hooks/useTaskStatus';
 import { GlobalTaskProgress } from "./GlobalTaskProgress";
@@ -47,6 +47,9 @@ export const MainLayout = () => {
   const [selectedFile, setSelectedFile] = useState<UploadedFile | null>(null);
   const [model, setModel] = useState("whisper-base");
   const [dataset, setDataset] = useState("common-voice");
+  // SRS §3.9.1 sidebar "Task Selection (ASR/SER/ADD)" - which analyses run on
+  // upload. Defaults to all-on, matching the previous hardcoded behavior.
+  const [selectedTasks, setSelectedTasks] = useState<SelectedTasks>({ asr: true, ser: true, add: true });
   const [batchInferenceStatus, setBatchInferenceStatus] = useState<'idle' | 'running' | 'done'>('idle');
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
   const [selectedEmbeddingFile, setSelectedEmbeddingFile] = useState<string | null>(null);
@@ -294,13 +297,23 @@ export const MainLayout = () => {
 
   // Hook up upload action to the RQ multi-task endpoint
   const startMultiTaskInference = async (file: UploadedFile) => {
+    // Only ASR/SER/ADD are real multitask fan-out families (task_orchestrator's
+    // _TASK_FUNCS has no XAI entry - attribution is a separate job kind,
+    // enqueued via POST /api/inference/attribution, SAD Use Case 3). Including
+    // "xai" here used to make every upload 500 with a backend KeyError before
+    // the job could even start - fixed as part of LIT-233's task selector.
+    const tasks = (Object.keys(selectedTasks) as Array<keyof SelectedTasks>).filter(
+      (task) => selectedTasks[task]
+    );
+    if (tasks.length === 0) return;
+
     try {
       const response = await fetch(`${API_BASE}/api/inference/multitask`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audio_ref: file.file_path,
-          tasks: ["asr", "ser", "add", "xai"]
+          tasks
         }),
       });
       if (response.ok) {
@@ -367,6 +380,7 @@ export const MainLayout = () => {
           apiData={apiData} setApiData={setApiData} selectedFile={selectedFile} uploadedFiles={uploadedFiles}
           onFileSelect={setSelectedFile} model={model} setModel={setModel} dataset={dataset} setDataset={setDataset}
           onBatchInference={handleBatchInference}
+          selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
         />
         <div className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">
