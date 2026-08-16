@@ -8,10 +8,18 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { Upload, HelpCircle } from "lucide-react";
 import { API_BASE } from '@/lib/api';
 import { CustomDatasetManager } from '@/components/dataset/CustomDatasetManager';
+import { HFModelSelector } from './HFModelSelector';
+
+export interface SelectedTasks {
+  asr: boolean;
+  ser: boolean;
+  add: boolean;
+}
 
 interface UploadedFile {
   file_id: string;
@@ -34,6 +42,8 @@ interface ToolbarProps {
   dataset: string;
   setDataset: (dataset: string) => void;
   onBatchInference?: (model: string, dataset: string) => void; // New callback for batch inference
+  selectedTasks: SelectedTasks;
+  setSelectedTasks: (tasks: SelectedTasks) => void;
 }
 
 interface CustomDataset {
@@ -54,7 +64,10 @@ const defaultDatasetForModel: Record<string, string> = {
   "wav2vec2": "ravdess",
 };
 
-export const Toolbar = ({apiData, setApiData, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference}: ToolbarProps) => {
+export const Toolbar = ({apiData, setApiData, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference, selectedTasks, setSelectedTasks}: ToolbarProps) => {
+  const handleTaskToggle = (task: keyof SelectedTasks) => {
+    setSelectedTasks({ ...selectedTasks, [task]: !selectedTasks[task] });
+  };
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
 
   const fetchCustomDatasets = async () => {
@@ -232,11 +245,43 @@ const onModelChange = (value: string) => {
               </Select>
             </div>
           )}
+
+          <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1">
+              <span className="text-xs font-medium text-foreground">Tasks:</span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
+                </TooltipTrigger>
+                <TooltipContent className="space-y-1">
+                  <p className="text-xs">Choose which analyses run on upload:</p>
+                  <p className="text-xs">• ASR: Transcription (Whisper)</p>
+                  <p className="text-xs">• SER: Emotion recognition (Wav2Vec2)</p>
+                  <p className="text-xs">• ADD: Deepfake detection</p>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+            {(['asr', 'ser', 'add'] as const).map((task) => (
+              <div key={task} className="flex items-center gap-1">
+                <Checkbox
+                  id={`task-${task}`}
+                  checked={selectedTasks[task]}
+                  onCheckedChange={() => handleTaskToggle(task)}
+                  className="h-3.5 w-3.5"
+                />
+                <label htmlFor={`task-${task}`} className="text-xs uppercase text-foreground cursor-pointer">
+                  {task}
+                </label>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* Right side: Action buttons */}
       <div className="flex items-center gap-2.5">
+        <HFModelSelector />
+
         <CustomDatasetManager
           onDatasetCreated={handleDatasetCreated}
           onDatasetSelected={handleDatasetSelected}
