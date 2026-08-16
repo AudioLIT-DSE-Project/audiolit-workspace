@@ -1,5 +1,6 @@
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { Toolbar, SelectedTasks } from "./Toolbar";
+import { StatusBar } from "./StatusBar";
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTaskStatus } from '@/hooks/useTaskStatus';
 import { GlobalTaskProgress } from "./GlobalTaskProgress";
@@ -440,6 +441,7 @@ export const MainLayout = () => {
             </Panel>
           </PanelGroup>
         </div>
+        <StatusBar activeTaskId={activeTaskId} taskState={state} />
       </div>
     </EmbeddingProvider>
   );
