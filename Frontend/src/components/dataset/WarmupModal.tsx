@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Flame, ShieldAlert, Cpu, CheckCircle2, XCircle, Minimize2 } from "lucide-react";
+import { Flame, ShieldAlert, Cpu, CheckCircle2, XCircle, Minimize2, Trash2 } from "lucide-react";
 
 export interface WarmupProgress {
   completed: number;
@@ -30,6 +30,7 @@ interface WarmupModalProps {
   onStartWarmup: () => void;
   onCancelWarmup: () => void;
   onMinimize: () => void;
+  onClearCache?: () => void;
 }
 
 export const WarmupModal: React.FC<WarmupModalProps> = ({
@@ -43,6 +44,7 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
   onStartWarmup,
   onCancelWarmup,
   onMinimize,
+  onClearCache,
 }) => {
   const isRunning = !!warmupJobId && warmupProgress?.status === "running";
   const isCompleted = warmupProgress?.status === "completed";
@@ -137,9 +139,23 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
         <DialogFooter className="flex items-center justify-between sm:justify-between gap-2 pt-2 border-t border-border">
           {!warmupJobId ? (
             <>
-              <Button variant="ghost" size="sm" onClick={onClose} className="text-xs h-8">
-                Cancel
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="ghost" size="sm" onClick={onClose} className="text-xs h-8">
+                  Cancel
+                </Button>
+                {onClearCache && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={onClearCache}
+                    className="text-xs h-8 text-destructive border-destructive/30 hover:bg-destructive/10 gap-1"
+                    title="Clear cached ML predictions, acoustic profiles, and saliency heatmaps"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Clear Cache
+                  </Button>
+                )}
+              </div>
               <Button
                 variant="default"
                 size="sm"
