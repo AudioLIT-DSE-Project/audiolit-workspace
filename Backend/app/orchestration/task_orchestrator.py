@@ -751,9 +751,12 @@ def run_batch_dataset_warmup_task(
     import json
     import time
     from app.infrastructure.dataset_service import load_metadata, resolve_file
-    from app.infrastructure.redis import get_sync_redis
 
-    conn = get_sync_redis()
+    try:
+        conn = get_redis_connection()
+    except Exception as e:
+        logger.warning(f"Could not connect to Redis for warmup status tracking: {e}")
+        conn = None
     tasks = tasks or ["asr", "ser", "acoustic"]
     rows = load_metadata(dataset)
     total = len(rows)
