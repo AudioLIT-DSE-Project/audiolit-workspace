@@ -64,6 +64,23 @@ const defaultDatasetForModel: Record<string, string> = {
   wav2vec2: "ravdess",
 };
 
+const DATASET_TASK_FAMILIES: Record<string, "ASR" | "SER" | "DEEPFAKE"> = {
+  "common-voice": "ASR",
+  librispeech: "ASR",
+  "l2-arctic": "ASR",
+  ravdess: "SER",
+  "crema-d": "SER",
+  esd: "SER",
+  "asvspoof-2021": "DEEPFAKE",
+};
+
+const getModelTaskFamily = (modelName: string): "ASR" | "SER" | "DEEPFAKE" => {
+  const m = modelName.toLowerCase();
+  if (m.includes("wav2vec2") || m.includes("ser") || m.includes("emotion")) return "SER";
+  if (m.includes("asvspoof") || m.includes("deepfake") || m.includes("fake")) return "DEEPFAKE";
+  return "ASR";
+};
+
 // Friendlier labels for the built-in corpora GET /datasets/list returns
 // (LIT-235). Anything not listed here just displays its raw registry name.
 const DATASET_LABELS: Record<string, string> = {
@@ -98,9 +115,17 @@ export const Toolbar = ({
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
+  const [resolvedCustomModels, setResolvedCustomModels] = useState<string[]>([]);
   // Built-in corpora (LIT-235) - was a hardcoded 2-entry list disconnected
   // from the backend's actual dataset registry; now fetched for real.
-  const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess"]);
+  const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess", "l2-arctic", "librispeech", "crema-d", "esd"]);
+
+  const activeModelFamily = getModelTaskFamily(model);
+
+  const handleCustomModelResolved = (modelId: string) => {
+    setResolvedCustomModels((prev) => Array.from(new Set([...prev, modelId])));
+    onModelChange(modelId);
+  };
 
   const fetchCustomDatasets = async () => {
     try {
@@ -148,36 +173,18 @@ export const Toolbar = ({
   const onModelChange = (value: string) => {
     setModel(value);
 
-    // Update dataset based on model
-    const allowedDatasets = builtinDatasets;
-    const defaultDataset = defaultDatasetForModel[value] || "custom";
-
-    // Check if current dataset is a custom dataset
+    const newModelFamily = getModelTaskFamily(value);
     const isCurrentCustomDataset = dataset.startsWith("custom:");
 
-    if (!allowedDatasets.includes(dataset) && !isCurrentCustomDataset) {
-      // Use the canonical handler so all side effects fire (metadata loading)
-      onDatasetChange(defaultDataset);
-    } else if (
-      !isCurrentCustomDataset &&
-      dataset !== "custom" &&
-      onBatchInference
-    ) {
-      // Dataset is already valid and not custom, fire batch inference directly
-      onBatchInference(value, dataset);
+    // If current dataset task family doesn't match the new model's task family, auto-switch to a compatible default
+    if (!isCurrentCustomDataset && DATASET_TASK_FAMILIES[dataset] && DATASET_TASK_FAMILIES[dataset] !== newModelFamily) {
+      const compatibleDefault = newModelFamily === "SER" ? "ravdess" : newModelFamily === "DEEPFAKE" ? "asvspoof-2021" : "common-voice";
+      setDataset(compatibleDefault);
     }
   };
 
   const onDatasetChange = (value: string) => {
     setDataset(value);
-
-    // Check if this is a custom dataset (formatted as custom:session_id:dataset_name)
-    const isCustomDataset = value.startsWith("custom:");
-
-    // Trigger batch inference when dataset changes (except for custom datasets)
-    if (!isCustomDataset && value !== "custom" && onBatchInference) {
-      onBatchInference(model, value);
-    }
   };
 
   // Get datasets allowed for current model
@@ -215,20 +222,35 @@ export const Toolbar = ({
                       Choose the AI model for audio analysis:
                     </p>
                     <p className="text-xs">
-                      • Whisper: Speech-to-text transcription
+                      • Whisper: Speech-to-text transcription (ASR)
                     </p>
-                    <p className="text-xs">• Wav2Vec2: Emotion recognition</p>
+                    <p className="text-xs">• Wav2Vec2: Emotion recognition (SER)</p>
                   </TooltipContent>
                 </Tooltip>
               </div>
               <Select value={model} onValueChange={onModelChange}>
-                <SelectTrigger className="w-32 h-7 border-border text-xs">
+                <SelectTrigger className="w-36 h-7 border-border text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="whisper-base">Whisper Base</SelectItem>
-                  <SelectItem value="whisper-large">Whisper Large</SelectItem>
-                  <SelectItem value="wav2vec2">Wav2Vec2</SelectItem>
+                  <SelectItem value="whisper-base">Whisper Base (ASR)</SelectItem>
+                  <SelectItem value="whisper-large">Whisper Large (ASR)</SelectItem>
+                  <SelectItem value="wav2vec2">Wav2Vec2 (SER)</SelectItem>
+                  {resolvedCustomModels.length > 0 && (
+                    <>
+                      <SelectItem disabled value="separator-models">
+                        ── Custom Models ──
+                      </SelectItem>
+                      {resolvedCustomModels.map((customModel) => (
+                        <SelectItem key={customModel} value={customModel}>
+                          {customModel}
+                        </SelectItem>
+                      ))}
+                    </>
+                  )}
+                  <div className="p-1 border-t border-border mt-1">
+                    <HFModelSelector onModelResolved={handleCustomModelResolved} />
+                  </div>
                 </SelectContent>
               </Select>
             </div>
@@ -247,28 +269,31 @@ export const Toolbar = ({
                       Select the audio dataset to analyze:
                     </p>
                     <p className="text-xs">
-                      • Common Voice: Speech recognition dataset
+                      • ASR: Common Voice, L2-ARCTIC, LibriSpeech
                     </p>
                     <p className="text-xs">
-                      • RAVDESS: Emotion recognition dataset
+                      • SER: RAVDESS, CREMA-D, ESD
                     </p>
-                    <p className="text-xs">• Custom: Your uploaded datasets</p>
                   </TooltipContent>
                 </Tooltip>
               </div>
               <Select value={dataset} onValueChange={onDatasetChange}>
-                <SelectTrigger className="w-40 h-7 border-border text-xs">
+                <SelectTrigger className="w-44 h-7 border-border text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {/* Built-in datasets */}
                   {allowedDatasets
                     .filter((ds) => ds !== "custom")
-                    .map((ds) => (
-                      <SelectItem key={ds} value={ds}>
-                        {DATASET_LABELS[ds] || ds}
-                      </SelectItem>
-                    ))}
+                    .map((ds) => {
+                      const dsFamily = DATASET_TASK_FAMILIES[ds];
+                      const isCompatible = !dsFamily || dsFamily === activeModelFamily;
+                      return (
+                        <SelectItem key={ds} value={ds} disabled={!isCompatible}>
+                          {DATASET_LABELS[ds] || ds} {!isCompatible ? `(${dsFamily} only)` : ""}
+                        </SelectItem>
+                      );
+                    })}
 
                   {/* Custom datasets */}
                   {customDatasets.length > 0 && (
@@ -385,7 +410,7 @@ export const Toolbar = ({
             </TooltipContent>
           </Tooltip>
 
-          <HFModelSelector />
+          <HFModelSelector onModelResolved={handleCustomModelResolved} />
 
           <CustomDatasetManager
             onDatasetCreated={handleDatasetCreated}
