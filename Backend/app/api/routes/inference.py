@@ -83,15 +83,17 @@ class BatchWarmupRequest(BaseModel):
 async def post_batch_warmup(req: BatchWarmupRequest):
     import uuid
     import json
-    from app.orchestration.task_orchestrator import get_queue, WorkerFamily, run_batch_dataset_warmup_task
-    from app.infrastructure.redis import get_sync_redis
+    from app.orchestration.task_orchestrator import get_queue, WorkerFamily, run_batch_dataset_warmup_task, get_redis_connection
 
     job_id = f"warmup_{uuid.uuid4().hex[:12]}"
-    conn = get_sync_redis()
-    if conn:
-        conn.set(f"job_progress_{job_id}", json.dumps({
-            "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0
-        }), ex=86400)
+    try:
+        conn = get_redis_connection()
+        if conn:
+            conn.set(f"job_progress_{job_id}", json.dumps({
+                "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0
+            }), ex=86400)
+    except Exception as e:
+        logger.warning(f"Could not initialize Redis progress for job {job_id}: {e}")
 
     try:
         q = get_queue(WorkerFamily.ASR)
@@ -124,28 +126,35 @@ async def post_batch_warmup(req: BatchWarmupRequest):
 @router.get("/inference/progress/{job_id}")
 async def get_job_progress(job_id: str):
     import json
-    from app.infrastructure.redis import get_sync_redis
+    from app.orchestration.task_orchestrator import get_redis_connection
 
-    conn = get_sync_redis()
-    if not conn:
-        return {"job_id": job_id, "status": "unknown", "completed": 0, "total": 0, "percent": 0.0}
+    try:
+        conn = get_redis_connection()
+        if not conn:
+            return {"job_id": job_id, "status": "unknown", "completed": 0, "total": 0, "percent": 0.0}
 
-    raw = conn.get(f"job_progress_{job_id}")
-    if not raw:
-        return {"job_id": job_id, "status": "not_found", "completed": 0, "total": 0, "percent": 0.0}
+        raw = conn.get(f"job_progress_{job_id}")
+        if not raw:
+            return {"job_id": job_id, "status": "not_found", "completed": 0, "total": 0, "percent": 0.0}
 
-    data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-    return data
+        data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        return data
+    except Exception as e:
+        return {"job_id": job_id, "status": "error", "error": str(e), "completed": 0, "total": 0, "percent": 0.0}
 
 
 @router.post("/inference/cancel/{job_id}")
 async def cancel_batch_job(job_id: str):
-    from app.infrastructure.redis import get_sync_redis
+    from app.orchestration.task_orchestrator import get_redis_connection
 
-    conn = get_sync_redis()
-    if conn:
-        conn.set(f"cancel_job_{job_id}", "1", ex=3600)
-        logger.info(f"Cancellation signal sent for job {job_id}")
+    try:
+        conn = get_redis_connection()
+        if conn:
+            conn.set(f"cancel_job_{job_id}", "1", ex=3600)
+            logger.info(f"Cancellation signal sent for job {job_id}")
+    except Exception as e:
+        logger.warning(f"Could not send cancellation signal to Redis: {e}")
 
     return {"job_id": job_id, "status": "cancelled", "message": "Cancellation requested. Completed samples remain saved in cache."}
+
 
