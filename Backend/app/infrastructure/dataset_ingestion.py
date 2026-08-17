@@ -734,7 +734,10 @@ class RavdessLoader(DatasetLoader):
         include_song: bool = False,
     ):
         super().__init__(name=name, task_family=TaskFamily.SER, license=RAVDESS_LICENSE)
-        self.root_dir = Path(root_dir or self.DEFAULT_DIR)
+        if root_dir:
+            self.root_dir = Path(root_dir)
+        else:
+            self.root_dir = self.DEFAULT_DIR if self.DEFAULT_DIR.is_dir() else (DATA_DIR / "ravdess_subset")
         self.include_song = include_song
 
     def iter_metadata(self) -> Iterator[SampleMetadata]:
@@ -943,8 +946,17 @@ def list_supported_corpora() -> List[str]:
 
 
 def get_corpus_spec(name: str) -> CorpusSpec:
-    """Look up a corpus spec, case-insensitively."""
-    key = name.strip().lower()
+    """Look up a corpus spec, case-insensitively with alias normalization."""
+    key = name.strip().lower().replace("_", "-")
+    if key == "l2arctic":
+        key = "l2-arctic"
+    elif key == "cremad":
+        key = "crema-d"
+    elif key == "commonvoice":
+        key = "common-voice"
+    elif key == "asvspoof2021":
+        key = "asvspoof-2021"
+
     if key not in CORPUS_REGISTRY:
         raise ValueError(
             f"Unknown corpus '{name}'. Supported: {', '.join(list_supported_corpora())}"
