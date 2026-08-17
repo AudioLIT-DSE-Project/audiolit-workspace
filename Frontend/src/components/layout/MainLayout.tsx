@@ -139,6 +139,23 @@ export const MainLayout = () => {
     }
   };
 
+  const handleClearCache = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/cache/clear`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        setPredictionMap({});
+        setWav2vecPrediction(null);
+        setWhisperPrediction(null);
+        setPerturbedPredictions(null);
+        alert("Cache cleared successfully! All cached ML predictions, acoustic profiles, and saliency maps have been reset.");
+      }
+    } catch (err) {
+      console.error("Failed to clear cache:", err);
+    }
+  };
+
   // Clear selected file, embedding file, and predictions when dataset changes
   useEffect(() => {
     setSelectedFile(null);
@@ -522,6 +539,7 @@ export const MainLayout = () => {
           onStartWarmup={handleStartWarmup}
           onCancelWarmup={handleCancelWarmup}
           onMinimize={() => setIsWarmupMinimized(true)}
+          onClearCache={handleClearCache}
         />
         <div className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">
