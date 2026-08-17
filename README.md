@@ -27,22 +27,26 @@ The benchmark evaluation audio datasets (`Common Voice`, `L2-ARCTIC`, `LibriSpee
 
 ## Quick Start & Local Execution
 
-### 1. Start Redis Service
-AudioLIT requires Redis for task queuing (RQ) and sub-10ms prediction caching:
+### Step 1 — Start Redis Container via Docker Compose
+AudioLIT requires Redis for task queuing (RQ) and sub-10ms prediction caching. Use the official project `docker-compose.yml` in `Backend/`:
 
 ```bash
-# Option A: Run via Docker container
-docker run -d -p 6379:6379 redis:latest
-
-# Option B: Run via Docker Compose (from Backend/)
 cd Backend
 docker compose up -d
 ```
 
+> **Troubleshooting Port Conflicts (Port 6379 occupied):**  
+> If an orphaned container (such as `audiolit-redis`) is already running on port 6379, stop it first before running `docker compose up -d`:
+> ```bash
+> docker stop audiolit-redis
+> cd Backend
+> docker compose up -d
+> ```
+
 ---
 
-### 2. Start Backend FastAPI Server
-Set up the Python virtual environment and launch Uvicorn:
+### Step 2 — Start Backend FastAPI Server (Terminal 1)
+Set up the Python virtual environment and launch Uvicorn on port 8000:
 
 **Windows (PowerShell / Command Prompt):**
 ```powershell
@@ -64,7 +68,7 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-### 3. Start Asynchronous Task Workers (Terminal 2)
+### Step 3 — Start Asynchronous Task Workers (Terminal 2)
 Launch the 4 parallel worker processes for `saliency`, `acoustic`, `evaluation`, and `analysis` queues in a separate terminal:
 
 **Windows:**
@@ -82,7 +86,7 @@ python -m app.orchestration.worker all
 
 ---
 
-### 4. Start Frontend UI Development Server (Terminal 3)
+### Step 4 — Start Frontend UI Development Server (Terminal 3)
 
 ```bash
 cd Frontend
