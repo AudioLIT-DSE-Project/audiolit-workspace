@@ -30,8 +30,12 @@ class AcousticProfileRequest(BaseModel):
     dataset_file: Optional[str] = None
 
 
+import hashlib
+import asyncio
+from app.infrastructure.redis import get_result, cache_result
+
 @router.post("/acoustic/profile")
-def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> dict:
+async def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> dict:
     session_id = get_session_id(http_request)
 
     if request.file_path:
@@ -50,6 +54,18 @@ def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> 
     if not resolved_path.exists():
         raise HTTPException(status_code=404, detail=f"Audio file not found: {resolved_path}")
 
+    # Check Redis cache first
+    file_stat = resolved_path.stat()
+    file_content_hash = hashlib.md5(
+        f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()
+    ).hexdigest()
+    cache_key = f"acoustic_profile_{file_content_hash}"
+
+    cached_profile = await get_result("acoustic", cache_key)
+    if cached_profile is not None:
+        logger.info(f"Returning cached acoustic profile for {resolved_path}")
+        return cached_profile
+
     try:
         audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
         if audio.ndim > 1:
@@ -58,7 +74,9 @@ def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> 
         raise HTTPException(status_code=500, detail=f"Failed to load audio file: {e}")
 
     try:
-        return extract_acoustic_profile(audio, sr)
+        profile = await asyncio.to_thread(extract_acoustic_profile, audio, sr)
+        await cache_result("acoustic", cache_key, profile, ttl=24*60*60)
+        return profile
     except Exception as e:
         logger.error("Acoustic profiling failed for %s: %s", resolved_path, e)
         raise HTTPException(status_code=500, detail=f"Acoustic profiling failed: {e}")
