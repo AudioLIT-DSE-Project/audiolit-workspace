@@ -93,11 +93,16 @@ async def generate_saliency_endpoint(http_request: Request, request: SaliencyReq
 
 @router.get("/saliency/{method}/{model}/{file_id}")
 async def get_saliency(method: str, model: str, file_id: str):
-    import hashlib
-    cache_key = f"saliency_{model}_{method}_{file_id}"
+    # Match cache key lookup from generate_saliency_endpoint
+    cache_key = f"saliency_{SALIENCY_SCHEMA_VERSION}_{model}_{method}_{file_id}"
     
     cached_result = await get_result("saliency", cache_key)
     if cached_result is None:
-        raise HTTPException(status_code=404, detail="Saliency not found")
+        # Also try legacy key format
+        legacy_key = f"saliency_{model}_{method}_{file_id}"
+        cached_result = await get_result("saliency", legacy_key)
+        
+    if cached_result is None:
+        raise HTTPException(status_code=404, detail="Saliency not found in cache")
     
     return SaliencyResponse(**cached_result)

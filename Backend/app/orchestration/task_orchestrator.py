@@ -356,6 +356,17 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
     conn = get_redis_connection()
 
+    # CPU Optimization: Cap PyTorch threads on CPU to avoid thread thrashing across parallel workers
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            torch.set_num_threads(1)
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ["MKL_NUM_THREADS"] = "1"
+            logger.info("CPU mode detected: Pinned torch.set_num_threads(1) for worker family %s", fam.value)
+    except Exception as e:
+        logger.warning("Could not set CPU thread cap: %s", e)
+
     lock = None
     if get_queue_config(fam).gpu_bound:
         lock = conn.lock(
