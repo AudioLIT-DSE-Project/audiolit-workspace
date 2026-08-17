@@ -216,17 +216,8 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     return v !== undefined && v !== null && String(v).length > 0 ? String(v) : fallback;
   }, []);
 
-  // Helper function to determine if ground truth should be shown
-  const shouldShowGroundTruth = useMemo(() => {
-    if (model.startsWith("whisper")) {
-      // Whisper models can show ground truth only for common-voice (has transcript)
-      return dataset === "common-voice";
-    } else if (model === "wav2vec2") {
-      // Wav2Vec2 models can show ground truth only for RAVDESS (has emotion labels)
-      return dataset === "ravdess";
-    }
-    return false;
-  }, [model, dataset]);
+  // Show ground truth for all datasets that contain ground truth metadata
+  const shouldShowGroundTruth = true;
 
   const datasetColumnsCommonVoice: ColumnDef<unknown, unknown>[] = useMemo(() => {
     const baseColumns = [
@@ -275,9 +266,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         header: model.startsWith("whisper") ? "Ground Truth Transcript" : "Ground Truth Emotion",
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
-          const groundTruthValue = model.startsWith("whisper") 
-            ? getFrom(data, ["sentence", "transcript", "text"], "")
-            : getFrom(data, ["emotion", "label"], "");
+          const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
           return <span className="text-xs">{groundTruthValue}</span>;
         },
       });
@@ -343,9 +332,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         header: model.startsWith("whisper") ? "Ground Truth Transcript" : "Ground Truth Emotion",
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
-          const groundTruthValue = model.startsWith("whisper") 
-            ? getFrom(data, ["statement", "text", "transcript", "sentence"], "")
-            : getFrom(data, ["emotion", "label"], "");
+          const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
           return <span className="text-xs">{groundTruthValue}</span>;
         },
       });
