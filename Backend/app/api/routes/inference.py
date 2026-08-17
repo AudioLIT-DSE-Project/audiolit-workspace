@@ -158,3 +158,28 @@ async def cancel_batch_job(job_id: str):
     return {"job_id": job_id, "status": "cancelled", "message": "Cancellation requested. Completed samples remain saved in cache."}
 
 
+@router.post("/cache/clear")
+@router.delete("/cache/clear")
+async def clear_ml_cache():
+    """Flush all cached ML results, saliency maps, acoustic profiles, and predictions."""
+    from app.orchestration.task_orchestrator import get_redis_connection
+
+    cleared_count = 0
+    try:
+        conn = get_redis_connection()
+        if conn:
+            patterns = ["result:*", "saliency_*", "acoustic_profile_*", "v2_*", "whisper*", "wav2vec2*"]
+            for pattern in patterns:
+                keys = conn.keys(pattern)
+                if keys:
+                    conn.delete(*keys)
+                    cleared_count += len(keys)
+            logger.info(f"Cleared {cleared_count} cached Redis keys")
+    except Exception as e:
+        logger.warning(f"Failed to clear Redis cache: {e}")
+        return {"status": "error", "message": str(e), "cleared_keys": 0}
+
+    return {"status": "ok", "message": "Cache cleared successfully", "cleared_keys": cleared_count}
+
+
+

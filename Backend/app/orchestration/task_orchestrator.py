@@ -788,37 +788,49 @@ def run_batch_dataset_warmup_task(
 
         # Run requested tasks synchronously in worker process (caches in Redis)
         try:
-            resolved_path = resolve_file(dataset, filename)
-            if resolved_path.exists():
-                if "asr" in tasks:
+            target_file = filename or row.get("path", "")
+            resolved_path = resolve_file(dataset, target_file)
+            if resolved_path and resolved_path.exists():
+                file_stat = resolved_path.stat()
+                file_content_hash = hashlib.md5(
+                    f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()
+                ).hexdigest()
+                from app.infrastructure.redis import cache_result_sync
+
+                # 1. Predictions (ASR / SER / ADD)
+                if "asr" in tasks or "ser" in tasks:
                     try:
-                        asr_task(str(resolved_path), model, {})
-                    except Exception:
-                        pass
-                if "ser" in tasks:
-                    try:
-                        ser_task(str(resolved_path), model, {})
-                    except Exception:
-                        pass
+                        from app.domain.model_loader_service import predict_model
+                        pred = predict_model(str(resolved_path), model)
+                        if pred:
+                            cache_result_sync(model, f"{model}_{file_content_hash}", pred, ttl=86400)
+                            cache_result_sync("predictions", f"v2_{model}_{file_content_hash}", pred, ttl=86400)
+                    except Exception as err:
+                        logger.warning(f"Prediction warmup failed for {filename}: {err}")
+
+                # 2. Acoustic Profiling (Pitch F0, Energy, Spectrogram)
                 if "acoustic" in tasks:
                     try:
                         import soundfile as sf
                         from app.domain.acoustic_profiler_service import extract_acoustic_profile
-                        from app.infrastructure.redis import cache_result_sync
                         audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
                         if audio.ndim > 1:
                             audio = audio.mean(axis=1)
                         prof = extract_acoustic_profile(audio, sr)
-                        file_stat = resolved_path.stat()
-                        f_hash = hashlib.md5(f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()).hexdigest()
-                        cache_result_sync("acoustic", f"acoustic_profile_{f_hash}", prof, ttl=86400)
-                    except Exception:
-                        pass
+                        cache_result_sync("acoustic", f"acoustic_profile_{file_content_hash}", prof, ttl=86400)
+                    except Exception as err:
+                        logger.warning(f"Acoustic warmup failed for {filename}: {err}")
+
+                # 3. Saliency / XAI Grad-CAM Attribution Heatmaps
                 if "saliency" in tasks:
                     try:
-                        attribution_task(str(resolved_path), model, "gradcam", {})
-                    except Exception:
-                        pass
+                        from app.domain.saliency_service import generate_saliency
+                        sal_res = generate_saliency(str(resolved_path), model, "gradcam")
+                        if sal_res:
+                            cache_key = f"saliency_v2_{model}_gradcam_{file_content_hash}"
+                            cache_result_sync("saliency", cache_key, sal_res, ttl=86400)
+                    except Exception as err:
+                        logger.warning(f"Saliency warmup failed for {filename}: {err}")
         except Exception as e:
             logger.warning(f"Batch warmup error on {filename}: {e}")
 
