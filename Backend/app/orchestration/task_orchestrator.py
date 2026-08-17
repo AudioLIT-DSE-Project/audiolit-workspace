@@ -733,3 +733,108 @@ def health_check() -> dict[str, Any]:
         }
     except RedisConnectionError as exc:
         return {"ok": False, "broker": "redis", "error": str(exc)}
+
+
+def run_batch_dataset_warmup_task(
+    job_id: str,
+    dataset: str,
+    model: str = "whisper-base",
+    tasks: list[str] | None = None,
+    cooldown_ms: int = 100,
+) -> dict[str, Any]:
+    """CPU-safe, cancellable dataset warmup task runner.
+    
+    Evaluates requested tasks (ASR, SER, Acoustic, Saliency) for each file in dataset,
+    saving every result to Redis. Checks cancellation flag before each file and inserts
+    cooldown_ms sleep to prevent CPU overheating during multi-hour runs.
+    """
+    import json
+    import time
+    from app.infrastructure.dataset_service import load_metadata, resolve_file
+    from app.infrastructure.redis import get_sync_redis
+
+    conn = get_sync_redis()
+    tasks = tasks or ["asr", "ser", "acoustic"]
+    rows = load_metadata(dataset)
+    total = len(rows)
+
+    completed = 0
+    cancelled = False
+
+    for i, row in enumerate(rows):
+        # Check cancellation flag in Redis
+        if conn and conn.get(f"cancel_job_{job_id}"):
+            cancelled = True
+            logger.info(f"Job {job_id} cancelled at file {i}/{total}")
+            break
+
+        filename = row.get("filename", "")
+        if not filename:
+            continue
+
+        # Update progress in Redis
+        progress_data = {
+            "completed": i,
+            "total": total,
+            "current_file": filename,
+            "status": "running",
+            "percent": round((i / total) * 100, 1) if total > 0 else 0,
+        }
+        if conn:
+            conn.set(f"job_progress_{job_id}", json.dumps(progress_data), ex=86400)
+
+        # Run requested tasks synchronously in worker process (caches in Redis)
+        try:
+            resolved_path = resolve_file(dataset, filename)
+            if resolved_path.exists():
+                if "asr" in tasks:
+                    try:
+                        asr_task(str(resolved_path), model, {})
+                    except Exception:
+                        pass
+                if "ser" in tasks:
+                    try:
+                        ser_task(str(resolved_path), model, {})
+                    except Exception:
+                        pass
+                if "acoustic" in tasks:
+                    try:
+                        import soundfile as sf
+                        from app.domain.acoustic_profiler_service import extract_acoustic_profile
+                        from app.infrastructure.redis import cache_result_sync
+                        audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
+                        if audio.ndim > 1:
+                            audio = audio.mean(axis=1)
+                        prof = extract_acoustic_profile(audio, sr)
+                        file_stat = resolved_path.stat()
+                        f_hash = hashlib.md5(f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()).hexdigest()
+                        cache_result_sync("acoustic", f"acoustic_profile_{f_hash}", prof, ttl=86400)
+                    except Exception:
+                        pass
+                if "saliency" in tasks:
+                    try:
+                        attribution_task(str(resolved_path), model, "gradcam", {})
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Batch warmup error on {filename}: {e}")
+
+        completed += 1
+
+        # CPU Thermal Cooldown Interval
+        if cooldown_ms > 0:
+            time.sleep(cooldown_ms / 1000.0)
+
+    final_status = "cancelled" if cancelled else "completed"
+    final_progress = {
+        "completed": completed,
+        "total": total,
+        "current_file": "Done" if not cancelled else "Cancelled",
+        "status": final_status,
+        "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
+    }
+    if conn:
+        conn.set(f"job_progress_{job_id}", json.dumps(final_progress), ex=86400)
+
+    return final_progress
+
