@@ -10,6 +10,7 @@ import { DatapointEditorPanel } from "../panels/DatapointEditorPanel";
 import { PredictionPanel, UnifiedTaskResult } from "../panels/PredictionPanel";
 import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
+import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 
 interface UploadedFile {
   file_id: string;
@@ -71,6 +72,72 @@ export const MainLayout = () => {
   // RQ Task State (WebSocket listener)
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const { state, result } = useTaskStatus(activeTaskId);
+
+  // Global Warmup Runner State
+  const [isWarmupModalOpen, setIsWarmupModalOpen] = useState(false);
+  const [warmupJobId, setWarmupJobId] = useState<string | null>(null);
+  const [warmupProgress, setWarmupProgress] = useState<WarmupProgress | null>(null);
+  const [isStartingWarmup, setIsStartingWarmup] = useState(false);
+  const [isWarmupMinimized, setIsWarmupMinimized] = useState(false);
+
+  // Poll for Warmup Progress
+  useEffect(() => {
+    if (!warmupJobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/inference/progress/${warmupJobId}`);
+        if (response.ok) {
+          const data = await response.json();
+          setWarmupProgress(data);
+          if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
+            clearInterval(interval);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to poll warmup progress:", err);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [warmupJobId]);
+
+  const handleStartWarmup = async () => {
+    if (!dataset) return;
+    setIsStartingWarmup(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/inference/batch-warmup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dataset: dataset,
+          model: model,
+          tasks: ["asr", "ser", "acoustic", "saliency"],
+          cooldown_ms: 100
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setWarmupJobId(data.job_id);
+      }
+    } catch (err) {
+      console.error("Failed to start batch warmup:", err);
+    } finally {
+      setIsStartingWarmup(false);
+    }
+  };
+
+  const handleCancelWarmup = async () => {
+    if (!warmupJobId) return;
+    try {
+      await fetch(`${API_BASE}/api/inference/cancel/${warmupJobId}`, {
+        method: "POST",
+      });
+      setWarmupProgress(prev => prev ? { ...prev, status: 'cancelling' } : null);
+    } catch (err) {
+      console.error("Failed to cancel warmup:", err);
+    }
+  };
 
   // Clear selected file, embedding file, and predictions when dataset changes
   useEffect(() => {
@@ -439,6 +506,22 @@ export const MainLayout = () => {
           onFileSelect={setSelectedFile} model={model} setModel={setModel} dataset={dataset} setDataset={setDataset}
           onBatchInference={handleBatchInference}
           selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
+          onWarmupClick={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
+          warmupJobId={warmupJobId}
+        />
+        
+        {/* Global Dataset Warmup Modal (Confirmation & Active Progress) */}
+        <WarmupModal
+          isOpen={isWarmupModalOpen && !isWarmupMinimized}
+          onClose={() => setIsWarmupModalOpen(false)}
+          dataset={effectiveDataset || dataset}
+          model={model}
+          warmupJobId={warmupJobId}
+          warmupProgress={warmupProgress}
+          isStarting={isStartingWarmup}
+          onStartWarmup={handleStartWarmup}
+          onCancelWarmup={handleCancelWarmup}
+          onMinimize={() => setIsWarmupMinimized(true)}
         />
         <div className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">
