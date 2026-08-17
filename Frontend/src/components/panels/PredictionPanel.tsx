@@ -107,76 +107,6 @@ export const PredictionPanel = ({
   // State for dynamic XAI canvas layer opacity swapping
   const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('saliency');
 
-  // Mode 2: CPU-Safe Dataset Warmup Runner State
-  const [warmupJobId, setWarmupJobId] = useState<string | null>(null);
-  const [warmupProgress, setWarmupProgress] = useState<{
-    completed: number;
-    total: number;
-    current_file: string;
-    status: string;
-    percent: number;
-  } | null>(null);
-  const [isStartingWarmup, setIsStartingWarmup] = useState(false);
-
-  // Poll for Warmup Job Progress
-  useEffect(() => {
-    if (!warmupJobId) return;
-
-    const interval = setInterval(async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/inference/progress/${warmupJobId}`);
-        if (response.ok) {
-          const data = await response.json();
-          setWarmupProgress(data);
-          if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
-            clearInterval(interval);
-          }
-        }
-      } catch (err) {
-        console.error("Failed to poll warmup progress:", err);
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [warmupJobId]);
-
-  const handleStartWarmup = async () => {
-    if (!dataset) return;
-    setIsStartingWarmup(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/inference/batch-warmup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          dataset: dataset,
-          model: model,
-          tasks: ["asr", "ser", "acoustic", "saliency"],
-          cooldown_ms: 100
-        }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setWarmupJobId(data.job_id);
-      }
-    } catch (err) {
-      console.error("Failed to start batch warmup:", err);
-    } finally {
-      setIsStartingWarmup(false);
-    }
-  };
-
-  const handleCancelWarmup = async () => {
-    if (!warmupJobId) return;
-    try {
-      await fetch(`${API_BASE}/api/inference/cancel/${warmupJobId}`, {
-        method: "POST",
-      });
-      setWarmupProgress(prev => prev ? { ...prev, status: 'cancelling' } : null);
-    } catch (err) {
-      console.error("Failed to cancel warmup:", err);
-    }
-  };
-
 
   // Handle perturbation completion
   const handlePerturbationComplete = async (result: PerturbationResult) => {
@@ -275,52 +205,7 @@ export const PredictionPanel = ({
             Advanced
             {showAdvanced ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
           </Button>
-          {!warmupJobId ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 px-2 text-[10px] shrink-0 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
-              onClick={handleStartWarmup}
-              disabled={isStartingWarmup || !dataset}
-              title="Start CPU-safe dataset-wide evaluation warmup runner"
-            >
-              {isStartingWarmup ? "Starting..." : "Warmup Dataset"}
-            </Button>
-          ) : (
-            <Button
-              variant="destructive"
-              size="sm"
-              className="h-7 px-2 text-[10px] shrink-0"
-              onClick={handleCancelWarmup}
-              title="Cancel background dataset warmup (completed samples remain cached)"
-            >
-              Cancel Warmup
-            </Button>
-          )}
         </div>
-
-        {/* Real-time Dataset Warmup Progress Bar */}
-        {warmupJobId && warmupProgress && (
-          <div className="bg-muted/40 border-b border-border px-3 py-1.5 flex flex-col gap-1 text-xs">
-            <div className="flex justify-between items-center text-[11px] font-medium">
-              <span className="flex items-center gap-1.5">
-                <span className="relative flex h-2 w-2">
-                  {warmupProgress.status === 'running' && (
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
-                  )}
-                  <span className={`relative inline-flex rounded-full h-2 w-2 ${
-                    warmupProgress.status === 'completed' ? 'bg-emerald-500' :
-                    warmupProgress.status === 'cancelled' ? 'bg-amber-500' : 'bg-sky-500'
-                  }`}></span>
-                </span>
-                <span>Dataset Warmup ({warmupProgress.status})</span>
-                <span className="text-muted-foreground font-normal">| {warmupProgress.current_file}</span>
-              </span>
-              <span>{warmupProgress.completed} / {warmupProgress.total} ({warmupProgress.percent}%)</span>
-            </div>
-            <Progress value={warmupProgress.percent} className="h-1.5" />
-          </div>
-        )}
 
 
         <div className="flex-1 overflow-auto bg-background">
