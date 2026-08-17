@@ -39,6 +39,19 @@ DATASET_DIRS = {
 logger = logging.getLogger(__name__)
 
 
+@router.post("/inferences/cache/clear")
+async def clear_inference_cache():
+    """Clear all cached prediction & embedding results from Redis."""
+    from app.infrastructure.redis import redis
+    try:
+        keys = await redis.keys("result:*")
+        if keys:
+            await redis.delete(*keys)
+        return {"status": "ok", "deleted_count": len(keys)}
+    except Exception as e:
+        logger.error(f"Failed to clear cache: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/inferences/run")
 async def run_inference_endpoint(
     http_request: Request,
@@ -284,7 +297,7 @@ async def get_whisper_accuracy(request: Request):
         body = await request.json()
         model = body.get("model", "whisper-base")
         dataset = body.get("dataset")
-        dataset_file = body.get("dataset_file")
+        dataset_file = body.get("dataset_file") or body.get("filename") or body.get("file")
         file_path = body.get("file_path")
         
         if not dataset_file and not file_path:
@@ -303,7 +316,7 @@ async def get_whisper_accuracy(request: Request):
         
         # Create cache key and get cached prediction
         file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-        cache_key = f"{model}_{file_content_hash}"
+        cache_key = f"v2_{model}_{file_content_hash}"
         
         cached_result = await get_result(model, cache_key)
         

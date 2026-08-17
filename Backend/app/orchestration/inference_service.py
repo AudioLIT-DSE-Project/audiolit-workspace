@@ -70,14 +70,27 @@ async def run_inference(
 
     func = MODEL_FUNCTIONS.get(model)
     if not func:
-        raise HTTPException(status_code=400, detail=f"Invalid model: {model}")
+        # Check if resolved in ModelRegistry (LIT-231, FR1)
+        from app.domain.model_registry_service import registry
+        try:
+            loaded_model = registry.get(model)
+            if loaded_model.family == "whisper":
+                func = transcribe_whisper_base
+            elif loaded_model.family == "wav2vec2":
+                func = wave2vec
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported model family: {loaded_model.family}")
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=400, detail=f"Invalid or unresolved model: {model} ({e})")
 
     resolved_path = _resolve_audio_path(file_path, dataset, dataset_file, session_id)
     if not resolved_path.exists():
         raise HTTPException(status_code=404, detail=f"Audio file not found: {resolved_path}")
 
     file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-    cache_key = f"{model}_{file_content_hash}"
+    cache_key = f"v2_{model}_{file_content_hash}"
 
     cached_result = await get_result(model, cache_key)
     if cached_result is not None:
