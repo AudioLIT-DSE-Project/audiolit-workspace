@@ -81,15 +81,20 @@ def _registry_resolve_file(dataset: str, file_path: str) -> Path:
     raise FileNotFoundError(f"Dataset file not found: {target}")
 
 
+import soundfile as sf
+
 def calculate_audio_duration(audio_path: Path) -> float:
-    """Calculate duration of audio file in seconds"""
+    """Calculate duration of audio file in seconds using fast header parsing"""
     try:
-        # Use librosa to get duration without loading the entire audio
-        duration = librosa.get_duration(path=str(audio_path))
-        return round(duration, 2)
-    except Exception as e:
-        logger.warning(f"Could not calculate duration for {audio_path}: {e}")
-        return 0.0
+        info = sf.info(str(audio_path))
+        return round(info.duration, 2)
+    except Exception:
+        try:
+            duration = librosa.get_duration(path=str(audio_path))
+            return round(duration, 2)
+        except Exception as e:
+            logger.warning(f"Could not calculate duration for {audio_path}: {e}")
+            return 0.0
 
 def load_metadata(dataset: str, session_id: Optional[str] = None) -> List[Dict[str, str]]:
     """Load metadata for both global and custom datasets"""
