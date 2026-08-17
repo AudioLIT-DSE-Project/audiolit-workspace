@@ -15,7 +15,7 @@ import {
   TooltipTrigger,
   TooltipProvider,
 } from "@/components/ui/tooltip";
-import { Upload, HelpCircle, Sun, Moon } from "lucide-react";
+import { Upload, HelpCircle, Sun, Moon, Flame } from "lucide-react";
 import { useTheme } from "next-themes";
 import { API_BASE } from "@/lib/api";
 import { CustomDatasetManager } from "@/components/dataset/CustomDatasetManager";
@@ -50,6 +50,8 @@ interface ToolbarProps {
   onBatchInference?: (model: string, dataset: string) => void; // New callback for batch inference
   selectedTasks: SelectedTasks;
   setSelectedTasks: (tasks: SelectedTasks) => void;
+  onWarmupClick?: () => void;
+  warmupJobId?: string | null;
 }
 
 interface CustomDataset {
@@ -416,6 +418,23 @@ export const Toolbar = ({
             onDatasetCreated={handleDatasetCreated}
             onDatasetSelected={handleDatasetSelected}
           />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30 font-medium"
+                onClick={props.onWarmupClick}
+              >
+                <Flame className="h-3.5 w-3.5 mr-1 text-amber-500 fill-amber-500/20" />
+                Warmup Dataset
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Pre-compute and cache XAI analyses for full dataset</p>
+            </TooltipContent>
+          </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>
