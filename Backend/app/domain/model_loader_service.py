@@ -390,23 +390,21 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
         }
     return result["text"]
 
-def transcribe_whisper_large(audio_file_path):
-    model_id = "openai/whisper-large-v3"
-    return transcribe_whisper(model_id, audio_file_path)
-
 def transcribe_whisper_base(audio_file_path):
     model_id = "openai/whisper-base"
     return transcribe_whisper(model_id, audio_file_path)
 
 def transcribe_whisper_with_timestamps(audio_file_path, model_size="base"):
-    model_id = "openai/whisper-base" if model_size == "base" else "openai/whisper-large-v3"
-    return transcribe_whisper(model_id, audio_file_path, return_timestamps=True)
+    if model_size != "base":
+        raise ValueError(f"Unsupported model size: {model_size}")
+    return transcribe_whisper("openai/whisper-base", audio_file_path, return_timestamps=True)
 
 def transcribe_whisper_with_attention(audio_file_path, model_size="base"):
     """Transcribe audio and return attention weights"""
     logger.info(f"transcribe_whisper_with_attention called: file={audio_file_path}, model_size={model_size}")
-    model_id = "openai/whisper-base" if model_size == "base" else "openai/whisper-large-v3"
-    result = transcribe_whisper(model_id, audio_file_path, return_attention=True)
+    if model_size != "base":
+        raise ValueError(f"Unsupported model size: {model_size}")
+    result = transcribe_whisper("openai/whisper-base", audio_file_path, return_attention=True)
     logger.info(f"transcribe_whisper_with_attention result: has_attention={bool(result.get('attention'))}")
     return result
 
@@ -933,11 +931,25 @@ def predict_ser(audio_path):
 # --- Audio deepfake (ADD) binary classifier (LIT-128, FR7) -------------------
 # Binary bona-fide vs synthetic detector, loaded lazily through the same
 # ModelRegistry path as every other model (never an import-time singleton).
-# NOTE: the checkpoint below is a placeholder default and should be verified /
-# swapped for the team's chosen ASVspoof-trained model (cf. LIT-224 for SER).
+#
+# Two selectable checkpoints, both Wav2Vec2ForSequenceClassification:
+#   "melody-machine" (default) - MelodyMachine/Deepfake-audio-detection-V2
+#   "wav2vec2-add"             - Gustking/wav2vec2-large-xlsr-deepfake-audio-classification
 _ADD_MODEL_ID = "MelodyMachine/Deepfake-audio-detection-V2"
+_ADD_MODEL_REGISTRY = {
+    "melody-machine": _ADD_MODEL_ID,
+    "wav2vec2-add": "Gustking/wav2vec2-large-xlsr-deepfake-audio-classification",
+}
+_DEFAULT_ADD_MODEL_KEY = "melody-machine"
+
+# Default-model globals, kept as plain module-level singletons (rather than
+# folded into _add_model_extra_cache below) so Backend/tests/test_deepfake_classifier.py's
+# `monkeypatch.setattr(ml, "add_model", ...)` pattern keeps working unchanged.
 add_feature_extractor = None
 add_model = None
+
+# Cache for any non-default ADD checkpoint, keyed by resolved HF id.
+_add_model_extra_cache: dict = {}
 
 # Canonical binary labels; a model's own label strings are normalized onto these.
 DEEPFAKE_BONA_FIDE = "bona-fide"
@@ -957,23 +969,43 @@ def _normalize_deepfake_label(raw) -> str:
     return DEEPFAKE_BONA_FIDE
 
 
-def ensure_add_model_loaded():
-    """Lazily load the deepfake classifier + feature extractor via ModelRegistry.
+def ensure_add_model_loaded(model_key: str = _DEFAULT_ADD_MODEL_KEY):
+    """Lazily load a deepfake classifier + feature extractor via ModelRegistry.
 
     Mirrors ensure_emo_model_loaded (LIT-207 ingestion path); nothing loads
     until the first prediction. Go through this function / the module globals,
     never a bare `from ... import add_model`.
+
+    `model_key` selects which of `_ADD_MODEL_REGISTRY`'s checkpoints to load
+    (unrecognized keys fall back to the default). The default key keeps using
+    the plain `add_feature_extractor`/`add_model` globals; any other key is
+    loaded into `_add_model_extra_cache` instead, so the two checkpoints never
+    clobber each other.
     """
     global add_feature_extractor, add_model
-    if add_model is None:
-        add_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(_ADD_MODEL_ID)
-        loaded = _model_registry.get(_ADD_MODEL_ID, model_class=Wav2Vec2ForSequenceClassification)
-        add_model = loaded.model
-    return add_feature_extractor, add_model, emo_device
+    hf_id = _ADD_MODEL_REGISTRY.get(model_key, _ADD_MODEL_ID)
+
+    if hf_id == _ADD_MODEL_ID:
+        if add_model is None:
+            add_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(_ADD_MODEL_ID)
+            loaded = _model_registry.get(_ADD_MODEL_ID, model_class=Wav2Vec2ForSequenceClassification)
+            add_model = loaded.model
+        return add_feature_extractor, add_model, emo_device
+
+    if hf_id not in _add_model_extra_cache:
+        extra_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(hf_id)
+        loaded = _model_registry.get(hf_id, model_class=Wav2Vec2ForSequenceClassification)
+        _add_model_extra_cache[hf_id] = (extra_feature_extractor, loaded.model)
+    extra_feature_extractor, extra_model = _add_model_extra_cache[hf_id]
+    return extra_feature_extractor, extra_model, emo_device
 
 
-def predict_deepfake(audio_path):
+def predict_deepfake(audio_path, model_key: str = _DEFAULT_ADD_MODEL_KEY):
     """Binary audio-deepfake detection (FR7).
+
+    `model_key` picks which selectable checkpoint runs the prediction (see
+    `_ADD_MODEL_REGISTRY`); defaults to MelodyMachine for backward compatibility
+    with existing callers that pass only `audio_path`.
 
     Returns the synthetic (spoof) probability and a confidence, plus the full
     two-class distribution normalized onto bona-fide / spoof:
@@ -985,17 +1017,17 @@ def predict_deepfake(audio_path):
           "probabilities": {"bona-fide": float, "spoof": float},
         }
     """
-    ensure_add_model_loaded()
+    feature_extractor_, model_, device_ = ensure_add_model_loaded(model_key)
     audio, rate = librosa.load(audio_path, sr=16000)
-    inputs = add_feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
-    input_values = inputs.input_values.to(emo_device)
-    attention_mask = inputs.attention_mask.to(emo_device) if "attention_mask" in inputs else None
+    inputs = feature_extractor_(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(device_)
+    attention_mask = inputs.attention_mask.to(device_) if "attention_mask" in inputs else None
 
     with torch.no_grad():
-        outputs = add_model(input_values=input_values, attention_mask=attention_mask)
+        outputs = model_(input_values=input_values, attention_mask=attention_mask)
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
 
-    id2label = add_model.config.id2label if isinstance(add_model.config.id2label, dict) else {}
+    id2label = model_.config.id2label if isinstance(model_.config.id2label, dict) else {}
     class_probs = {DEEPFAKE_BONA_FIDE: 0.0, DEEPFAKE_SPOOF: 0.0}
     for i, prob in enumerate(probs):
         raw = id2label.get(i, id2label.get(str(i), f"label_{i}"))
@@ -1012,6 +1044,35 @@ def predict_deepfake(audio_path):
         "confidence": max(class_probs.values()),
         "probabilities": class_probs,
     }
+
+
+def extract_add_embeddings(audio_file_path: str, model_key: str = _DEFAULT_ADD_MODEL_KEY) -> np.ndarray:
+    """
+    Extract deepfake-classifier (ADD) embeddings from audio file.
+    Returns pooled hidden states from the last layer of the selected checkpoint's
+    Wav2Vec2 encoder (mirrors extract_wav2vec2_embeddings for the SER model).
+
+    Args:
+        audio_file_path: Path to audio file
+        model_key: which selectable ADD checkpoint to use (see _ADD_MODEL_REGISTRY)
+
+    Returns:
+        numpy array of embeddings
+    """
+    feature_extractor_, model_, device_ = ensure_add_model_loaded(model_key)
+    audio, rate = librosa.load(audio_file_path, sr=16000)
+
+    inputs = feature_extractor_(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(device_)
+    attention_mask = inputs.attention_mask.to(device_) if "attention_mask" in inputs else None
+
+    with torch.no_grad():
+        outputs = model_.wav2vec2(input_values=input_values, attention_mask=attention_mask)
+        hidden_states = outputs.last_hidden_state
+        pooled_embeddings = torch.mean(hidden_states, dim=1)
+        embeddings = pooled_embeddings.cpu().numpy().squeeze()
+
+    return embeddings
 
 
 def wave2vec(audio_file_path: str, return_probabilities: bool = False):
@@ -1037,64 +1098,34 @@ def wave2vec(audio_file_path: str, return_probabilities: bool = False):
 
 # Whisper embeddings - Load models for embedding extraction
 _whisper_processor_base = None
-_whisper_processor_large = None
-_whisper_model_large = None
 
 def get_whisper_base_models():
-    """Whisper-base (processor + model), model loaded lazily via the ModelRegistry (LIT-207).
-
-    whisper-large is not yet routed through the registry -- its float16/meta-tensor
-    CUDA fallback (below) needs verifying on a GPU box before that migration, which
-    this CPU-only dev sandbox can't do safely.
-    """
+    """Whisper-base (processor + model), model loaded lazily via the ModelRegistry (LIT-207)."""
     global _whisper_processor_base
     if _whisper_processor_base is None:
         _whisper_processor_base = WhisperProcessor.from_pretrained("openai/whisper-base")
     loaded = _model_registry.get("openai/whisper-base")
     return _whisper_processor_base, loaded.model
 
-def get_whisper_large_models():
-    global _whisper_processor_large, _whisper_model_large
-    if _whisper_processor_large is None:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        _whisper_processor_large = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-        try:
-            _whisper_model_large = WhisperModel.from_pretrained(
-                "openai/whisper-large-v3",
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            )
-            _whisper_model_large = _whisper_model_large.to(device)
-        except NotImplementedError as e:
-            if "meta tensor" in str(e):
-                # Handle meta tensor issue for embeddings model too
-                _whisper_model_large = WhisperModel.from_pretrained("openai/whisper-large-v3")
-                _whisper_model_large = _whisper_model_large.to(device)
-            else:
-                raise
-    return _whisper_processor_large, _whisper_model_large
-
 def extract_whisper_embeddings(audio_file_path: str, model_size: str = "base") -> np.ndarray:
     """
     Extract Whisper encoder embeddings from audio file.
     Returns pooled encoder hidden states (mean pooling across time dimension).
-    
+
     Args:
         audio_file_path: Path to audio file
-        model_size: "base" or "large"
-    
+        model_size: "base" (only supported size -- whisper-large was removed)
+
     Returns:
-        numpy array of embeddings (512-dim for base, 1280-dim for large)
+        numpy array of embeddings (512-dim)
     """
     # Load audio
     audio, sample_rate = librosa.load(audio_file_path, sr=16000)
     audio = audio.astype(np.float32)
-    
-    if model_size == "base":
-        processor, model = get_whisper_base_models()
-    elif model_size == "large":
-        processor, model = get_whisper_large_models()
-    else:
+
+    if model_size != "base":
         raise ValueError(f"Unsupported model size: {model_size}")
+    processor, model = get_whisper_base_models()
     
     device = next(model.parameters()).device
     

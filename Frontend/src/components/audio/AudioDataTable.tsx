@@ -50,6 +50,16 @@ interface AudioDataTableProps {
   onVisibleRowIdsChange?: (rowIds: string[]) => void;
 }
 
+const ADD_MODEL_KEYS = ["melody-machine", "wav2vec2-add"];
+
+// "Predicted"/"Ground Truth" column headers: Transcript for whisper, Label for
+// the deepfake (ADD) models, Emotion for everything else (wav2vec2/custom SER).
+const predictionColumnNoun = (model: string): string => {
+  if (model.startsWith("whisper")) return "Transcript";
+  if (ADD_MODEL_KEYS.includes(model)) return "Label";
+  return "Emotion";
+};
+
 export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads
   const hasDatasetMetadata = (datasetMetadata?.length || 0) > 0;
@@ -120,7 +130,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     },
     {
       id: "prediction",
-      header: model.startsWith("whisper") ? "Predicted Transcript" : "Predicted Label",
+      header: `Predicted ${predictionColumnNoun(model)}`,
       cell: ({ row }) => {
         const rowId = row.id as string;
         const status = inferenceStatus?.[rowId];
@@ -138,7 +148,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
           
           return <Badge variant="outline" className="text-xs">{predictionText}</Badge>;
@@ -149,7 +159,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
           return <span className="text-xs">{predictionText}</span>;
@@ -233,7 +243,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
       {
         id: "prediction",
-        header: model.startsWith("whisper") ? "Predicted Transcript" : "Predicted Emotion",
+        header: `Predicted ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const rowId = row.id as string;
           const status = inferenceStatus?.[rowId];
@@ -251,7 +261,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
           return <span className="text-xs">{predictionText || <span className="text-gray-400">No prediction</span>}</span>;
@@ -263,7 +273,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     if (shouldShowGroundTruth) {
       baseColumns.push({
         id: "ground_truth",
-        header: model.startsWith("whisper") ? "Ground Truth Transcript" : "Ground Truth Emotion",
+        header: `Ground Truth ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
           const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
@@ -299,7 +309,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
       {
         id: "prediction",
-        header: model.startsWith("whisper") ? "Predicted Transcript" : "Predicted Emotion",
+        header: `Predicted ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const rowId = row.id as string;
           const status = inferenceStatus?.[rowId];
@@ -317,7 +327,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
           return <span className="text-xs">{predictionText || <span className="text-gray-400">No prediction</span>}</span>;
@@ -329,7 +339,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     if (shouldShowGroundTruth) {
       baseColumns.push({
         id: "ground_truth",
-        header: model.startsWith("whisper") ? "Ground Truth Transcript" : "Ground Truth Emotion",
+        header: `Ground Truth ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
           const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");

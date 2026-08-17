@@ -33,12 +33,26 @@ interface WhisperPrediction {
   word_count_truth: number;
 }
 
+interface AddPrediction {
+  predicted_label: string; // "bona-fide" | "spoof"
+  synthetic_probability: number;
+  confidence: number;
+  probabilities: Record<string, number>;
+}
+
+const ADD_MODEL_KEYS = ["melody-machine", "wav2vec2-add"];
+const ADD_MODEL_LABELS: Record<string, string> = {
+  "melody-machine": "MelodyMachine",
+  "wav2vec2-add": "Wav2Vec2 XLSR",
+};
+
 interface PredictionDisplayProps {
   selectedFile?: UploadedFile | null;
   selectedEmbeddingFile?: string | null;
   model?: string;
   wav2vecPrediction?: Wav2Vec2Prediction | null;
   whisperPrediction?: WhisperPrediction | null;
+  addPrediction?: AddPrediction | null;
   perturbedPredictions?: Wav2Vec2Prediction | WhisperPrediction | null;
   isLoading?: boolean;
   isLoadingPerturbed?: boolean;
@@ -53,6 +67,7 @@ export const PredictionDisplay = ({
   model,
   wav2vecPrediction,
   whisperPrediction,
+  addPrediction,
   perturbedPredictions,
   isLoading,
   isLoadingPerturbed,
@@ -60,6 +75,7 @@ export const PredictionDisplay = ({
   showPerturbed = false,
   activeTaskId = null
 }: PredictionDisplayProps) => {
+  const isAddModel = !!model && ADD_MODEL_KEYS.includes(model);
   if (!selectedFile && !selectedEmbeddingFile) {
     return (
       <Card>
@@ -74,12 +90,15 @@ export const PredictionDisplay = ({
     <Card>
       <CardHeader className="bg-panel-header">
         <CardTitle className="text-xs">
-          {model === "wav2vec2" ? "Classification Results" : model?.includes("whisper") ? "Transcription Results" : "Prediction Results"}
+          {model === "wav2vec2" ? "Classification Results" : model?.includes("whisper") ? "Transcription Results" : isAddModel ? "Deepfake Detection Results" : "Prediction Results"}
           {model === "wav2vec2" && (
             <Badge variant="outline" className="ml-1.5 text-[10px] bg-primary/10 text-primary border-primary/20">Wav2Vec2 Emotion</Badge>
           )}
           {model?.includes("whisper") && (
-            <Badge variant="outline" className="ml-1.5 text-[10px] bg-primary/10 text-primary border-primary/20">{model.includes("large") ? "Whisper Large" : "Whisper Base"}</Badge>
+            <Badge variant="outline" className="ml-1.5 text-[10px] bg-primary/10 text-primary border-primary/20">Whisper Base</Badge>
+          )}
+          {isAddModel && (
+            <Badge variant="outline" className="ml-1.5 text-[10px] bg-primary/10 text-primary border-primary/20">{ADD_MODEL_LABELS[model!]}</Badge>
           )}
         </CardTitle>
       </CardHeader>
@@ -213,24 +232,40 @@ export const PredictionDisplay = ({
               </div>
             )}
           </div>
-        ) : !model?.includes("whisper") && model !== "wav2vec2" ? (
-           [
-            { label: "Neutral", probability: 0.87, isPredicted: true },
-            { label: "Happy", probability: 0.08 },
-            { label: "Sad", probability: 0.03 },
-            { label: "Angry", probability: 0.02 },
-          ].map((item, idx) => (
-            <div key={idx} className="flex items-center justify-between text-xs">
-              <div className="flex items-center gap-2">
-                <span>{item.label}</span>
-                {item.isPredicted && <Badge variant="default" className="text-[10px] px-1">P</Badge>}
+        ) : isAddModel && addPrediction && !isLoading ? (
+          <div className="space-y-3">
+            {!showPerturbed ? (
+              <div className="space-y-2">
+                <div className="text-xs-tight font-medium flex items-center gap-2">
+                  Original Audio Prediction
+                  <span className="text-xs-tight text-gray-500 border border-gray-300 px-1 rounded">Original</span>
+                </div>
+                {Object.entries(addPrediction.probabilities)
+                  .sort(([, a], [, b]) => b - a)
+                  .map(([label, probability]) => {
+                    const isPredicted = label === addPrediction.predicted_label;
+                    return (
+                      <div key={label} className="flex items-center justify-between text-xs-tight">
+                        <div className="flex items-center gap-2">
+                          <span className="capitalize">{label}</span>
+                          {isPredicted && <span className="text-xs-tight text-gray-600 font-medium">Predicted</span>}
+                        </div>
+                        <div className="flex items-center gap-2 flex-1 max-w-[120px]">
+                          <Progress value={probability * 100} className="h-2" />
+                          <span className="text-muted-foreground min-w-[2rem]">{(probability * 100).toFixed(1)}%</span>
+                        </div>
+                      </div>
+                    );
+                  })}
               </div>
-              <div className="flex items-center gap-2 flex-1 max-w-[120px]">
-                <Progress value={item.probability * 100} className="h-2" />
-                <span className="text-muted-foreground min-w-[2rem]">{(item.probability * 100).toFixed(0)}%</span>
+            ) : (
+              <div className="text-xs text-muted-foreground p-2 bg-gray-50 rounded border border-gray-200">
+                Perturbed-audio re-inference is not yet available for deepfake-detection models.
               </div>
-            </div>
-          ))
+            )}
+          </div>
+        ) : isAddModel && !isLoading ? (
+          <div className="text-xs text-muted-foreground p-2">No prediction yet.</div>
         ) : null}
       </CardContent>
     </Card>

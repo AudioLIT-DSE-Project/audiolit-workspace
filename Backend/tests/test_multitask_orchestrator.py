@@ -45,23 +45,12 @@ CHILD_QUEUES = (
 
 
 class TestRealAsrJob:
-    def test_calls_whisper_base_by_default(self, fake_conn):
-        with patch.object(multitask, "transcribe_whisper_base", return_value="hello world") as mock_base, \
-             patch.object(multitask, "transcribe_whisper_large") as mock_large:
+    def test_calls_whisper_base(self, fake_conn):
+        with patch.object(multitask, "transcribe_whisper_base", return_value="hello world") as mock_base:
             result = multitask.run_asr_job("clip.wav")
 
         mock_base.assert_called_once_with("clip.wav")
-        mock_large.assert_not_called()
         assert result == {"task_name": "asr", "transcript": "hello world"}
-
-    def test_uses_whisper_large_when_requested(self, fake_conn):
-        with patch.object(multitask, "transcribe_whisper_base") as mock_base, \
-             patch.object(multitask, "transcribe_whisper_large", return_value="fancier transcript") as mock_large:
-            result = multitask.run_asr_job("clip.wav", model="whisper-large")
-
-        mock_large.assert_called_once_with("clip.wav")
-        mock_base.assert_not_called()
-        assert result["transcript"] == "fancier transcript"
 
 
 class TestRealSerJob:

@@ -60,8 +60,9 @@ interface CustomDataset {
 
 const defaultDatasetForModel: Record<string, string> = {
   "whisper-base": "common-voice",
-  "whisper-large": "common-voice",
   wav2vec2: "ravdess",
+  "melody-machine": "asvspoof-2021",
+  "wav2vec2-add": "asvspoof-2021",
 };
 
 const DATASET_TASK_FAMILIES: Record<string, "ASR" | "SER" | "DEEPFAKE"> = {
@@ -74,10 +75,22 @@ const DATASET_TASK_FAMILIES: Record<string, "ASR" | "SER" | "DEEPFAKE"> = {
   "asvspoof-2021": "DEEPFAKE",
 };
 
+// Explicit family lookup for the built-in dropdown keys - avoids the substring
+// heuristic below misclassifying "wav2vec2-add" (contains "wav2vec2") as SER.
+const BUILTIN_MODEL_TASK_FAMILY: Record<string, "ASR" | "SER" | "DEEPFAKE"> = {
+  "whisper-base": "ASR",
+  wav2vec2: "SER",
+  "melody-machine": "DEEPFAKE",
+  "wav2vec2-add": "DEEPFAKE",
+};
+
 const getModelTaskFamily = (modelName: string): "ASR" | "SER" | "DEEPFAKE" => {
+  if (BUILTIN_MODEL_TASK_FAMILY[modelName]) return BUILTIN_MODEL_TASK_FAMILY[modelName];
   const m = modelName.toLowerCase();
+  // Check DEEPFAKE substrings first: a custom-resolved wav2vec2 checkpoint
+  // fine-tuned for deepfake detection would otherwise match "wav2vec2" below.
+  if (m.includes("asvspoof") || m.includes("deepfake") || m.includes("spoof") || m.includes("fake")) return "DEEPFAKE";
   if (m.includes("wav2vec2") || m.includes("ser") || m.includes("emotion")) return "SER";
-  if (m.includes("asvspoof") || m.includes("deepfake") || m.includes("fake")) return "DEEPFAKE";
   return "ASR";
 };
 
@@ -225,17 +238,19 @@ export const Toolbar = ({
                       • Whisper: Speech-to-text transcription (ASR)
                     </p>
                     <p className="text-xs">• Wav2Vec2: Emotion recognition (SER)</p>
+                    <p className="text-xs">• MelodyMachine / Wav2Vec2 XLSR: Deepfake detection (ADD)</p>
                   </TooltipContent>
                 </Tooltip>
               </div>
               <Select value={model} onValueChange={onModelChange}>
-                <SelectTrigger className="w-36 h-7 border-border text-xs">
+                <SelectTrigger className="w-40 h-7 border-border text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="whisper-base">Whisper Base (ASR)</SelectItem>
-                  <SelectItem value="whisper-large">Whisper Large (ASR)</SelectItem>
                   <SelectItem value="wav2vec2">Wav2Vec2 (SER)</SelectItem>
+                  <SelectItem value="melody-machine">MelodyMachine (Deepfake)</SelectItem>
+                  <SelectItem value="wav2vec2-add">Wav2Vec2 XLSR (Deepfake)</SelectItem>
                   {resolvedCustomModels.length > 0 && (
                     <>
                       <SelectItem disabled value="separator-models">
@@ -273,6 +288,9 @@ export const Toolbar = ({
                     </p>
                     <p className="text-xs">
                       • SER: RAVDESS, CREMA-D, ESD
+                    </p>
+                    <p className="text-xs">
+                      • Deepfake: ASVspoof 2021
                     </p>
                   </TooltipContent>
                 </Tooltip>
