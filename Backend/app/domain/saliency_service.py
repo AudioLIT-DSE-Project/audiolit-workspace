@@ -79,8 +79,8 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
         
-        # Use smaller batch size and fewer steps to fit in GPU memory
-        n_steps = 16  # Reduced from 32 to 16
+        # Use smaller batch size and fewer steps on CPU to guarantee fast response (< 1s)
+        n_steps = 4 if not torch.cuda.is_available() else 16
         internal_batch_size = 1
         
         # Monitor GPU memory
@@ -333,11 +333,12 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
     
     if method == "gradcam":
         ig = IntegratedGradients(model_forward)
+        n_steps_val = 4 if not torch.cuda.is_available() else 16
         try:
             attributions = ig.attribute(
                 input_values,
                 additional_forward_args=(attention_mask, target_idx),
-                n_steps=32,
+                n_steps=n_steps_val,
                 internal_batch_size=1,
             )
         except RuntimeError as e:

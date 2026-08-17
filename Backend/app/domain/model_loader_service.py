@@ -23,6 +23,47 @@ from app.domain.model_registry_service import registry as _model_registry
 logger = logging.getLogger(__name__)
 
 
+_whisper_cond_gen_cache = {}
+
+def _get_whisper_cond_gen(model_id: str):
+    if model_id not in _whisper_cond_gen_cache:
+        processor = WhisperProcessor.from_pretrained(model_id)
+        model = WhisperForConditionalGeneration.from_pretrained(model_id, attn_implementation="eager")
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        model = model.to(device)
+        model.eval()
+        _whisper_cond_gen_cache[model_id] = (processor, model)
+    return _whisper_cond_gen_cache[model_id]
+
+_pipeline_cache = {}
+
+def _get_whisper_pipeline(model_id: str, device: int, torch_dtype: torch.dtype):
+    if model_id not in _pipeline_cache:
+        try:
+            pipe = pipeline(
+                "automatic-speech-recognition",
+                model=model_id,
+                torch_dtype=torch_dtype,
+                device=device,
+            )
+        except NotImplementedError as e:
+            if "meta tensor" in str(e):
+                pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model=model_id,
+                    torch_dtype=torch_dtype,
+                    device=-1,
+                )
+                if torch.cuda.is_available():
+                    try:
+                        pipe.model = pipe.model.to("cuda:0")
+                    except Exception:
+                        pass
+            else:
+                raise
+        _pipeline_cache[model_id] = pipe
+    return _pipeline_cache[model_id]
+
 def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, return_timestamps=False, return_attention=False):
     device = 0 if torch.cuda.is_available() else -1
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -32,11 +73,7 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
 
     # For attention extraction, we need to use the raw model, not the pipeline
     if return_attention:
-        
-        processor = WhisperProcessor.from_pretrained(model_id)
-        # CRITICAL FIX: Use eager attention to support output_attentions=True
-        model = WhisperForConditionalGeneration.from_pretrained(model_id, attn_implementation="eager")
-        model = model.to("cuda:0" if torch.cuda.is_available() else "cpu")
+        processor, model = _get_whisper_cond_gen(model_id)
         
         # Process audio to input features
         input_features = processor(audio, sampling_rate=sample_rate, return_tensors="pt").input_features
@@ -46,12 +83,14 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
             # First, try to get a simple forward pass with attention
             logger.info("Attempting Whisper attention extraction...")
             
-            # Generate transcript first
+            # Generate transcript first with English language forcing
             generated_ids = model.generate(
                 input_features,
                 max_length=448,
                 num_beams=1,
                 do_sample=False,
+                language="english",
+                task="transcribe",
             )
             transcript = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             logger.info(f"Generated transcript: '{transcript}'")

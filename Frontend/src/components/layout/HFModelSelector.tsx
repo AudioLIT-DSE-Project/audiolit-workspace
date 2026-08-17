@@ -36,7 +36,11 @@ const ERROR_LABELS: Record<string, string> = {
   HUB_UNAVAILABLE: "Hugging Face Hub is unreachable",
 };
 
-export const HFModelSelector: React.FC = () => {
+interface HFModelSelectorProps {
+  onModelResolved?: (modelId: string) => void;
+}
+
+export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolved }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [modelId, setModelId] = useState("");
   const [revision, setRevision] = useState("main");
@@ -68,10 +72,20 @@ export const HFModelSelector: React.FC = () => {
         return;
       }
       setResolved(body as ResolvedModel);
+      if (onModelResolved) {
+        onModelResolved((body as ResolvedModel).model_id);
+      }
     } catch (err) {
       setError({ code: "ERROR", message: err instanceof Error ? err.message : "Failed to resolve model" });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleUseModel = () => {
+    if (resolved && onModelResolved) {
+      onModelResolved(resolved.model_id);
+      setIsOpen(false);
     }
   };
 
@@ -137,10 +151,15 @@ export const HFModelSelector: React.FC = () => {
           )}
 
           {resolved && (
-            <div className="p-2.5 rounded border border-primary/30 bg-primary/5 text-xs space-y-1.5">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
-                <span className="font-medium">Model ready</span>
+            <div className="p-2.5 rounded border border-primary/30 bg-primary/5 text-xs space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
+                  <span className="font-medium">Model ready</span>
+                </div>
+                <Button size="sm" variant="default" className="h-6 text-[11px] px-2" onClick={handleUseModel}>
+                  Use Model
+                </Button>
               </div>
               <div className="flex flex-wrap gap-1.5">
                 <Badge variant="outline" className="text-[10px]">family: {resolved.family}</Badge>
