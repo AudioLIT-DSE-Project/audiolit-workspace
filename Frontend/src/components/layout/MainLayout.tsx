@@ -72,6 +72,17 @@ export const MainLayout = () => {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const { state, result } = useTaskStatus(activeTaskId);
 
+  // Clear selected file, embedding file, and predictions when dataset changes
+  useEffect(() => {
+    setSelectedFile(null);
+    setSelectedEmbeddingFile(null);
+    setAvailableFiles([]);
+    setWav2vecPrediction(null);
+    setWhisperPrediction(null);
+    setPredictionError(null);
+    setPerturbationResult(null);
+  }, [dataset]);
+
   // Clear perturbation result and predictions when selected file changes
   useEffect(() => {
     setPerturbationResult(null);
