@@ -775,16 +775,20 @@ def run_batch_dataset_warmup_task(
         if not filename:
             continue
 
-        # Update progress in Redis
-        progress_data = {
-            "completed": i,
-            "total": total,
-            "current_file": filename,
-            "status": "running",
-            "percent": round((i / total) * 100, 1) if total > 0 else 0,
-        }
-        if conn:
-            conn.set(f"job_progress_{job_id}", json.dumps(progress_data), ex=86400)
+        # Function helper to push subtask updates to Redis
+        def update_subtask(subtask_label: str):
+            if conn:
+                p_data = {
+                    "completed": i,
+                    "total": total,
+                    "current_file": filename,
+                    "active_subtask": subtask_label,
+                    "status": "running",
+                    "percent": round((i / total) * 100, 1) if total > 0 else 0,
+                }
+                conn.set(f"job_progress_{job_id}", json.dumps(p_data), ex=86400)
+
+        update_subtask("Initializing...")
 
         # Run requested tasks synchronously in worker process (caches in Redis)
         try:
@@ -800,6 +804,7 @@ def run_batch_dataset_warmup_task(
                 # 1. Predictions (ASR / SER / ADD)
                 if "asr" in tasks or "ser" in tasks:
                     try:
+                        update_subtask("ML Inference & Classification")
                         from app.domain.model_loader_service import predict_model
                         pred = predict_model(str(resolved_path), model)
                         if pred:
@@ -811,6 +816,7 @@ def run_batch_dataset_warmup_task(
                 # 2. Acoustic Profiling (Pitch F0, Energy, Spectrogram)
                 if "acoustic" in tasks:
                     try:
+                        update_subtask("Acoustic Profiling (F0 / Spectrogram)")
                         import soundfile as sf
                         from app.domain.acoustic_profiler_service import extract_acoustic_profile
                         audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
@@ -824,6 +830,7 @@ def run_batch_dataset_warmup_task(
                 # 3. Saliency / XAI Grad-CAM Attribution Heatmaps
                 if "saliency" in tasks:
                     try:
+                        update_subtask("Saliency Attribution (Grad-CAM)")
                         from app.domain.saliency_service import generate_saliency
                         sal_res = generate_saliency(str(resolved_path), model, "gradcam")
                         if sal_res:

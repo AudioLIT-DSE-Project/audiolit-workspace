@@ -15,6 +15,7 @@ export interface WarmupProgress {
   completed: number;
   total: number;
   current_file: string;
+  active_subtask?: string;
   status: string;
   percent: number;
 }
@@ -123,12 +124,18 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
               <Progress value={warmupProgress?.percent || 0} className="h-2" />
             </div>
 
-            <div className="bg-muted/40 p-2.5 rounded-md border border-border space-y-1 text-[11px]">
-              <div className="flex justify-between">
+            <div className="bg-muted/40 p-2.5 rounded-md border border-border space-y-1.5 text-[11px]">
+              <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Current File:</span>
-                <span className="font-mono truncate max-w-[240px] text-foreground">{warmupProgress?.current_file || "Processing..."}</span>
+                <span className="font-mono truncate max-w-[220px] text-foreground font-medium">{warmupProgress?.current_file || "Processing..."}</span>
               </div>
-              <div className="flex justify-between text-muted-foreground">
+              <div className="flex justify-between items-center">
+                <span className="text-muted-foreground">Active Pipeline:</span>
+                <span className="font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                  {warmupProgress?.active_subtask || "Processing..."}
+                </span>
+              </div>
+              <div className="flex justify-between text-muted-foreground pt-0.5">
                 <span>Thermal Protection:</span>
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium">100ms Safety Cooldown Active</span>
               </div>
