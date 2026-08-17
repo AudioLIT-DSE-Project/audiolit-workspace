@@ -107,6 +107,7 @@ export const Toolbar = ({
   onBatchInference,
   selectedTasks,
   setSelectedTasks,
+  onWarmupClick,
 }: ToolbarProps) => {
   const handleTaskToggle = (task: keyof SelectedTasks) => {
     setSelectedTasks({ ...selectedTasks, [task]: !selectedTasks[task] });
@@ -425,7 +426,7 @@ export const Toolbar = ({
                 variant="outline"
                 size="sm"
                 className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30 font-medium"
-                onClick={props.onWarmupClick}
+                onClick={onWarmupClick}
               >
                 <Flame className="h-3.5 w-3.5 mr-1 text-amber-500 fill-amber-500/20" />
                 Warmup Dataset
