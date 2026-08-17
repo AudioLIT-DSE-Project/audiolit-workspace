@@ -19,20 +19,17 @@ audiolit-workspace/
 
 ---
 
-## Quick Start & Local Execution
+## Datasets Access
 
-### 1. Dataset Remote Restore (First-time clone)
-Authenticate with Hugging Face and pull the byte-identical benchmark audio corpora pinned in `datasets.lock`:
-```bash
-pip install huggingface_hub
-hf auth login
-python .antigravity/bin/ag.py data pull
-```
+The benchmark evaluation audio datasets (`Common Voice`, `L2-ARCTIC`, `LibriSpeech`, `RAVDESS`, `CREMA-D`, `ESD`, `ASVspoof 2021`) can be accessed through the developers upon request.
 
 ---
 
-### 2. Start Redis Service
+## Quick Start & Local Execution
+
+### 1. Start Redis Service
 AudioLIT requires Redis for task queuing (RQ) and sub-10ms prediction caching:
+
 ```bash
 # Option A: Run via Docker container
 docker run -d -p 6379:6379 redis:latest
@@ -44,17 +41,8 @@ docker compose up -d
 
 ---
 
-### 3. Start Backend FastAPI Server
+### 2. Start Backend FastAPI Server
 Set up the Python virtual environment and launch Uvicorn:
-
-**Linux / macOS:**
-```bash
-cd Backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
 
 **Windows (PowerShell / Command Prompt):**
 ```powershell
@@ -65,10 +53,25 @@ pip install -r requirements.txt
 .venv\Scripts\uvicorn app.main:app --reload --port 8000
 ```
 
+**Linux / macOS:**
+```bash
+cd Backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
 ---
 
-### 4. Start Asynchronous Task Workers
-Launch the parallel worker processes for `saliency`, `acoustic`, `evaluation`, and `analysis` queues in a separate terminal:
+### 3. Start Asynchronous Task Workers (Terminal 2)
+Launch the 4 parallel worker processes for `saliency`, `acoustic`, `evaluation`, and `analysis` queues in a separate terminal:
+
+**Windows:**
+```powershell
+cd Backend
+.venv\Scripts\python -m app.orchestration.worker all
+```
 
 **Linux / macOS:**
 ```bash
@@ -77,16 +80,9 @@ source .venv/bin/activate
 python -m app.orchestration.worker all
 ```
 
-**Windows:**
-```powershell
-cd Backend
-.venv\Scripts\python -m app.orchestration.worker all
-```
-
 ---
 
-### 5. Start Frontend UI Development Server
-Launch the React + Vite frontend:
+### 4. Start Frontend UI Development Server (Terminal 3)
 
 ```bash
 cd Frontend
