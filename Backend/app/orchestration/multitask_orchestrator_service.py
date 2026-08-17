@@ -28,7 +28,6 @@ from ..domain.model_loader_service import (
     predict_deepfake,
     predict_ser,
     transcribe_whisper_base,
-    transcribe_whisper_large,
 )
 
 ASR_QUEUE_NAME = "multitask_asr"
@@ -37,15 +36,14 @@ ADD_QUEUE_NAME = "multitask_add"
 AGGREGATOR_QUEUE_NAME = "multitask_aggregator"
 
 
-def run_asr_job(file_path: str, model: str = "whisper-base") -> dict[str, Any]:
+def run_asr_job(file_path: str) -> dict[str, Any]:
     """Real Whisper transcription, run as an RQ child job."""
     conn = get_redis_connection()
     job = get_current_job()
     if job is not None:
         _publish_progress(conn, job.id, "asr", 0.5)
 
-    transcribe = transcribe_whisper_large if model == "whisper-large" else transcribe_whisper_base
-    transcript = transcribe(file_path)
+    transcript = transcribe_whisper_base(file_path)
 
     if job is not None:
         _publish_progress(conn, job.id, "asr", 1.0)

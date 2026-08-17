@@ -436,7 +436,8 @@ def add_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[s
     publish_progress(_current_job_id(), "add.running", {"model": model_id})
     try:
         from ..domain.model_loader_service import predict_deepfake
-        res = predict_deepfake(audio_ref)
+        model_key = model_id if model_id in ("melody-machine", "wav2vec2-add") else "melody-machine"
+        res = predict_deepfake(audio_ref, model_key=model_key)
         label = res.get("predicted_label", "bona-fide")
         syn_prob = float(res.get("synthetic_probability", 0.0))
         conf = float(res.get("confidence", 0.0))
