@@ -27,6 +27,26 @@ def _start_family_worker(fam: WorkerFamily):
     run_worker(fam)
 
 
+def _cleanup_stale_worker_locks(families: List[WorkerFamily]) -> None:
+    """Clear stale Redis worker locks for families that have no active RQ worker listening."""
+    try:
+        from rq import Worker
+        conn = get_redis_connection()
+        active_workers = Worker.all(connection=conn)
+        active_queues = set()
+        for w in active_workers:
+            for q_name in w.queue_names():
+                active_queues.add(q_name.replace("audiolit:", ""))
+
+        for fam in families:
+            if fam.value not in active_queues:
+                lock_key = f"audiolit:worker_lock:{fam.value}"
+                if conn.exists(lock_key):
+                    conn.delete(lock_key)
+    except Exception:
+        pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
@@ -46,6 +66,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 families = ", ".join(f.value for f in WorkerFamily)
                 print(f"unknown family {arg!r}; choose from: {families}, all", file=sys.stderr)
                 return 2
+
+    _cleanup_stale_worker_locks(selected_families)
 
     if len(selected_families) == 1:
         run_worker(selected_families[0])
