@@ -212,7 +212,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
   ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
-    const v = row["id"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["filename"];
+    const v = row["filename"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["id"];
     return v !== undefined && v !== null && String(v).length > 0 ? String(v) : fallback;
   }, []);
 
