@@ -378,6 +378,52 @@ export const MainLayout = () => {
 
   useEffect(() => { setPredictionMap({}); setBatchInferenceStatus('idle'); }, [model, dataset]);
 
+  // Mode 1: Speculative Idle XAI Prefetching (3-second idle timer)
+  useEffect(() => {
+    if (!selectedFile && !selectedEmbeddingFile) return;
+
+    const abortController = new AbortController();
+    const idleTimer = setTimeout(() => {
+      const isCustomDataset = dataset?.startsWith('custom:');
+      const filename = selectedFile?.filename || selectedEmbeddingFile;
+      if (!filename) return;
+
+      const requestBody = isCustomDataset
+        ? { file_path: selectedFile?.file_path }
+        : { dataset: dataset, dataset_file: filename };
+
+      // Prefetch Acoustic Profile in background silently
+      fetch(`${API_BASE}/acoustic/profile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(requestBody),
+        signal: abortController.signal,
+      }).catch(() => {});
+
+      // Prefetch Saliency Map in background silently
+      const saliencyBody = {
+        model: model,
+        dataset: dataset,
+        dataset_file: filename,
+        method: "gradcam",
+      };
+      fetch(`${API_BASE}/saliency/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(saliencyBody),
+        signal: abortController.signal,
+      }).catch(() => {});
+    }, 3000);
+
+    return () => {
+      clearTimeout(idleTimer);
+      abortController.abort();
+    };
+  }, [selectedFile, selectedEmbeddingFile, dataset, model]);
+
+
   const handleBatchInference = async (selectedModel: string, selectedDataset: string) => {
     if (selectedDataset === 'custom') return;
     setPredictionMap({});
