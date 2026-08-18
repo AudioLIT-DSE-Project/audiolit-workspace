@@ -43,6 +43,10 @@ class ResolveModelResponse(BaseModel):
     available_layers: List[str]
 
 
+class CancelModelRequest(BaseModel):
+    model_id: str
+
+
 @router.post("/models/resolve", response_model=ResolveModelResponse)
 def resolve_model(request: ResolveModelRequest) -> ResolveModelResponse:
     """Resolve, safety-check, and load a Hugging Face model through the registry."""
@@ -62,3 +66,17 @@ def resolve_model(request: ResolveModelRequest) -> ResolveModelResponse:
         weights_sha256=loaded.weights_sha256,
         available_layers=loaded.available_layers,
     )
+
+
+@router.post("/models/cancel")
+def cancel_model_resolution(request: CancelModelRequest):
+    """Abort an active custom model resolution and purge temporary resources/memory."""
+    success = registry.cancel_download(request.model_id)
+    return {"status": "ok", "message": f"Resolution for '{request.model_id}' cancelled.", "cleaned": success}
+
+
+@router.get("/models/active")
+def get_active_downloads():
+    """List ongoing model resolution & weight download tasks."""
+    return {"active_downloads": registry.get_active_downloads()}
+

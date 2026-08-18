@@ -15,11 +15,12 @@ import {
   TooltipTrigger,
   TooltipProvider,
 } from "@/components/ui/tooltip";
-import { Upload, HelpCircle, Sun, Moon } from "lucide-react";
+import { Upload, HelpCircle, Sun, Moon, Flame } from "lucide-react";
 import { useTheme } from "next-themes";
 import { API_BASE } from "@/lib/api";
 import { CustomDatasetManager } from "@/components/dataset/CustomDatasetManager";
 import { HFModelSelector } from "./HFModelSelector";
+import { useModelRegistry } from "@/context/ModelRegistryContext";
 
 export interface SelectedTasks {
   asr: boolean;
@@ -50,6 +51,8 @@ interface ToolbarProps {
   onBatchInference?: (model: string, dataset: string) => void; // New callback for batch inference
   selectedTasks: SelectedTasks;
   setSelectedTasks: (tasks: SelectedTasks) => void;
+  onWarmupClick?: () => void;
+  warmupJobId?: string | null;
 }
 
 interface CustomDataset {
@@ -118,6 +121,7 @@ export const Toolbar = ({
   onBatchInference,
   selectedTasks,
   setSelectedTasks,
+  onWarmupClick,
 }: ToolbarProps) => {
   const handleTaskToggle = (task: keyof SelectedTasks) => {
     setSelectedTasks({ ...selectedTasks, [task]: !selectedTasks[task] });
@@ -127,8 +131,8 @@ export const Toolbar = ({
   const { resolvedTheme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+  const { resolvedCustomModels } = useModelRegistry();
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
-  const [resolvedCustomModels, setResolvedCustomModels] = useState<string[]>([]);
   // Built-in corpora (LIT-235) - was a hardcoded 2-entry list disconnected
   // from the backend's actual dataset registry; now fetched for real.
   const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess", "l2-arctic", "librispeech", "crema-d", "esd"]);
@@ -136,7 +140,6 @@ export const Toolbar = ({
   const activeModelFamily = getModelTaskFamily(model);
 
   const handleCustomModelResolved = (modelId: string) => {
-    setResolvedCustomModels((prev) => Array.from(new Set([...prev, modelId])));
     onModelChange(modelId);
   };
 
@@ -434,6 +437,23 @@ export const Toolbar = ({
             onDatasetCreated={handleDatasetCreated}
             onDatasetSelected={handleDatasetSelected}
           />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30 font-medium"
+                onClick={onWarmupClick}
+              >
+                <Flame className="h-3.5 w-3.5 mr-1 text-amber-500 fill-amber-500/20" />
+                Warmup Dataset
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Pre-compute and cache XAI analyses for full dataset</p>
+            </TooltipContent>
+          </Tooltip>
 
           <Tooltip>
             <TooltipTrigger asChild>

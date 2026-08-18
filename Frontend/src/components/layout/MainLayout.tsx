@@ -10,6 +10,7 @@ import { DatapointEditorPanel } from "../panels/DatapointEditorPanel";
 import { PredictionPanel, UnifiedTaskResult } from "../panels/PredictionPanel";
 import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
+import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 
 interface UploadedFile {
   file_id: string;
@@ -82,6 +83,89 @@ export const MainLayout = () => {
   // RQ Task State (WebSocket listener)
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const { state, result } = useTaskStatus(activeTaskId);
+
+  // Global Warmup Runner State
+  const [isWarmupModalOpen, setIsWarmupModalOpen] = useState(false);
+  const [warmupJobId, setWarmupJobId] = useState<string | null>(null);
+  const [warmupProgress, setWarmupProgress] = useState<WarmupProgress | null>(null);
+  const [isStartingWarmup, setIsStartingWarmup] = useState(false);
+  const [isWarmupMinimized, setIsWarmupMinimized] = useState(false);
+
+  // Poll for Warmup Progress
+  useEffect(() => {
+    if (!warmupJobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/inference/progress/${warmupJobId}`);
+        if (response.ok) {
+          const data = await response.json();
+          setWarmupProgress(data);
+          if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
+            clearInterval(interval);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to poll warmup progress:", err);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [warmupJobId]);
+
+  const handleStartWarmup = async () => {
+    if (!dataset) return;
+    setIsStartingWarmup(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/inference/batch-warmup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dataset: dataset,
+          model: model,
+          tasks: ["asr", "ser", "acoustic", "saliency"],
+          cooldown_ms: 100
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setWarmupJobId(data.job_id);
+      }
+    } catch (err) {
+      console.error("Failed to start batch warmup:", err);
+    } finally {
+      setIsStartingWarmup(false);
+    }
+  };
+
+  const handleCancelWarmup = async () => {
+    if (!warmupJobId) return;
+    try {
+      await fetch(`${API_BASE}/api/inference/cancel/${warmupJobId}`, {
+        method: "POST",
+      });
+      setWarmupProgress(prev => prev ? { ...prev, status: 'cancelling' } : null);
+    } catch (err) {
+      console.error("Failed to cancel warmup:", err);
+    }
+  };
+
+  const handleClearCache = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/cache/clear`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        setPredictionMap({});
+        setWav2vecPrediction(null);
+        setWhisperPrediction(null);
+        setPerturbedPredictions(null);
+        alert("Cache cleared successfully! All cached ML predictions, acoustic profiles, and saliency maps have been reset.");
+      }
+    } catch (err) {
+      console.error("Failed to clear cache:", err);
+    }
+  };
 
   // Clear selected file, embedding file, and predictions when dataset changes
   useEffect(() => {
@@ -462,6 +546,52 @@ export const MainLayout = () => {
 
   useEffect(() => { setPredictionMap({}); setBatchInferenceStatus('idle'); }, [model, dataset]);
 
+  // Mode 1: Speculative Idle XAI Prefetching (3-second idle timer)
+  useEffect(() => {
+    if (!selectedFile && !selectedEmbeddingFile) return;
+
+    const abortController = new AbortController();
+    const idleTimer = setTimeout(() => {
+      const isCustomDataset = dataset?.startsWith('custom:');
+      const filename = selectedFile?.filename || selectedEmbeddingFile;
+      if (!filename) return;
+
+      const requestBody = isCustomDataset
+        ? { file_path: selectedFile?.file_path }
+        : { dataset: dataset, dataset_file: filename };
+
+      // Prefetch Acoustic Profile in background silently
+      fetch(`${API_BASE}/acoustic/profile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(requestBody),
+        signal: abortController.signal,
+      }).catch(() => {});
+
+      // Prefetch Saliency Map in background silently
+      const saliencyBody = {
+        model: model,
+        dataset: dataset,
+        dataset_file: filename,
+        method: "gradcam",
+      };
+      fetch(`${API_BASE}/saliency/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(saliencyBody),
+        signal: abortController.signal,
+      }).catch(() => {});
+    }, 3000);
+
+    return () => {
+      clearTimeout(idleTimer);
+      abortController.abort();
+    };
+  }, [selectedFile, selectedEmbeddingFile, dataset, model]);
+
+
   const handleBatchInference = async (selectedModel: string, selectedDataset: string) => {
     if (selectedDataset === 'custom') return;
     setPredictionMap({});
@@ -477,6 +607,23 @@ export const MainLayout = () => {
           onFileSelect={setSelectedFile} model={model} setModel={setModel} dataset={dataset} setDataset={setDataset}
           onBatchInference={handleBatchInference}
           selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
+          onWarmupClick={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
+          warmupJobId={warmupJobId}
+        />
+        
+        {/* Global Dataset Warmup Modal (Confirmation & Active Progress) */}
+        <WarmupModal
+          isOpen={isWarmupModalOpen && !isWarmupMinimized}
+          onClose={() => setIsWarmupModalOpen(false)}
+          dataset={effectiveDataset || dataset}
+          model={model}
+          warmupJobId={warmupJobId}
+          warmupProgress={warmupProgress}
+          isStarting={isStartingWarmup}
+          onStartWarmup={handleStartWarmup}
+          onCancelWarmup={handleCancelWarmup}
+          onMinimize={() => setIsWarmupMinimized(true)}
+          onClearCache={handleClearCache}
         />
         <div className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">

@@ -21,6 +21,7 @@ that directory. The stamps are corrected alongside this change.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -745,3 +746,139 @@ def health_check() -> dict[str, Any]:
         }
     except RedisConnectionError as exc:
         return {"ok": False, "broker": "redis", "error": str(exc)}
+
+
+def run_batch_dataset_warmup_task(
+    job_id: str,
+    dataset: str,
+    model: str = "whisper-base",
+    tasks: list[str] | None = None,
+    cooldown_ms: int = 100,
+) -> dict[str, Any]:
+    """CPU-safe, cancellable dataset warmup task runner.
+    
+    Evaluates requested tasks (ASR, SER, Acoustic, Saliency) for each file in dataset,
+    saving every result to Redis. Checks cancellation flag before each file and inserts
+    cooldown_ms sleep to prevent CPU overheating during multi-hour runs.
+    """
+    import json
+    import time
+    from app.infrastructure.dataset_service import load_metadata, resolve_file
+
+    try:
+        conn = get_redis_connection()
+    except Exception as e:
+        logger.warning(f"Could not connect to Redis for warmup status tracking: {e}")
+        conn = None
+    tasks = tasks or ["asr", "ser", "acoustic"]
+    rows = load_metadata(dataset)
+    total = len(rows)
+
+    completed = 0
+    cancelled = False
+
+    for i, row in enumerate(rows):
+        # Check cancellation flag in Redis
+        if conn and conn.get(f"cancel_job_{job_id}"):
+            cancelled = True
+            logger.info(f"Job {job_id} cancelled at file {i}/{total}")
+            break
+
+        filename = row.get("filename", "")
+        if not filename:
+            continue
+
+        # Function helper to push subtask updates to Redis
+        def update_subtask(subtask_label: str):
+            if conn:
+                p_data = {
+                    "completed": i,
+                    "total": total,
+                    "current_file": filename,
+                    "active_subtask": subtask_label,
+                    "status": "running",
+                    "percent": round((i / total) * 100, 1) if total > 0 else 0,
+                }
+                conn.set(f"job_progress_{job_id}", json.dumps(p_data), ex=86400)
+
+        update_subtask("Initializing...")
+
+        # Run requested tasks synchronously in worker process (caches in Redis)
+        try:
+            target_file = filename or row.get("path", "")
+            resolved_path = resolve_file(dataset, target_file)
+            if resolved_path and resolved_path.exists():
+                file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
+                from app.infrastructure.redis import cache_result_sync
+
+                # 1. Predictions (ASR / SER / ADD)
+                if "asr" in tasks or "ser" in tasks or "add" in tasks:
+                    try:
+                        update_subtask("ML Inference & Classification")
+                        from app.domain.model_loader_service import (
+                            transcribe_whisper,
+                            predict_emotion_wave2vec,
+                            predict_deepfake,
+                        )
+                        if "whisper" in model.lower():
+                            pred = transcribe_whisper(model, str(resolved_path))
+                        elif "wav2vec" in model.lower():
+                            pred = predict_emotion_wave2vec(str(resolved_path))
+                        else:
+                            pred = predict_deepfake(str(resolved_path))
+
+                        if pred is not None:
+                            cache_key = f"{model}_{file_content_hash}"
+                            cache_payload = {"prediction": pred, "status": "completed"}
+                            cache_result_sync(model, cache_key, cache_payload, ttl=86400)
+                            cache_result_sync("predictions", f"v2_{cache_key}", cache_payload, ttl=86400)
+                    except Exception as err:
+                        logger.error(f"Prediction warmup failed for {filename}: {err}", exc_info=True)
+
+                # 2. Acoustic Profiling (Pitch F0, Energy, Spectrogram)
+                if "acoustic" in tasks:
+                    try:
+                        update_subtask("Acoustic Profiling (F0 / Spectrogram)")
+                        import soundfile as sf
+                        from app.domain.acoustic_profiler_service import extract_acoustic_profile
+                        audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
+                        if audio.ndim > 1:
+                            audio = audio.mean(axis=1)
+                        prof = extract_acoustic_profile(audio, sr)
+                        cache_result_sync("acoustic", f"acoustic_profile_{file_content_hash}", prof, ttl=86400)
+                    except Exception as err:
+                        logger.error(f"Acoustic warmup failed for {filename}: {err}", exc_info=True)
+
+                # 3. Saliency / XAI Grad-CAM Attribution Heatmaps
+                if "saliency" in tasks:
+                    try:
+                        update_subtask("Saliency Attribution (Grad-CAM)")
+                        from app.domain.saliency_service import generate_saliency
+                        sal_res = generate_saliency(str(resolved_path), model, "gradcam")
+                        if sal_res:
+                            cache_key = f"saliency_v2_{model}_gradcam_{file_content_hash}"
+                            cache_result_sync("saliency", cache_key, sal_res, ttl=86400)
+                    except Exception as err:
+                        logger.error(f"Saliency warmup failed for {filename}: {err}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Batch warmup error on {filename}: {e}", exc_info=True)
+
+        completed += 1
+
+        # CPU Thermal Cooldown Interval
+        if cooldown_ms > 0:
+            time.sleep(cooldown_ms / 1000.0)
+
+    final_status = "cancelled" if cancelled else "completed"
+    final_progress = {
+        "completed": completed,
+        "total": total,
+        "current_file": "Done" if not cancelled else "Cancelled",
+        "status": final_status,
+        "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
+    }
+    if conn:
+        conn.set(f"job_progress_{job_id}", json.dumps(final_progress), ex=86400)
+
+    return final_progress
+

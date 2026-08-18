@@ -1,113 +1,197 @@
-# audiolit-workspace
+# AudioLIT — Interpretability Workbench for Speech & Audio ML
 
 Core monorepo for **AudioLIT** — an interpretability workbench for Automatic Speech
 Recognition (ASR), Speech Emotion Recognition (SER), and Audio Deepfake Detection
 (ADD), extending the **ECHO 1.0** baseline (`AudioLIT-DSE-Project/ECHO`) in place.
 
-Start with [`docs/README.md`](docs/README.md) — it indexes the authoritative
-planning documents (SAD, SRS), the repo's branch model, and known errata —
-before making architectural or scope decisions here.
+**AudioLIT** is an open-source, multi-task interpretability workbench for Automatic Speech Recognition (**ASR**), Speech Emotion Recognition (**SER**), and Audio Deepfake Detection (**ADD**). It extends the **ECHO 1.0** baseline (`AudioLIT-DSE-Project/ECHO`) into a production-grade explanatory environment equipped with:
 
-## Layout
+- **Asynchronous Task Architecture**: Non-blocking RQ (Redis Queue) background execution for heavy PyTorch XAI workloads.
+- **Explainable AI (XAI)**: Grad-CAM attribution heatmaps, Integrated Gradients, and Layer-Head Attention Pair Extraction.
+- **Dataset Management & Warmup**: Automated dataset pre-caching engine for sub-millisecond XAI visualization.
+- **Model Ingestion Registry**: Hugging Face `.safetensors` model resolution for Whisper and Wav2Vec2 architectures.
+- **Forensic Audio Diagnostics**: Acoustic wave profiling, latent space projection, canvas-driven audio perturbations, and quantitative deletion-based faithfulness auditing.
+
+---
+
+## 📂 Repository Layout
 
 ```
 audiolit-workspace/
-├── docs/        # SAD, SRS, conventions (read this first)
-├── Backend/     # FastAPI service, XAI domain engines, RQ worker orchestration
-└── Frontend/    # React 18 + Vite presentation layer & visualization canvas
+├── docs/        # Authoritative project planning documents (SAD, SRS, Errata)
+├── Backend/     # FastAPI backend service, RQ worker fabric, & domain ML engines
+│   ├── app/
+│   │   ├── api/             # FastAPI gateway & HTTP routes (predictions, saliency, datasets)
+│   │   ├── orchestration/   # RQ background workers, Task Orchestrator & warmup runner
+│   │   ├── domain/          # Model loader, XAI engines (Grad-CAM, SHAP), & acoustic profiler
+│   │   ├── infrastructure/  # Redis cache manager, dataset loaders, & settings
+│   │   └── core/            # Redis cache manager & app configuration
+│   └── data/                # Benchmark datasets (Common Voice, RAVDESS, CREMA-D)
+└── Frontend/    # React 18 + Vite web interface with canvas XAI overlays & Plotly projections
+```
+
+For authoritative architectural details, refer to [`docs/README.md`](docs/README.md), [`docs/SAD.md`](docs/SAD.md), and [`docs/SRS.md`](docs/SRS.md).
+
+---
+
+## 🛠️ System Prerequisites
+
+Before running AudioLIT locally, ensure your system has:
+- **Python**: `3.11` or higher
+- **Node.js**: `18.0` or higher (with `npm`)
+- **Redis Server**: `7.0+` (running via Docker or local installation on port `6379`)
+- **FFmpeg**: Required for audio decoding & resampling
+
+---
+
+## 🚀 Step-by-Step Execution Guide
+
+### Step 1: Clone the Repository
+```bash
+git clone https://github.com/AudioLIT-DSE-Project/audiolit-workspace.git
+cd audiolit-workspace
 ```
 
 ---
 
-## Datasets Access
+### Step 2: Start the Redis Infrastructure Broker
+AudioLIT requires a running Redis instance for background RQ task queues, session tracking, and prediction/XAI result caching.
 
-The benchmark evaluation audio datasets (`Common Voice`, `L2-ARCTIC`, `LibriSpeech`, `RAVDESS`, `CREMA-D`, `ESD`, `ASVspoof 2021`) can be accessed through the developers upon request.
-
----
-
-## Quick Start & Local Execution
-
-### Step 1 — Start Redis Container via Docker Compose
-AudioLIT requires Redis for task queuing (RQ) and sub-10ms prediction caching. Use the official project `docker-compose.yml` in `Backend/`:
-
+**Option A: Using Docker (Recommended)**
 ```bash
 cd Backend
 docker compose up -d
 ```
 
-> **Troubleshooting Port Conflicts (Port 6379 occupied):**  
-> If an orphaned container (such as `audiolit-redis`) is already running on port 6379, stop it first before running `docker compose up -d`:
-> ```bash
-> docker stop audiolit-redis
-> cd Backend
-> docker compose up -d
-> ```
-
----
-
-### Step 2 — Start Backend FastAPI Server (Terminal 1)
-Set up the Python virtual environment and launch Uvicorn on port 8000:
-
-**Windows (PowerShell / Command Prompt):**
-```powershell
-cd Backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-.venv\Scripts\uvicorn app.main:app --reload --port 8000
-```
-
-**Linux / macOS:**
+**Option B: Using Local Redis**
+Ensure Redis is running on port `6379`:
 ```bash
-cd Backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+redis-server --port 6379
 ```
 
 ---
 
-### Step 3 — Start Asynchronous Task Workers (Terminal 2)
-Launch the 4 parallel worker processes for `saliency`, `acoustic`, `evaluation`, and `analysis` queues in a separate terminal:
+### Step 3: Setup & Launch the Backend FastAPI Service
 
-**Windows:**
-```powershell
-cd Backend
-.venv\Scripts\python -m app.orchestration.worker all
-```
+1. Create and activate a Python virtual environment:
+   ```bash
+   cd Backend
+   python -m venv .venv
+   
+   # Windows (PowerShell):
+   .venv\Scripts\Activate.ps1
+   # Linux / macOS:
+   source .venv/bin/activate
+   ```
 
-**Linux / macOS:**
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Launch the FastAPI server:
+   ```bash
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+   The backend API will be available at `http://localhost:8000`. You can inspect the OpenAPI documentation at `http://localhost:8000/docs`.
+
+---
+
+### Step 4: Start the Background RQ Workers
+
+AudioLIT delegates heavy PyTorch inference and XAI attribution tasks to background workers so the API remains responsive.
+
+#### Understanding Worker Task Queues
+There are 5 specialized task queues:
+- **`asr`**: Speech-to-Text transcription & accent bias profiling
+- **`ser`**: Speech Emotion Recognition
+- **`add`**: Audio Deepfake Detection
+- **`xai`**: Grad-CAM saliency heatmaps, Integrated Gradients, & attention weights
+- **`mutation`**: Audio perturbation & downstream faithfulness auditing
+
+#### Option 1: Run All Worker Queues in One Terminal (Recommended)
+Launch a unified multi-worker process listening across all queues:
 ```bash
-cd Backend
-source .venv/bin/activate
+# From the Backend/ directory with active .venv:
 python -m app.orchestration.worker all
 ```
+*Note: The unified launcher automatically purges stale Redis locks upon startup to prevent execution deadlocks.*
 
----
-
-### Step 4 — Start Frontend UI Development Server (Terminal 3)
-
+#### Option 2: Run Dedicated Family Workers in Separate Terminals
+For distributed setups or fine-grained resource control:
 ```bash
-cd Frontend
-npm install
-npm run dev
+# Terminal 1: ASR Worker
+python -m app.orchestration.worker asr
+
+# Terminal 2: SER Worker
+python -m app.orchestration.worker ser
+
+# Terminal 3: ADD Worker
+python -m app.orchestration.worker add
+
+# Terminal 4: XAI Worker (Saliency & Attention)
+python -m app.orchestration.worker xai
+
+# Terminal 5: Mutation Worker (Perturbation & Faithfulness)
+python -m app.orchestration.worker mutation
 ```
 
-Open your browser and navigate to: **`http://localhost:5173`** (or `http://localhost:8080`).
+#### Worker Health & Monitoring
+Check worker status and active queue depth via HTTP:
+```bash
+curl http://localhost:8000/health/workers
+```
 
 ---
 
-## Testing Workflow
+### Step 5: Setup & Launch the Frontend Web UI
 
-1. **Task Compatibility Guards:** Select `Whisper Base (ASR)` or `Wav2Vec2 (SER)` in the top toolbar. Notice dataset options dynamically lock to valid task family corpora (`Common Voice` for ASR, `RAVDESS` for SER).
-2. **On-Demand Inference:** Click the **Get Inferences** (`Play` icon) button in the dataset panel to start batch processing. Click **Stop** at any time to halt processing and abort pending requests.
-3. **Spectrogram & Attribution Canvas:** Click any row in the dataset table to inspect STFT spectrograms, $F_0$ pitch contours, attention heatmaps, and ground truth labels.
+1. Open a new terminal and navigate to `Frontend`:
+   ```bash
+   cd Frontend
+   ```
+
+2. Install frontend dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Start the Vite development server:
+   ```bash
+   npm run dev
+   ```
+   Open your browser and navigate to `http://localhost:5173`.
 
 ---
 
-## License
+## ⚡ Dataset Pre-warming & Cache Performance
 
-MIT — see [LICENSE](LICENSE). Incorporates code from ECHO 1.0
-(`AudioLIT-DSE-Project/ECHO`, MIT-licensed, originally by Anas Hussaindeen,
-Chandupa Ambepitiya, and Dewmike Amarasinghe).
+To achieve sub-second XAI visualization on CPU environments, AudioLIT features an automated **Dataset Warmup Engine**:
+
+1. Click **"Warmup Dataset"** in the top navigation bar of the Web UI.
+2. Select a dataset (`Common Voice`, `RAVDESS`, or `CREMA-D`) and specify a sample range (e.g. 100 samples).
+3. The background worker pre-populates Redis with predictions, acoustic profiles, and Grad-CAM saliency heatmaps.
+4. Active progress is displayed in real-time with step badges (`Inference`, `Acoustic`, `Saliency`).
+
+---
+
+## 🤖 Custom Hugging Face Model Integration
+
+AudioLIT supports loading custom fine-tuned models from Hugging Face Hub:
+
+1. **Architecture Requirements**: Must belong to the `whisper` (ASR) or `wav2vec2` (SER/ADD) model families.
+2. **Security Standard**: Weight files **must** be formatted as `.safetensors`. PyTorch pickle checkpoints (`.bin`/`.pkl`) are rejected for security compliance.
+3. **Usage in UI**: Select **"Custom HF Model"** in the model dropdown and enter any valid Hugging Face repository ID (e.g. `openai/whisper-tiny` or `distil-whisper/distil-small.en`).
+
+To programmatically resolve a model via API:
+```bash
+curl -X POST "http://localhost:8000/models/resolve" \
+     -H "Content-Type: application/json" \
+     -d '{"model_id": "distil-whisper/distil-small.en", "revision": "main"}'
+```
+
+---
+
+## 📜 License
+
+MIT — see [LICENSE](LICENSE). Incorporates code from ECHO 1.0 (`AudioLIT-DSE-Project/ECHO`, MIT-licensed, originally by Anas Hussaindeen, Chandupa Ambepitiya, and Dewmike Amarasinghe).
