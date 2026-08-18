@@ -141,7 +141,7 @@ python -m app.orchestration.worker mutation
 #### Worker Health & Monitoring
 Check worker status and active queue depth via HTTP:
 ```bash
-curl http://localhost:8000/api/health/workers
+curl http://localhost:8000/health/workers
 ```
 
 ---
