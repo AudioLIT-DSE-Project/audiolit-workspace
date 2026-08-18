@@ -107,6 +107,7 @@ export const PredictionPanel = ({
   // State for dynamic XAI canvas layer opacity swapping
   const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('saliency');
 
+
   // Handle perturbation completion
   const handlePerturbationComplete = async (result: PerturbationResult) => {
     if (!result.success) {
@@ -205,6 +206,7 @@ export const PredictionPanel = ({
             {showAdvanced ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
           </Button>
         </div>
+
 
         <div className="flex-1 overflow-auto bg-background">
           {/* Analytics Tab Content for Unified RQ Results */}
