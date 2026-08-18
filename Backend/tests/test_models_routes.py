@@ -75,3 +75,20 @@ class TestResolveModel:
 
         assert r.status_code == 502
         assert r.json()["detail"]["code"] == "HUB_UNAVAILABLE"
+
+
+class TestCancelAndActiveModels:
+    @pytest.mark.asyncio
+    async def test_cancel_model_resolution(self, client):
+        r = await client.post("/models/cancel", json={"model_id": "openai/whisper-base"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert "openai/whisper-base" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_get_active_downloads(self, client):
+        r = await client.get("/models/active")
+        assert r.status_code == 200
+        assert "active_downloads" in r.json()
+
