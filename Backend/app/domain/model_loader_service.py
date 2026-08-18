@@ -1107,27 +1107,26 @@ def get_whisper_base_models():
     loaded = _model_registry.get("openai/whisper-base")
     return _whisper_processor_base, loaded.model
 
-def extract_whisper_embeddings(audio_file_path: str, model_size: str = "base") -> np.ndarray:
-    """
-    Extract Whisper encoder embeddings from audio file.
+def extract_whisper_embeddings(audio_file_path: str, model_size_or_id: str = "base") -> np.ndarray:
+    """Extract Whisper encoder embeddings from audio file for builtin or custom HF models.
     Returns pooled encoder hidden states (mean pooling across time dimension).
-
-    Args:
-        audio_file_path: Path to audio file
-        model_size: "base" (only supported size -- whisper-large was removed)
-
-    Returns:
-        numpy array of embeddings (512-dim)
     """
-    # Load audio
     audio, sample_rate = librosa.load(audio_file_path, sr=16000)
     audio = audio.astype(np.float32)
-
-    if model_size != "base":
-        raise ValueError(f"Unsupported model size: {model_size}")
-    processor, model = get_whisper_base_models()
     
-    device = next(model.parameters()).device
+    if model_size_or_id in ("base", "whisper-base", "openai/whisper-base"):
+        processor, model = get_whisper_base_models()
+    else:
+        try:
+            from transformers import WhisperProcessor, WhisperModel
+            processor = WhisperProcessor.from_pretrained(model_size_or_id)
+            model = WhisperModel.from_pretrained(model_size_or_id)
+        except Exception as e:
+            logger.warning("Could not load custom processor/model '%s' for embeddings, falling back to whisper-base: %s", model_size_or_id, e)
+            processor, model = get_whisper_base_models()
+    
+    device = next(model.parameters()).device if hasattr(model, "parameters") else "cpu"
+    model.eval()
     
     # Process audio to log-mel spectrogram
     input_features = processor(audio, sampling_rate=sample_rate, return_tensors="pt").input_features
@@ -1136,14 +1135,11 @@ def extract_whisper_embeddings(audio_file_path: str, model_size: str = "base") -
     with torch.no_grad():
         # Get encoder outputs
         encoder_outputs = model.encoder(input_features)
-        # encoder_outputs.last_hidden_state shape: [batch, time_frames, hidden_size]
         hidden_states = encoder_outputs.last_hidden_state
         
         # Mean pooling across time dimension to get single vector per clip
-        pooled_embeddings = torch.mean(hidden_states, dim=1)  # [batch, hidden_size]
-        
-        # Convert to numpy
-        embeddings = pooled_embeddings.cpu().numpy().squeeze()  # [hidden_size]
+        pooled_embeddings = torch.mean(hidden_states, dim=1)
+        embeddings = pooled_embeddings.cpu().numpy().squeeze()
     
     return embeddings
 
