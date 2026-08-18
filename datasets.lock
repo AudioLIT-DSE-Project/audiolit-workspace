@@ -1,0 +1,6 @@
+# AudioLIT dataset pin.
+# Committed on purpose: a results table is only reproducible if the code
+# commit names the data commit. Do not replace the sha with a branch name.
+remote:   hf://rathishTharusha/audiolit-corpora
+revision: 01b312a194881e1e78d5fa7bab15c7c9d6d6d349
+recorded: 2026-08-17

@@ -1,10 +1,8 @@
 # AudioLIT — Interpretability Workbench for Speech & Audio ML
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https.python.org)
-[![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg)](https://fastapi.tiangolo.com)
-[![React 18](https://img.shields.io/badge/frontend-React%2018%20%2B%20Vite-61dafb.svg)](https://reactjs.org)
-[![Redis Queue](https://img.shields.io/badge/task%20fabric-RQ%20%2B%20Redis-red.svg)](https://python-rq.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Core monorepo for **AudioLIT** — an interpretability workbench for Automatic Speech
+Recognition (ASR), Speech Emotion Recognition (SER), and Audio Deepfake Detection
+(ADD), extending the **ECHO 1.0** baseline (`AudioLIT-DSE-Project/ECHO`) in place.
 
 **AudioLIT** is an open-source, multi-task interpretability workbench for Automatic Speech Recognition (**ASR**), Speech Emotion Recognition (**SER**), and Audio Deepfake Detection (**ADD**). It extends the **ECHO 1.0** baseline (`AudioLIT-DSE-Project/ECHO`) into a production-grade explanatory environment equipped with:
 
