@@ -776,6 +776,18 @@ def run_batch_dataset_warmup_task(
 
     completed = 0
     cancelled = False
+    start_time = time.time()
+
+    def format_eta(seconds: int) -> str:
+        if seconds <= 0:
+            return "Calculating..."
+        if seconds < 60:
+            return f"{seconds}s"
+        mins, secs = divmod(seconds, 60)
+        if mins < 60:
+            return f"{mins}m {secs}s"
+        hours, mins = divmod(mins, 60)
+        return f"{hours}h {mins}m"
 
     for i, row in enumerate(rows):
         # Check cancellation flag in Redis
@@ -791,6 +803,12 @@ def run_batch_dataset_warmup_task(
         # Function helper to push subtask updates to Redis
         def update_subtask(subtask_label: str):
             if conn:
+                elapsed = time.time() - start_time
+                avg_per_file = elapsed / max(i, 1) if i > 0 else 0
+                remaining = total - i
+                eta_sec = int(avg_per_file * remaining) if i > 0 else 0
+                eta_str = format_eta(eta_sec) if i > 0 else "Calculating..."
+
                 p_data = {
                     "completed": i,
                     "total": total,
@@ -798,6 +816,8 @@ def run_batch_dataset_warmup_task(
                     "active_subtask": subtask_label,
                     "status": "running",
                     "percent": round((i / total) * 100, 1) if total > 0 else 0,
+                    "eta_seconds": eta_sec,
+                    "eta_formatted": eta_str,
                 }
                 conn.set(f"job_progress_{job_id}", json.dumps(p_data), ex=86400)
 

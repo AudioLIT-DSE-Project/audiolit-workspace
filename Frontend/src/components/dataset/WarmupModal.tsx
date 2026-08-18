@@ -18,6 +18,8 @@ export interface WarmupProgress {
   active_subtask?: string;
   status: string;
   percent: number;
+  eta_seconds?: number;
+  eta_formatted?: string;
 }
 
 interface WarmupModalProps {
@@ -135,6 +137,14 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
                   {warmupProgress?.active_subtask || "Processing..."}
                 </span>
               </div>
+              {isRunning && warmupProgress?.eta_formatted && (
+                <div className="flex justify-between items-center">
+                  <span className="text-muted-foreground">Estimated Time Remaining:</span>
+                  <span className="font-mono text-amber-600 dark:text-amber-400 font-semibold bg-amber-500/10 px-1.5 py-0.5 rounded">
+                    ~{warmupProgress.eta_formatted}
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between text-muted-foreground pt-0.5">
                 <span>Thermal Protection:</span>
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium">100ms Safety Cooldown Active</span>
