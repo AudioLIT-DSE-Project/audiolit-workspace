@@ -41,3 +41,17 @@ async def cache_result(model: str, h: str, payload: dict, ttl: int = 6*60*60) ->
 async def get_result(model: str, h: str) -> dict | None:
     raw = await redis.get(k_result(model, h))
     return json.loads(raw) if raw else None
+
+def cache_result_sync(model: str, h: str, payload: dict, ttl: int = 6*60*60) -> None:
+    from app.infrastructure.rq_connection import get_redis_connection
+    conn = get_redis_connection()
+    conn.set(k_result(model, h), json.dumps(payload), ex=ttl)
+
+def get_result_sync(model: str, h: str) -> dict | None:
+    from app.infrastructure.rq_connection import get_redis_connection
+    conn = get_redis_connection()
+    raw = conn.get(k_result(model, h))
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    return json.loads(raw) if raw else None
+

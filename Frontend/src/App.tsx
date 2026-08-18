@@ -7,6 +7,9 @@ import { ThemeProvider } from "next-themes";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 
+import { ModelRegistryProvider } from "@/context/ModelRegistryContext";
+import { ModelDownloadBanner } from "@/components/layout/ModelDownloadBanner";
+
 const queryClient = new QueryClient();
 
 const App = () => (
@@ -14,17 +17,20 @@ const App = () => (
   // `attribute="class"` matches tailwind.config.ts's `darkMode: ["class"]`.
   <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <Toaster />
-        <Sonner />
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </BrowserRouter>
-      </TooltipProvider>
+      <ModelRegistryProvider>
+        <TooltipProvider>
+          <Toaster />
+          <Sonner />
+          <ModelDownloadBanner />
+          <BrowserRouter>
+            <Routes>
+              <Route path="/" element={<Index />} />
+              {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </BrowserRouter>
+        </TooltipProvider>
+      </ModelRegistryProvider>
     </QueryClientProvider>
   </ThemeProvider>
 );
