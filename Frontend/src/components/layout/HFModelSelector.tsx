@@ -11,29 +11,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { AlertCircle, CheckCircle2, Sparkles } from "lucide-react";
-import { API_BASE } from "@/lib/api";
+import { AlertCircle, CheckCircle2, Sparkles, Loader2, XCircle } from "lucide-react";
+import { useModelRegistry } from "@/context/ModelRegistryContext";
 
-interface ResolvedModel {
-  model_id: string;
-  revision: string;
-  family: string;
-  weights_sha256: string;
-  available_layers: string[];
-}
-
-interface ResolveError {
-  code: string;
-  message: string;
-}
-
-// SRS Use Case 5: "An unsafe file, an unsupported model, or a download
-// problem each produce a distinct, clear message" - human-readable labels
-// for the typed error codes POST /models/resolve returns (LIT-231).
 const ERROR_LABELS: Record<string, string> = {
   UNSUPPORTED_ARCHITECTURE: "Unsupported model architecture",
   UNSAFE_ARTIFACT: "Unsafe or missing safetensors weights",
   HUB_UNAVAILABLE: "Hugging Face Hub is unreachable",
+  CANCELLED: "Resolution cancelled",
 };
 
 interface HFModelSelectorProps {
@@ -42,49 +27,22 @@ interface HFModelSelectorProps {
 
 export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolved }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [modelId, setModelId] = useState("");
-  const [revision, setRevision] = useState("main");
-  const [loading, setLoading] = useState(false);
-  const [resolved, setResolved] = useState<ResolvedModel | null>(null);
-  const [error, setError] = useState<ResolveError | null>(null);
+  const [inputModelId, setInputModelId] = useState("");
+  const [inputRevision, setInputRevision] = useState("main");
+
+  const { status, resolvedModel, error, resolveModel, cancelResolution } = useModelRegistry();
 
   const handleResolve = async () => {
-    if (!modelId.trim()) return;
-    setLoading(true);
-    setError(null);
-    setResolved(null);
-
-    try {
-      const response = await fetch(`${API_BASE}/models/resolve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model_id: modelId.trim(), revision: revision.trim() || "main" }),
-      });
-
-      const body = await response.json();
-      if (!response.ok) {
-        const detail = body?.detail;
-        if (detail && typeof detail === "object" && detail.code) {
-          setError({ code: detail.code, message: detail.message || "Failed to resolve model" });
-        } else {
-          setError({ code: "ERROR", message: typeof detail === "string" ? detail : "Failed to resolve model" });
-        }
-        return;
-      }
-      setResolved(body as ResolvedModel);
-      if (onModelResolved) {
-        onModelResolved((body as ResolvedModel).model_id);
-      }
-    } catch (err) {
-      setError({ code: "ERROR", message: err instanceof Error ? err.message : "Failed to resolve model" });
-    } finally {
-      setLoading(false);
+    if (!inputModelId.trim()) return;
+    const res = await resolveModel(inputModelId.trim(), inputRevision.trim() || "main");
+    if (res && onModelResolved) {
+      onModelResolved(res.model_id);
     }
   };
 
   const handleUseModel = () => {
-    if (resolved && onModelResolved) {
-      onModelResolved(resolved.model_id);
+    if (resolvedModel && onModelResolved) {
+      onModelResolved(resolvedModel.model_id);
       setIsOpen(false);
     }
   };
@@ -113,8 +71,9 @@ export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolve
             <Input
               id="hf-model-id"
               placeholder="e.g. openai/whisper-base"
-              value={modelId}
-              onChange={(e) => setModelId(e.target.value)}
+              value={inputModelId}
+              onChange={(e) => setInputModelId(e.target.value)}
+              disabled={status === "downloading"}
               className="h-8 text-xs"
             />
           </div>
@@ -123,20 +82,42 @@ export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolve
             <Input
               id="hf-revision"
               placeholder="main"
-              value={revision}
-              onChange={(e) => setRevision(e.target.value)}
+              value={inputRevision}
+              onChange={(e) => setInputRevision(e.target.value)}
+              disabled={status === "downloading"}
               className="h-8 text-xs"
             />
           </div>
 
-          <Button
-            onClick={handleResolve}
-            disabled={loading || !modelId.trim()}
-            size="sm"
-            className="w-full h-8 text-xs"
-          >
-            {loading ? "Resolving..." : "Resolve Model"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={handleResolve}
+              disabled={status === "downloading" || !inputModelId.trim()}
+              size="sm"
+              className="flex-1 h-8 text-xs"
+            >
+              {status === "downloading" ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                  Resolving...
+                </>
+              ) : (
+                "Resolve Model"
+              )}
+            </Button>
+
+            {status === "downloading" && (
+              <Button
+                onClick={cancelResolution}
+                variant="destructive"
+                size="sm"
+                className="h-8 text-xs px-3 bg-destructive/90 hover:bg-destructive"
+              >
+                <XCircle className="h-3.5 w-3.5 mr-1" />
+                Stop
+              </Button>
+            )}
+          </div>
 
           {error && (
             <div className="flex items-start gap-2 p-2.5 rounded border border-destructive/30 bg-destructive/5 text-xs">
@@ -150,7 +131,7 @@ export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolve
             </div>
           )}
 
-          {resolved && (
+          {status === "resolved" && resolvedModel && (
             <div className="p-2.5 rounded border border-primary/30 bg-primary/5 text-xs space-y-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -162,16 +143,16 @@ export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolve
                 </Button>
               </div>
               <div className="flex flex-wrap gap-1.5">
-                <Badge variant="outline" className="text-[10px]">family: {resolved.family}</Badge>
+                <Badge variant="outline" className="text-[10px]">family: {resolvedModel.family}</Badge>
                 <Badge variant="outline" className="text-[10px]">
-                  revision: {resolved.revision.slice(0, 8)}
+                  revision: {resolvedModel.revision.slice(0, 8)}
                 </Badge>
                 <Badge variant="outline" className="text-[10px]">
-                  hooks: {resolved.available_layers.length} layers
+                  hooks: {resolvedModel.available_layers.length} layers
                 </Badge>
               </div>
               <div className="text-muted-foreground font-mono text-[10px] break-all">
-                sha256:{resolved.weights_sha256.slice(0, 16)}...
+                sha256:{resolvedModel.weights_sha256.slice(0, 16)}...
               </div>
             </div>
           )}

@@ -20,6 +20,7 @@ import { useTheme } from "next-themes";
 import { API_BASE } from "@/lib/api";
 import { CustomDatasetManager } from "@/components/dataset/CustomDatasetManager";
 import { HFModelSelector } from "./HFModelSelector";
+import { useModelRegistry } from "@/context/ModelRegistryContext";
 
 export interface SelectedTasks {
   asr: boolean;
@@ -117,8 +118,8 @@ export const Toolbar = ({
   const { resolvedTheme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+  const { resolvedCustomModels } = useModelRegistry();
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
-  const [resolvedCustomModels, setResolvedCustomModels] = useState<string[]>([]);
   // Built-in corpora (LIT-235) - was a hardcoded 2-entry list disconnected
   // from the backend's actual dataset registry; now fetched for real.
   const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess", "l2-arctic", "librispeech", "crema-d", "esd"]);
@@ -126,7 +127,6 @@ export const Toolbar = ({
   const activeModelFamily = getModelTaskFamily(model);
 
   const handleCustomModelResolved = (modelId: string) => {
-    setResolvedCustomModels((prev) => Array.from(new Set([...prev, modelId])));
     onModelChange(modelId);
   };
 

@@ -231,6 +231,8 @@ def download_and_load(
     )
 
 
+import threading
+
 class ModelRegistry:
     """Lazy-loading, LRU-bounded cache of Whisper/Wav2Vec2 models.
 
@@ -242,29 +244,74 @@ class ModelRegistry:
     def __init__(self, max_cache_size: int = 4):
         self.max_cache_size = max_cache_size
         self._cache: "OrderedDict[str, LoadedModel]" = OrderedDict()
+        self._active_downloads: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def register_download_start(self, model_id: str) -> None:
+        with self._lock:
+            self._active_downloads[model_id] = {
+                "model_id": model_id,
+                "status": "downloading",
+                "start_time": time.time(),
+                "cancelled": False,
+            }
+
+    def cancel_download(self, model_id: str) -> bool:
+        with self._lock:
+            if model_id in self._active_downloads:
+                self._active_downloads[model_id]["cancelled"] = True
+                self._active_downloads[model_id]["status"] = "cancelled"
+
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("model_registry: cancelled download and executed memory cleanup for %s", model_id)
+        return True
+
+    def register_download_end(self, model_id: str) -> None:
+        with self._lock:
+            self._active_downloads.pop(model_id, None)
+
+    def is_cancelled(self, model_id: str) -> bool:
+        with self._lock:
+            download_info = self._active_downloads.get(model_id)
+            return download_info.get("cancelled", False) if download_info else False
+
+    def get_active_downloads(self) -> List[dict]:
+        with self._lock:
+            return list(self._active_downloads.values())
 
     def get(self, model_id: str, revision: str = "main", model_class: Optional[type] = None) -> LoadedModel:
-        """Get a loaded model, resolving `revision` to a pinned commit sha first.
+        """Get a loaded model, resolving `revision` to a pinned commit sha first."""
+        self.register_download_start(model_id)
+        try:
+            resolved = resolve_model_id(model_id, revision=revision)
+            if self.is_cancelled(model_id):
+                raise ModelRegistryError("CANCELLED", f"Model resolution for '{model_id}' was cancelled by user.")
 
-        Always re-resolves (a cheap, circuit-breaker-guarded metadata call) so
-        a moving ref like "main" is checked against the cache by its actual
-        current commit, not by the literal string the caller passed -- caching
-        by the unresolved string would mean a mutable ref never hits the cache
-        and silently re-downloads on every call.
-        """
-        resolved = resolve_model_id(model_id, revision=revision)
-        class_suffix = f"#{model_class.__name__}" if model_class else ""
-        key = f"{resolved.model_id}@{resolved.revision}{class_suffix}"
+            class_suffix = f"#{model_class.__name__}" if model_class else ""
+            key = f"{resolved.model_id}@{resolved.revision}{class_suffix}"
 
-        cached = self._cache.get(key)
-        if cached is not None:
-            self._cache.move_to_end(key)
-            return cached
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
 
-        loaded = download_and_load(resolved, model_class=model_class)
-        self._cache[key] = loaded
-        self._evict_if_needed()
-        return loaded
+            loaded = download_and_load(resolved, model_class=model_class)
+            if self.is_cancelled(model_id):
+                del loaded
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                raise ModelRegistryError("CANCELLED", f"Model loading for '{model_id}' was cancelled by user.")
+
+            self._cache[key] = loaded
+            self._evict_if_needed()
+            return loaded
+        finally:
+            self.register_download_end(model_id)
 
     def _evict_if_needed(self) -> None:
         while len(self._cache) > self.max_cache_size:
@@ -274,6 +321,8 @@ class ModelRegistry:
             except Exception:
                 pass
             del evicted.model
+            import gc
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -282,3 +331,4 @@ class ModelRegistry:
 
 
 registry = ModelRegistry()
+
