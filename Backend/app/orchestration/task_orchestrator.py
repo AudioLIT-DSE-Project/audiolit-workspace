@@ -869,10 +869,13 @@ def run_batch_dataset_warmup_task(
                         if pred is not None:
                             cache_payload = {"prediction": pred, "status": "completed"}
                             # Multi-key caching so all prediction/attention endpoints hit cache
+                            cache_result_sync(model, f"v2_{model}_{file_path_hash}", cache_payload, ttl=86400)
+                            cache_result_sync(model, f"v2_{model}_{file_content_hash}", cache_payload, ttl=86400)
                             cache_result_sync(model, f"{model}_attention_v2_{file_path_hash}", cache_payload, ttl=86400)
                             cache_result_sync(model, f"{model}_attention_v2_{file_content_hash}", cache_payload, ttl=86400)
                             cache_result_sync(model, f"{model}_{file_path_hash}", cache_payload, ttl=86400)
                             cache_result_sync("predictions", f"v2_{model}_{file_path_hash}", cache_payload, ttl=86400)
+                            cache_result_sync("predictions", f"v2_{model}_{file_content_hash}", cache_payload, ttl=86400)
                             if "wav2vec" in model.lower():
                                 cache_result_sync("wav2vec2", f"wav2vec2_detailed_{file_path_hash}", cache_payload, ttl=86400)
                     except Exception as err:

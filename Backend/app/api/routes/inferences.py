@@ -316,10 +316,19 @@ async def get_whisper_accuracy(request: Request):
             raise HTTPException(status_code=404, detail="Audio file not found")
         
         # Create cache key and get cached prediction
-        file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-        cache_key = f"v2_{model}_{file_content_hash}"
+        file_path_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
+        file_stat = resolved_path.stat()
+        file_content_hash = hashlib.md5(f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()).hexdigest()
         
-        cached_result = await get_result(model, cache_key)
+        cache_key = f"v2_{model}_{file_path_hash}"
+        cached_result = (
+            await get_result(model, f"v2_{model}_{file_path_hash}") or
+            await get_result(model, f"v2_{model}_{file_content_hash}") or
+            await get_result(model, f"{model}_attention_v2_{file_path_hash}") or
+            await get_result(model, f"{model}_attention_v2_{file_content_hash}") or
+            await get_result(model, f"{model}_{file_path_hash}") or
+            await get_result("predictions", f"v2_{model}_{file_path_hash}")
+        )
         
         if cached_result is None:
             # If not cached, run inference first
