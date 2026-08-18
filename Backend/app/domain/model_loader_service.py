@@ -1,5 +1,6 @@
 import logging
 import torch
+import transformers
 from transformers import (
     pipeline,
     Wav2Vec2FeatureExtractor,
@@ -20,6 +21,7 @@ import umap
 
 from app.domain.model_registry_service import registry as _model_registry
 
+transformers.logging.set_verbosity_error()
 logger = logging.getLogger(__name__)
 
 
