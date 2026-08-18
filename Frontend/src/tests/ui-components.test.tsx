@@ -294,7 +294,7 @@ describe('Audio Component Testing', () => {
       
       const MockModelSelector = () => {
         const [selectedModel, setSelectedModel] = React.useState('whisper-base');
-        const models = ['whisper-base', 'whisper-large', 'wav2vec2'];
+        const models = ['whisper-base', 'wav2vec2', 'melody-machine', 'wav2vec2-add'];
         
         return (
           <div>

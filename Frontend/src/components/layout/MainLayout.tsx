@@ -42,6 +42,15 @@ interface WhisperPrediction {
   word_count_truth: number;
 }
 
+interface AddPrediction {
+  predicted_label: string; // "bona-fide" | "spoof"
+  synthetic_probability: number;
+  confidence: number;
+  probabilities: Record<string, number>;
+}
+
+const ADD_MODEL_KEYS = ["melody-machine", "wav2vec2-add"];
+
 export const MainLayout = () => {
   const [apiData, setApiData] = useState<unknown>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
@@ -59,6 +68,7 @@ export const MainLayout = () => {
   // Prediction state
   const [wav2vecPrediction, setWav2vecPrediction] = useState<Wav2Vec2Prediction | null>(null);
   const [whisperPrediction, setWhisperPrediction] = useState<WhisperPrediction | null>(null);
+  const [addPrediction, setAddPrediction] = useState<AddPrediction | null>(null);
   const [isLoadingPredictions, setIsLoadingPredictions] = useState(false);
   const [predictionError, setPredictionError] = useState<string | null>(null);
   const [perturbedPredictions, setPerturbedPredictions] = useState<Wav2Vec2Prediction | WhisperPrediction | null>(null);
@@ -67,6 +77,7 @@ export const MainLayout = () => {
   // Refs to track ongoing requests and prevent duplicates
   const wav2vecRequestRef = useRef<AbortController | null>(null);
   const whisperRequestRef = useRef<AbortController | null>(null);
+  const addRequestRef = useRef<AbortController | null>(null);
   
   // RQ Task State (WebSocket listener)
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -79,6 +90,7 @@ export const MainLayout = () => {
     setAvailableFiles([]);
     setWav2vecPrediction(null);
     setWhisperPrediction(null);
+    setAddPrediction(null);
     setPredictionError(null);
     setPerturbationResult(null);
   }, [dataset]);
@@ -88,6 +100,7 @@ export const MainLayout = () => {
     setPerturbationResult(null);
     setWav2vecPrediction(null);
     setWhisperPrediction(null);
+    setAddPrediction(null);
     setPerturbedPredictions(null);
     setPredictionError(null);
   }, [selectedFile, selectedEmbeddingFile]);
@@ -294,7 +307,72 @@ export const MainLayout = () => {
     fetchWhisperPrediction();
     return () => { if (whisperRequestRef.current) { whisperRequestRef.current.abort(); whisperRequestRef.current = null; } };
   }, [selectedFile, selectedEmbeddingFile, model, dataset]);
-  
+
+  // Fetch deepfake (ADD) prediction for dataset-browsing selections only,
+  // mirroring the wav2vec2/whisper effects above. /inferences/run is a
+  // generic dict dispatch (inference_service.MODEL_FUNCTIONS), so this works
+  // for both selectable ADD checkpoints (melody-machine, wav2vec2-add) once
+  // they're registered there.
+  useEffect(() => {
+    const fetchAddPrediction = async () => {
+      const isUploadedFile = !!selectedFile?.file_path && (
+        selectedFile.file_path.includes('uploads/') ||
+        selectedFile.file_path.startsWith('uploads/') ||
+        selectedFile.message === "Perturbed file" ||
+        selectedFile.message === "File uploaded successfully" ||
+        selectedFile.message === "File uploaded and processed successfully"
+      ) && !selectedFile.message.includes("Selected from");
+
+      if (!ADD_MODEL_KEYS.includes(model) || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
+        setAddPrediction(null);
+        setPredictionError(null);
+        setIsLoadingPredictions(false);
+        return;
+      }
+
+      if (addRequestRef.current) addRequestRef.current.abort();
+      const abortController = new AbortController();
+      addRequestRef.current = abortController;
+
+      setIsLoadingPredictions(true);
+      setPredictionError(null);
+
+      try {
+        const requestBody: any = { model };
+        if (selectedFile) {
+          requestBody.dataset = dataset;
+          requestBody.dataset_file = selectedFile.filename;
+        } else if (selectedEmbeddingFile && dataset) {
+          requestBody.dataset = dataset;
+          requestBody.dataset_file = selectedEmbeddingFile;
+        }
+
+        const response = await fetch(`${API_BASE}/inferences/run`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: 'include',
+          body: JSON.stringify(requestBody),
+          signal: abortController.signal
+        });
+
+        if (!response.ok) throw new Error(`Failed to fetch prediction: ${response.status}`);
+        const prediction = await response.json();
+        setAddPrediction(prediction);
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        const errorMessage = err instanceof Error ? err.message : "Unknown error";
+        setPredictionError(errorMessage);
+        console.error("Error fetching deepfake prediction:", err);
+      } finally {
+        setIsLoadingPredictions(false);
+        if (addRequestRef.current === abortController) addRequestRef.current = null;
+      }
+    };
+
+    fetchAddPrediction();
+    return () => { if (addRequestRef.current) { addRequestRef.current.abort(); addRequestRef.current = null; } };
+  }, [selectedFile, selectedEmbeddingFile, model, dataset]);
+
   const effectiveDataset = (() => {
     if (dataset.startsWith('custom:')) return dataset;
     if (uploadedFiles && uploadedFiles.length > 0) return "custom";
@@ -319,13 +397,19 @@ export const MainLayout = () => {
     );
     if (tasks.length === 0) return;
 
+    // Route the Model dropdown's chosen ADD checkpoint into the "add" task
+    // (task_orchestrator.add_task defaults to melody-machine when omitted).
+    const model_ids: Record<string, string> = {};
+    if (ADD_MODEL_KEYS.includes(model)) model_ids.add = model;
+
     try {
       const response = await fetch(`${API_BASE}/api/inference/multitask`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audio_ref: file.file_path,
-          tasks
+          tasks,
+          ...(Object.keys(model_ids).length > 0 ? { model_ids } : {}),
         }),
       });
       if (response.ok) {
@@ -442,10 +526,11 @@ export const MainLayout = () => {
 
             <PanelResizeHandle className="w-1 bg-border hover:bg-primary/20 transition-colors" />
             <Panel defaultSize={25} minSize={20}>
-              <DatapointEditorPanel 
+              <DatapointEditorPanel
                 selectedFile={selectedFile} selectedEmbeddingFile={selectedEmbeddingFile} dataset={effectiveDataset}
                 originalDataset={dataset} perturbationResult={perturbationResult} predictionMap={predictionMap}
                 model={model} wav2vecPrediction={wav2vecPrediction} whisperPrediction={whisperPrediction}
+                addPrediction={addPrediction}
                 perturbedPredictions={perturbedPredictions} isLoadingPredictions={isLoadingPredictions}
                 isLoadingPerturbed={isLoadingPerturbed} predictionError={predictionError}
               />

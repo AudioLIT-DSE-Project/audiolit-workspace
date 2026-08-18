@@ -8,11 +8,9 @@ from pathlib import Path
 from captum.attr import IntegratedGradients, GradientShap, Lime
 from app.domain.model_loader_service import (
     transcribe_whisper_base,
-    transcribe_whisper_large,
     transcribe_whisper_with_timestamps,
     predict_emotion_wave2vec,
     get_whisper_base_models,
-    get_whisper_large_models,
 )
 import app.domain.model_loader_service as model_loader_service
 
@@ -21,8 +19,17 @@ MAX_SALIENCY_SECONDS = int(os.getenv("MAX_SALIENCY_SECONDS", "12"))  # cap analy
 MAX_SALIENCY_SECONDS_SHAP = int(os.getenv("MAX_SALIENCY_SECONDS_SHAP", "6"))  # stricter for SHAP
 SALIENCY_SHAP_SAMPLES = int(os.getenv("SALIENCY_SHAP_SAMPLES", "8"))
 
+# ADD model keys (model_loader_service._ADD_MODEL_REGISTRY) checked before the
+# generic "wav2vec" substring below -- "wav2vec2-add" would otherwise match the
+# wav2vec2 (SER) branch and silently run saliency against the wrong model's
+# weights instead of being rejected as unsupported.
+_ADD_MODEL_KEYS = ("melody-machine", "wav2vec2-add")
+
+
 def detect_model_type(model: str) -> str:
-    if "whisper" in model.lower():
+    if model in _ADD_MODEL_KEYS or "deepfake" in model.lower():
+        return "add"
+    elif "whisper" in model.lower():
         return "whisper"
     elif "wav2vec" in model.lower():
         return "wav2vec2"
@@ -56,11 +63,8 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
             # Keep only chunks inside the window
             chunks = [c for c in chunks if c.get("timestamp", [0, 0])[0] < max_seconds]
     
-    if model_size == "base":
-        processor, model = get_whisper_base_models()
-    else:
-        processor, model = get_whisper_large_models()
-    
+    processor, model = get_whisper_base_models()
+
     device = next(model.parameters()).device
     input_features = processor(audio, sampling_rate=16000, return_tensors="pt").input_features
     input_features = input_features.to(device)
@@ -549,12 +553,15 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
 
 def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
     model_type = detect_model_type(model)
-    
+
     if model_type == "whisper":
-        model_size = "base" if "base" in model else "large"
-        return generate_whisper_saliency(audio_file_path, model_size, method, existing_prediction)
+        return generate_whisper_saliency(audio_file_path, "base", method, existing_prediction)
     elif model_type == "wav2vec2":
         return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
+    elif model_type == "add":
+        raise ValueError(
+            f"Saliency/Grad-CAM is not yet supported for deepfake-detection models ({model})."
+        )
     else:
         raise ValueError(f"Unsupported model: {model}")
 

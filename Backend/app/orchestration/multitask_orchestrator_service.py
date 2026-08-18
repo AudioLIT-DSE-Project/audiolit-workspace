@@ -28,7 +28,6 @@ from ..domain.model_loader_service import (
     predict_deepfake,
     predict_ser,
     transcribe_whisper_base,
-    transcribe_whisper_large,
 )
 
 ASR_QUEUE_NAME = "multitask_asr"
@@ -37,15 +36,14 @@ ADD_QUEUE_NAME = "multitask_add"
 AGGREGATOR_QUEUE_NAME = "multitask_aggregator"
 
 
-def run_asr_job(file_path: str, model: str = "whisper-base") -> dict[str, Any]:
+def run_asr_job(file_path: str) -> dict[str, Any]:
     """Real Whisper transcription, run as an RQ child job."""
     conn = get_redis_connection()
     job = get_current_job()
     if job is not None:
         _publish_progress(conn, job.id, "asr", 0.5)
 
-    transcribe = transcribe_whisper_large if model == "whisper-large" else transcribe_whisper_base
-    transcript = transcribe(file_path)
+    transcript = transcribe_whisper_base(file_path)
 
     if job is not None:
         _publish_progress(conn, job.id, "asr", 1.0)
@@ -102,7 +100,7 @@ def aggregate_multitask(child_job_ids: list[str]) -> dict[str, Any]:
     return {"succeeded": succeeded, "failed": failed}
 
 
-def enqueue_multitask(file_path: str, model: str = "whisper-base") -> dict[str, Any]:
+def enqueue_multitask(file_path: str) -> dict[str, Any]:
     """Dispatch ASR + SER + ADD as parallel child jobs, one queue per task
     family (SAD §6.1: "one worker for each kind of model... so each worker
     only ever needs to hold one model in memory"), then an aggregator job
@@ -111,7 +109,7 @@ def enqueue_multitask(file_path: str, model: str = "whisper-base") -> dict[str, 
     conn = get_redis_connection()
 
     asr_job = Queue(ASR_QUEUE_NAME, connection=conn).enqueue(
-        run_asr_job, file_path=file_path, model=model, retry=CHILD_JOB_RETRY
+        run_asr_job, file_path=file_path, retry=CHILD_JOB_RETRY
     )
     ser_job = Queue(SER_QUEUE_NAME, connection=conn).enqueue(
         run_ser_job, file_path=file_path, retry=CHILD_JOB_RETRY

@@ -19,9 +19,10 @@ from app.domain.model_loader_service import (
     extract_whisper_attention_pairs,
     extract_whisper_embeddings,
     extract_wav2vec2_embeddings,
+    extract_add_embeddings,
 )
 from app.infrastructure.dataset_service import resolve_file
-from app.orchestration.inference_service import run_inference, extract_single_embedding
+from app.orchestration.inference_service import run_inference, extract_single_embedding, ADD_MODEL_KEYS
 from app.infrastructure.redis import get_result, cache_result
 from app.api.dependencies import get_session_id
 
@@ -787,10 +788,11 @@ async def extract_embeddings_endpoint(
             else:
                 # Extract embeddings based on model type
                 if model.startswith("whisper"):
-                    model_size = "base" if "base" in model else "large"
-                    embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model_size)
+                    embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), "base")
                 elif model == "wav2vec2":
                     embedding = await asyncio.to_thread(extract_wav2vec2_embeddings, str(resolved_path))
+                elif model in ADD_MODEL_KEYS:
+                    embedding = await asyncio.to_thread(extract_add_embeddings, str(resolved_path), model)
                 else:
                     raise HTTPException(status_code=400, detail=f"Embedding extraction not supported for model: {model}")
                 
@@ -1106,8 +1108,7 @@ async def get_whisper_with_attention(
     
     # Get transcription with attention
     try:
-        model_size = "base" if "base" in model else "large"
-        result = await asyncio.to_thread(transcribe_whisper_with_attention, str(resolved_path), model_size)
+        result = await asyncio.to_thread(transcribe_whisper_with_attention, str(resolved_path), "base")
         
         # Cache the result
         await cache_result(model, cache_key, {"prediction": result}, ttl=6*60*60)
@@ -1215,7 +1216,7 @@ async def extract_attention_pairs_endpoint(
             return cached_result
         
         # Extract attention pairs using your existing infrastructure
-        model_size = "base" if "base" in model else "large"
+        model_size = "base"
         
         # Use your existing attention function as base
         attention_result = transcribe_whisper_with_attention(str(resolved_path), model_size)

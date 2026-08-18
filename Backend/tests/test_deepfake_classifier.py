@@ -98,3 +98,24 @@ class TestPredictDeepfake:
         _install_fake(monkeypatch, {"0": "real", "1": "fake"}, [0.1, 3.0])
         out = predict_deepfake(str(clip))
         assert out["predicted_label"] == DEEPFAKE_SPOOF
+
+
+class TestSecondAddCheckpoint:
+    """model_key="wav2vec2-add" must use its own cache entry, independent of
+    the default (MelodyMachine) globals mocked via _install_fake above."""
+
+    def test_uses_extra_cache_not_default_globals(self, monkeypatch, clip):
+        # Default-model globals stay unset/mocked to something that would fail
+        # loudly if wrongly consulted for the second checkpoint.
+        monkeypatch.setattr(ml, "add_feature_extractor", None)
+        monkeypatch.setattr(ml, "add_model", None)
+
+        gustking_id = ml._ADD_MODEL_REGISTRY["wav2vec2-add"]
+        fake_model = _FakeModel({0: "real", 1: "fake"}, [0.1, 3.0])
+        monkeypatch.setitem(
+            ml._add_model_extra_cache, gustking_id, (_fake_feature_extractor, fake_model)
+        )
+
+        out = predict_deepfake(str(clip), model_key="wav2vec2-add")
+
+        assert out["predicted_label"] == DEEPFAKE_SPOOF
