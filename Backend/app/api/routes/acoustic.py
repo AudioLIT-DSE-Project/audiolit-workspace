@@ -50,6 +50,16 @@ def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> 
     if not resolved_path.exists():
         raise HTTPException(status_code=404, detail=f"Audio file not found: {resolved_path}")
 
+    import hashlib
+    from app.infrastructure.redis import get_result_sync, cache_result_sync
+    file_path_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
+    file_stat = resolved_path.stat()
+    file_content_hash = hashlib.md5(f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()).hexdigest()
+
+    cached = get_result_sync("acoustic", f"acoustic_profile_{file_path_hash}") or get_result_sync("acoustic", f"acoustic_profile_{file_content_hash}")
+    if cached:
+        return cached
+
     try:
         audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
         if audio.ndim > 1:
@@ -58,7 +68,9 @@ def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> 
         raise HTTPException(status_code=500, detail=f"Failed to load audio file: {e}")
 
     try:
-        return extract_acoustic_profile(audio, sr)
+        prof = extract_acoustic_profile(audio, sr)
+        cache_result_sync("acoustic", f"acoustic_profile_{file_path_hash}", prof, ttl=86400)
+        return prof
     except Exception as e:
         logger.error("Acoustic profiling failed for %s: %s", resolved_path, e)
         raise HTTPException(status_code=500, detail=f"Acoustic profiling failed: {e}")
