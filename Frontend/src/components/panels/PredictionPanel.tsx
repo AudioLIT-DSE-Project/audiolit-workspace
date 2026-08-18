@@ -210,7 +210,7 @@ export const PredictionPanel = ({
 
         <div className="flex-1 overflow-auto bg-background">
           {/* Analytics Tab Content for Unified RQ Results */}
-          <TabsContent value="analytics" className="m-0 h-full p-3 space-y-4">
+          <TabsContent value="analytics" forceMount className="m-0 h-full p-3 space-y-4 data-[state=inactive]:hidden">
             
             {/* Interactive ASR Token Timeline */}
             {asrResult && (
@@ -320,7 +320,7 @@ export const PredictionPanel = ({
           </TabsContent>
 
           {/* Saliency Tab with integrated XAI Canvas */}
-          <TabsContent value="saliency" className="m-0 h-full">
+          <TabsContent value="saliency" forceMount className="m-0 h-full data-[state=inactive]:hidden">
             <div className="p-3 space-y-4">
               {/* Dynamic XAI Method Toggle Buttons */}
               <div className="flex gap-2 mb-2">
@@ -368,7 +368,7 @@ export const PredictionPanel = ({
             </div>
           </TabsContent>
 
-          <TabsContent value="acoustic" className="m-0 h-full">
+          <TabsContent value="acoustic" forceMount className="m-0 h-full data-[state=inactive]:hidden">
             <AcousticProfilePanel
               selectedFile={selectedFile}
               selectedEmbeddingFile={selectedEmbeddingFile}
@@ -378,7 +378,7 @@ export const PredictionPanel = ({
           </TabsContent>
 
           {showAdvanced && hasAttention && (
-            <TabsContent value="attention" className="m-0 h-full">
+            <TabsContent value="attention" forceMount className="m-0 h-full data-[state=inactive]:hidden">
               <div className="p-3">
                 <AttentionVisualization
                   selectedFile={selectedFile || selectedEmbeddingFile}
@@ -390,13 +390,13 @@ export const PredictionPanel = ({
           )}
 
           {showAdvanced && (
-            <TabsContent value="accent-bias" className="m-0 h-full">
+            <TabsContent value="accent-bias" forceMount className="m-0 h-full data-[state=inactive]:hidden">
               <AccentBiasPanel model={model} />
             </TabsContent>
           )}
 
           {showAdvanced && (
-            <TabsContent value="faithfulness" className="m-0 h-full">
+            <TabsContent value="faithfulness" forceMount className="m-0 h-full data-[state=inactive]:hidden">
               <FaithfulnessAuditPanel
                 selectedFile={selectedFile}
                 selectedEmbeddingFile={selectedEmbeddingFile}
@@ -407,7 +407,7 @@ export const PredictionPanel = ({
             </TabsContent>
           )}
 
-          <TabsContent value="perturbation" className="m-0 h-full">
+          <TabsContent value="perturbation" forceMount className="m-0 h-full data-[state=inactive]:hidden">
             <div className="p-3">
               <PerturbationTools
                 selectedFile={selectedFile}

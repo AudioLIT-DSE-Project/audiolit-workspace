@@ -98,68 +98,21 @@ async def serve_dataset_file(dataset: str, file_path: str, request: Request):
             }
         )
     
-    # Handle Range requests for better streaming support
-    range_header = request.headers.get('range')
-    if range_header:
-        # Parse range header (e.g., "bytes=0-1023")
-        try:
-            ranges = range_header.replace('bytes=', '').split('-')
-            start = int(ranges[0]) if ranges[0] else 0
-            end = int(ranges[1]) if ranges[1] else file_size - 1
-            
-            # Ensure valid range
-            start = max(0, min(start, file_size - 1))
-            end = max(start, min(end, file_size - 1))
-            content_length = end - start + 1
-            
-            def generate_chunks():
-                with open(audio_path, 'rb') as f:
-                    f.seek(start)
-                    remaining = content_length
-                    while remaining > 0:
-                        chunk_size = min(8192, remaining)
-                        chunk = f.read(chunk_size)
-                        if not chunk:
-                            break
-                        remaining -= len(chunk)
-                        yield chunk
-            
-            headers = {
-                "Accept-Ranges": "bytes",
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Content-Length": str(content_length),
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-                "Access-Control-Allow-Headers": "Range, Accept-Encoding, Origin, X-Requested-With, Content-Type, Accept, Authorization",
-                "Access-Control-Allow-Credentials": "true",
-                "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
-                "Content-Disposition": f"inline; filename=\"{safe_name}\"",
-                "X-Content-Type-Options": "nosniff",
-            }
-            
-            return StreamingResponse(
-                generate_chunks(),
-                status_code=206,  # Partial Content
-                media_type=media_type,
-                headers=headers
-            )
-        except (ValueError, IndexError):
-            # Invalid range header, fall back to full file
-            pass
-    
-    # Return full file for non-range requests
+    # Return audio file with Starlette FileResponse for non-blocking async streaming and native Range support
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=3600",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "Range, Accept-Encoding, Origin, X-Requested-With, Content-Type, Accept, Authorization",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+        "Content-Disposition": f"inline; filename=\"{safe_name}\"",
+        "X-Content-Type-Options": "nosniff",
+    }
+
     return FileResponse(
         path=audio_path,
         media_type=media_type,
-        headers={
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=3600",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-            "Access-Control-Allow-Headers": "Range, Accept-Encoding, Origin, X-Requested-With, Content-Type, Accept, Authorization",
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
-            "Content-Disposition": f"inline; filename=\"{safe_name}\"",
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=headers,
     )
