@@ -100,7 +100,7 @@ def aggregate_multitask(child_job_ids: list[str]) -> dict[str, Any]:
     return {"succeeded": succeeded, "failed": failed}
 
 
-def enqueue_multitask(file_path: str, model: str = "whisper-base") -> dict[str, Any]:
+def enqueue_multitask(file_path: str) -> dict[str, Any]:
     """Dispatch ASR + SER + ADD as parallel child jobs, one queue per task
     family (SAD §6.1: "one worker for each kind of model... so each worker
     only ever needs to hold one model in memory"), then an aggregator job
@@ -109,7 +109,7 @@ def enqueue_multitask(file_path: str, model: str = "whisper-base") -> dict[str, 
     conn = get_redis_connection()
 
     asr_job = Queue(ASR_QUEUE_NAME, connection=conn).enqueue(
-        run_asr_job, file_path=file_path, model=model, retry=CHILD_JOB_RETRY
+        run_asr_job, file_path=file_path, retry=CHILD_JOB_RETRY
     )
     ser_job = Queue(SER_QUEUE_NAME, connection=conn).enqueue(
         run_ser_job, file_path=file_path, retry=CHILD_JOB_RETRY
