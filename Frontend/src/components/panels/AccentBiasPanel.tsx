@@ -11,10 +11,9 @@ import { GlobalTaskProgress } from "../layout/GlobalTaskProgress";
 
 // Built-in Toolbar model keys map to the real HF ids the group-wise WER
 // diagnostic actually transcribes with (model_loader_service.py's
-// get_whisper_base_models/get_whisper_large_models).
+// get_whisper_base_models).
 const WHISPER_MODEL_IDS: Record<string, string> = {
   "whisper-base": "openai/whisper-base",
-  "whisper-large": "openai/whisper-large-v3",
 };
 
 interface CohortSummary {

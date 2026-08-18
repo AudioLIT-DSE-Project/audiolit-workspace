@@ -41,6 +41,13 @@ interface WhisperPrediction {
   word_count_truth: number;
 }
 
+interface AddPrediction {
+  predicted_label: string; // "bona-fide" | "spoof"
+  synthetic_probability: number;
+  confidence: number;
+  probabilities: Record<string, number>;
+}
+
 interface PerturbationResult {
   perturbed_file: string;
   filename: string;
@@ -66,22 +73,24 @@ interface DatapointEditorPanelProps {
   model?: string;
   wav2vecPrediction?: Wav2Vec2Prediction | null;
   whisperPrediction?: WhisperPrediction | null;
+  addPrediction?: AddPrediction | null;
   perturbedPredictions?: Wav2Vec2Prediction | WhisperPrediction | null;
   isLoadingPredictions?: boolean;
   isLoadingPerturbed?: boolean;
   predictionError?: string | null;
 }
 
-export const DatapointEditorPanel = ({ 
-  selectedFile, 
+export const DatapointEditorPanel = ({
+  selectedFile,
   selectedEmbeddingFile,
-  dataset = "custom", 
+  dataset = "custom",
   originalDataset,
-  perturbationResult, 
+  perturbationResult,
   predictionMap,
   model,
   wav2vecPrediction,
   whisperPrediction,
+  addPrediction,
   perturbedPredictions,
   isLoadingPredictions,
   isLoadingPerturbed,
@@ -331,6 +340,7 @@ export const DatapointEditorPanel = ({
           model={model}
           wav2vecPrediction={wav2vecPrediction}
           whisperPrediction={whisperPrediction}
+          addPrediction={addPrediction}
           perturbedPredictions={perturbedPredictions}
           isLoading={isLoadingPredictions}
           isLoadingPerturbed={isLoadingPerturbed}
