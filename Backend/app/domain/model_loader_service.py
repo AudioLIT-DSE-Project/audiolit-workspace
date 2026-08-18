@@ -85,15 +85,23 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
             # First, try to get a simple forward pass with attention
             logger.info("Attempting Whisper attention extraction...")
             
-            # Generate transcript first with English language forcing
-            generated_ids = model.generate(
-                input_features,
-                max_length=448,
-                num_beams=1,
-                do_sample=False,
-                language="english",
-                task="transcribe",
-            )
+            # Generate transcript first with proper decoder prompt handling
+            try:
+                forced_ids = processor.get_decoder_prompt_ids(language="english", task="transcribe")
+                generated_ids = model.generate(
+                    input_features,
+                    max_length=448,
+                    num_beams=1,
+                    do_sample=False,
+                    forced_decoder_ids=forced_ids,
+                )
+            except Exception:
+                generated_ids = model.generate(
+                    input_features,
+                    max_length=448,
+                    num_beams=1,
+                    do_sample=False,
+                )
             transcript = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             logger.info(f"Generated transcript: '{transcript}'")
             
@@ -397,16 +405,14 @@ def transcribe_whisper_base(audio_file_path):
     return transcribe_whisper(model_id, audio_file_path)
 
 def transcribe_whisper_with_timestamps(audio_file_path, model_size="base"):
-    if model_size != "base":
-        raise ValueError(f"Unsupported model size: {model_size}")
-    return transcribe_whisper("openai/whisper-base", audio_file_path, return_timestamps=True)
+    model_id = "openai/whisper-base" if model_size in ("base", "whisper-base") else model_size
+    return transcribe_whisper(model_id, audio_file_path, return_timestamps=True)
 
 def transcribe_whisper_with_attention(audio_file_path, model_size="base"):
     """Transcribe audio and return attention weights"""
     logger.info(f"transcribe_whisper_with_attention called: file={audio_file_path}, model_size={model_size}")
-    if model_size != "base":
-        raise ValueError(f"Unsupported model size: {model_size}")
-    result = transcribe_whisper("openai/whisper-base", audio_file_path, return_attention=True)
+    model_id = "openai/whisper-base" if model_size in ("base", "whisper-base") else model_size
+    result = transcribe_whisper(model_id, audio_file_path, return_attention=True)
     logger.info(f"transcribe_whisper_with_attention result: has_attention={bool(result.get('attention'))}")
     return result
 

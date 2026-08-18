@@ -839,7 +839,11 @@ def run_batch_dataset_warmup_task(
             target_file = filename or row.get("path", "")
             resolved_path = resolve_file(dataset, target_file)
             if resolved_path and resolved_path.exists():
-                file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
+                file_stat = resolved_path.stat()
+                file_path_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
+                file_content_hash = hashlib.md5(
+                    f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()
+                ).hexdigest()
                 from app.infrastructure.redis import cache_result_sync
 
                 # 1. Predictions (ASR / SER / ADD)
@@ -851,22 +855,26 @@ def run_batch_dataset_warmup_task(
                     try:
                         update_subtask("ML Inference & Classification")
                         from app.domain.model_loader_service import (
-                            transcribe_whisper,
+                            transcribe_whisper_with_attention,
                             predict_emotion_wave2vec,
                             predict_deepfake,
                         )
                         if "whisper" in model.lower():
-                            pred = transcribe_whisper(model, str(resolved_path))
+                            pred = transcribe_whisper_with_attention(str(resolved_path), model)
                         elif "wav2vec" in model.lower():
                             pred = predict_emotion_wave2vec(str(resolved_path))
                         else:
                             pred = predict_deepfake(str(resolved_path))
 
                         if pred is not None:
-                            cache_key = f"{model}_{file_content_hash}"
                             cache_payload = {"prediction": pred, "status": "completed"}
-                            cache_result_sync(model, cache_key, cache_payload, ttl=86400)
-                            cache_result_sync("predictions", f"v2_{cache_key}", cache_payload, ttl=86400)
+                            # Multi-key caching so all prediction/attention endpoints hit cache
+                            cache_result_sync(model, f"{model}_attention_v2_{file_path_hash}", cache_payload, ttl=86400)
+                            cache_result_sync(model, f"{model}_attention_v2_{file_content_hash}", cache_payload, ttl=86400)
+                            cache_result_sync(model, f"{model}_{file_path_hash}", cache_payload, ttl=86400)
+                            cache_result_sync("predictions", f"v2_{model}_{file_path_hash}", cache_payload, ttl=86400)
+                            if "wav2vec" in model.lower():
+                                cache_result_sync("wav2vec2", f"wav2vec2_detailed_{file_path_hash}", cache_payload, ttl=86400)
                     except Exception as err:
                         logger.error(f"Prediction warmup failed for {filename}: {err}", exc_info=True)
 
@@ -884,6 +892,7 @@ def run_batch_dataset_warmup_task(
                         if audio.ndim > 1:
                             audio = audio.mean(axis=1)
                         prof = extract_acoustic_profile(audio, sr)
+                        cache_result_sync("acoustic", f"acoustic_profile_{file_path_hash}", prof, ttl=86400)
                         cache_result_sync("acoustic", f"acoustic_profile_{file_content_hash}", prof, ttl=86400)
                     except Exception as err:
                         logger.error(f"Acoustic warmup failed for {filename}: {err}", exc_info=True)
@@ -899,8 +908,8 @@ def run_batch_dataset_warmup_task(
                         from app.domain.saliency_service import generate_saliency
                         sal_res = generate_saliency(str(resolved_path), model, "gradcam")
                         if sal_res:
-                            cache_key = f"saliency_v2_{model}_gradcam_{file_content_hash}"
-                            cache_result_sync("saliency", cache_key, sal_res, ttl=86400)
+                            cache_result_sync("saliency", f"saliency_v2_{model}_gradcam_{file_content_hash}", sal_res, ttl=86400)
+                            cache_result_sync("saliency", f"saliency_v2_{model}_gradcam_{file_path_hash}", sal_res, ttl=86400)
                     except Exception as err:
                         logger.error(f"Saliency warmup failed for {filename}: {err}", exc_info=True)
         except Exception as e:
