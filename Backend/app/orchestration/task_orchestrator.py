@@ -21,6 +21,7 @@ that directory. The stamps are corrected alongside this change.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -795,23 +796,32 @@ def run_batch_dataset_warmup_task(
             target_file = filename or row.get("path", "")
             resolved_path = resolve_file(dataset, target_file)
             if resolved_path and resolved_path.exists():
-                file_stat = resolved_path.stat()
-                file_content_hash = hashlib.md5(
-                    f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()
-                ).hexdigest()
+                file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
                 from app.infrastructure.redis import cache_result_sync
 
                 # 1. Predictions (ASR / SER / ADD)
-                if "asr" in tasks or "ser" in tasks:
+                if "asr" in tasks or "ser" in tasks or "add" in tasks:
                     try:
                         update_subtask("ML Inference & Classification")
-                        from app.domain.model_loader_service import predict_model
-                        pred = predict_model(str(resolved_path), model)
-                        if pred:
-                            cache_result_sync(model, f"{model}_{file_content_hash}", pred, ttl=86400)
-                            cache_result_sync("predictions", f"v2_{model}_{file_content_hash}", pred, ttl=86400)
+                        from app.domain.model_loader_service import (
+                            transcribe_whisper,
+                            predict_emotion_wave2vec,
+                            predict_deepfake,
+                        )
+                        if "whisper" in model.lower():
+                            pred = transcribe_whisper(model, str(resolved_path))
+                        elif "wav2vec" in model.lower():
+                            pred = predict_emotion_wave2vec(str(resolved_path))
+                        else:
+                            pred = predict_deepfake(str(resolved_path))
+
+                        if pred is not None:
+                            cache_key = f"{model}_{file_content_hash}"
+                            cache_payload = {"prediction": pred, "status": "completed"}
+                            cache_result_sync(model, cache_key, cache_payload, ttl=86400)
+                            cache_result_sync("predictions", f"v2_{cache_key}", cache_payload, ttl=86400)
                     except Exception as err:
-                        logger.warning(f"Prediction warmup failed for {filename}: {err}")
+                        logger.error(f"Prediction warmup failed for {filename}: {err}", exc_info=True)
 
                 # 2. Acoustic Profiling (Pitch F0, Energy, Spectrogram)
                 if "acoustic" in tasks:
@@ -825,7 +835,7 @@ def run_batch_dataset_warmup_task(
                         prof = extract_acoustic_profile(audio, sr)
                         cache_result_sync("acoustic", f"acoustic_profile_{file_content_hash}", prof, ttl=86400)
                     except Exception as err:
-                        logger.warning(f"Acoustic warmup failed for {filename}: {err}")
+                        logger.error(f"Acoustic warmup failed for {filename}: {err}", exc_info=True)
 
                 # 3. Saliency / XAI Grad-CAM Attribution Heatmaps
                 if "saliency" in tasks:
@@ -837,9 +847,9 @@ def run_batch_dataset_warmup_task(
                             cache_key = f"saliency_v2_{model}_gradcam_{file_content_hash}"
                             cache_result_sync("saliency", cache_key, sal_res, ttl=86400)
                     except Exception as err:
-                        logger.warning(f"Saliency warmup failed for {filename}: {err}")
+                        logger.error(f"Saliency warmup failed for {filename}: {err}", exc_info=True)
         except Exception as e:
-            logger.warning(f"Batch warmup error on {filename}: {e}")
+            logger.error(f"Batch warmup error on {filename}: {e}", exc_info=True)
 
         completed += 1
 
