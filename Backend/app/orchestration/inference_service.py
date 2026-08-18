@@ -10,21 +10,34 @@ from fastapi import HTTPException
 
 from app.domain.model_loader_service import (
     transcribe_whisper_base,
-    transcribe_whisper_large,
     wave2vec,
+    predict_deepfake,
     extract_whisper_embeddings,
     extract_wav2vec2_embeddings,
+    extract_add_embeddings,
 )
 from app.infrastructure.dataset_service import resolve_file
 from app.infrastructure.redis import get_result, cache_result
 
 logger = logging.getLogger(__name__)
 
+
+def predict_melody_machine(audio_path: str):
+    return predict_deepfake(audio_path, model_key="melody-machine")
+
+
+def predict_wav2vec2_add(audio_path: str):
+    return predict_deepfake(audio_path, model_key="wav2vec2-add")
+
+
 MODEL_FUNCTIONS = {
     "whisper-base": transcribe_whisper_base,
-    "whisper-large": transcribe_whisper_large,
     "wav2vec2": wave2vec,
+    "melody-machine": predict_melody_machine,
+    "wav2vec2-add": predict_wav2vec2_add,
 }
+
+ADD_MODEL_KEYS = ("melody-machine", "wav2vec2-add")
 
 
 def _resolve_audio_path(
@@ -138,10 +151,11 @@ async def extract_single_embedding(
         logger.info(f"Using cached embeddings for {resolved_path}")
     else:
         if model.startswith("whisper"):
-            model_size = "base" if "base" in model else "large"
-            embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model_size)
+            embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), "base")
         elif model == "wav2vec2":
             embedding = await asyncio.to_thread(extract_wav2vec2_embeddings, str(resolved_path))
+        elif model in ADD_MODEL_KEYS:
+            embedding = await asyncio.to_thread(extract_add_embeddings, str(resolved_path), model)
         else:
             raise HTTPException(status_code=400, detail=f"Embedding extraction not supported for model: {model}")
 
