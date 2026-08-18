@@ -150,14 +150,17 @@ async def extract_single_embedding(
         embedding = cached_embeddings.get("embedding")
         logger.info(f"Using cached embeddings for {resolved_path}")
     else:
-        if model.startswith("whisper"):
-            embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), "base")
-        elif model == "wav2vec2":
+        is_whisper = "whisper" in model.lower()
+        is_wav2vec = "wav2vec" in model.lower()
+
+        if is_whisper:
+            embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model)
+        elif is_wav2vec or model == "wav2vec2":
             embedding = await asyncio.to_thread(extract_wav2vec2_embeddings, str(resolved_path))
         elif model in ADD_MODEL_KEYS:
             embedding = await asyncio.to_thread(extract_add_embeddings, str(resolved_path), model)
         else:
-            raise HTTPException(status_code=400, detail=f"Embedding extraction not supported for model: {model}")
+            embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model)
 
         await cache_result(model, cache_key, {"embedding": embedding.tolist()}, ttl=24 * 60 * 60)
         logger.info(f"Cached embeddings for {resolved_path}")
