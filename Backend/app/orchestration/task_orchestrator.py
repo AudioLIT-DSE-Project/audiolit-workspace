@@ -789,11 +789,22 @@ def run_batch_dataset_warmup_task(
         hours, mins = divmod(mins, 60)
         return f"{hours}h {mins}m"
 
+    def is_job_cancelled() -> bool:
+        return bool(conn and conn.get(f"cancel_job_{job_id}"))
+
+    def cleanup_memory():
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     for i, row in enumerate(rows):
-        # Check cancellation flag in Redis
-        if conn and conn.get(f"cancel_job_{job_id}"):
+        # Check cancellation flag in Redis before processing file
+        if is_job_cancelled():
             cancelled = True
-            logger.info(f"Job {job_id} cancelled at file {i}/{total}")
+            logger.info(f"Job {job_id} cancelled before file {i}/{total}")
+            cleanup_memory()
             break
 
         filename = row.get("filename", "")
@@ -832,7 +843,11 @@ def run_batch_dataset_warmup_task(
                 from app.infrastructure.redis import cache_result_sync
 
                 # 1. Predictions (ASR / SER / ADD)
-                if "asr" in tasks or "ser" in tasks or "add" in tasks:
+                if ("asr" in tasks or "ser" in tasks or "add" in tasks):
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
                     try:
                         update_subtask("ML Inference & Classification")
                         from app.domain.model_loader_service import (
@@ -857,6 +872,10 @@ def run_batch_dataset_warmup_task(
 
                 # 2. Acoustic Profiling (Pitch F0, Energy, Spectrogram)
                 if "acoustic" in tasks:
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
                     try:
                         update_subtask("Acoustic Profiling (F0 / Spectrogram)")
                         import soundfile as sf
@@ -871,6 +890,10 @@ def run_batch_dataset_warmup_task(
 
                 # 3. Saliency / XAI Grad-CAM Attribution Heatmaps
                 if "saliency" in tasks:
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
                     try:
                         update_subtask("Saliency Attribution (Grad-CAM)")
                         from app.domain.saliency_service import generate_saliency
@@ -884,6 +907,7 @@ def run_batch_dataset_warmup_task(
             logger.error(f"Batch warmup error on {filename}: {e}", exc_info=True)
 
         completed += 1
+        cleanup_memory()
 
         # CPU Thermal Cooldown Interval
         if cooldown_ms > 0:
@@ -897,6 +921,7 @@ def run_batch_dataset_warmup_task(
         "status": final_status,
         "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
     }
+    cleanup_memory()
     if conn:
         conn.set(f"job_progress_{job_id}", json.dumps(final_progress), ex=86400)
 
