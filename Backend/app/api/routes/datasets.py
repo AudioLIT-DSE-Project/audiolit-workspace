@@ -4,7 +4,7 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
-from typing import List
+from typing import List, Optional
 import os
 from app.infrastructure.dataset_service import (
     load_metadata,
@@ -12,6 +12,7 @@ from app.infrastructure.dataset_service import (
     media_type_for,
 )
 from app.infrastructure import dataset_ingestion
+from app.infrastructure.settings import settings
 from app.api.dependencies import get_session_id
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -26,27 +27,68 @@ _UNLOADABLE_CORPORA = {
 }
 
 
+def _corpus_info(name: str) -> dict:
+    """FR2.3 — licence/task-family info for one corpus, by registry name."""
+    spec = dataset_ingestion.CORPUS_REGISTRY.get(name)
+    if spec is None:
+        return {"license": None, "task_family": None, "non_commercial": False}
+    return {
+        "license": spec.license,
+        "task_family": spec.task_family.value,
+        "non_commercial": name in dataset_ingestion.NON_COMMERCIAL_CORPORA,
+    }
+
+
 @router.get("/datasets/list")
 async def list_datasets() -> JSONResponse:
     """Built-in corpora available to select in the dataset dropdown (LIT-235).
 
     Distinct from GET /upload/dataset/list, which lists the session's custom
-    (user-uploaded) datasets.
+    (user-uploaded) datasets. ``datasets`` keeps its original shape (a bare
+    list of names) so existing consumers (Toolbar.tsx, test_datasets_routes.py)
+    are unaffected; ``licenses`` and ``available`` are additive (LIT-237,
+    FR2.3/FR2's availability gap) for callers that want them.
     """
-    corpora = [
+    corpora = sorted(
         name for name in dataset_ingestion.list_supported_corpora()
         if name not in _UNLOADABLE_CORPORA
-    ]
-    return JSONResponse(content={"datasets": sorted(corpora)})
+    )
+    licenses = {name: _corpus_info(name) for name in corpora}
+    available = {name: dataset_ingestion.is_corpus_available(name) for name in corpora}
+    return JSONResponse(content={"datasets": corpora, "licenses": licenses, "available": available})
+
+
+@router.get("/datasets/footprint")
+async def get_datasets_footprint() -> JSONResponse:
+    """FR2.2 — per-corpus disk usage vs. the ~100 GB working-footprint bound.
+
+    Reports what's actually provisioned under Backend/data/, independent of
+    which corpora have a loader wired — a corpus dropped into data/ ahead of
+    its loader landing still counts against the footprint.
+    """
+    usage = dataset_ingestion.measure_footprint()
+    total_bytes = sum(usage.values())
+    limit_bytes = int(settings.DATASET_FOOTPRINT_LIMIT_GB * 1024**3)
+    return JSONResponse(content={
+        "per_dataset_bytes": usage,
+        "total_bytes": total_bytes,
+        "limit_bytes": limit_bytes,
+        "over_limit": total_bytes > limit_bytes,
+    })
 
 
 @router.get("/{dataset}/metadata")
-async def get_dataset_metadata(dataset: str, request: Request) -> JSONResponse:
+async def get_dataset_metadata(
+    dataset: str,
+    request: Request,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> JSONResponse:
     try:
         # URL decode the dataset parameter to handle colons in custom dataset names
         dataset = unquote(dataset)
         session_id = get_session_id(request)
-        rows: List[dict] = load_metadata(dataset, session_id)
+        rows: List[dict] = load_metadata(dataset, session_id, limit=limit, offset=offset)
         return JSONResponse(content=rows)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

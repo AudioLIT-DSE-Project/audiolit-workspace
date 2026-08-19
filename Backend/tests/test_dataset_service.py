@@ -12,7 +12,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from app.infrastructure import dataset_ingestion, dataset_service
 from app.infrastructure.dataset_ingestion import DatasetLoader, SampleMetadata, TaskFamily
@@ -113,3 +115,84 @@ class TestResolveFileFallsBackToRegistry:
         # goes through the registry (which points at the real "ravdess" dir).
         assert "ravdess" not in dataset_service.DATASET_PATHS
         assert "ravdess" not in dataset_service.DATASET_BASE_DIRS
+
+
+class TestRegistryMetadataRowsFR2Fixes:
+    """LIT-237: FR2.1 integrity + FR2.2 cap + FR2.3 richer rows."""
+
+    def test_cap_limits_rows_returned(self, tmp_path, monkeypatch):
+        samples = [_sample(tmp_path, f"{i}.wav") for i in range(5)]
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: _FakeLoader(samples))
+
+        rows = dataset_service.load_metadata("some-new-corpus", limit=2)
+
+        assert len(rows) == 2
+        assert [r["filename"] for r in rows] == ["0.wav", "1.wav"]
+
+    def test_default_cap_from_settings(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dataset_service.settings, "DATASET_METADATA_ROW_CAP", 3)
+        samples = [_sample(tmp_path, f"{i}.wav") for i in range(10)]
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: _FakeLoader(samples))
+
+        rows = dataset_service.load_metadata("some-new-corpus")
+
+        assert len(rows) == 3
+
+    def test_offset_skips_rows(self, tmp_path, monkeypatch):
+        samples = [_sample(tmp_path, f"{i}.wav") for i in range(5)]
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: _FakeLoader(samples))
+
+        rows = dataset_service.load_metadata("some-new-corpus", limit=2, offset=2)
+
+        assert [r["filename"] for r in rows] == ["2.wav", "3.wav"]
+
+    def test_row_for_missing_audio_file_is_excluded(self, tmp_path, monkeypatch):
+        present = _sample(tmp_path, "present.wav")
+        ghost = SampleMetadata(
+            dataset="fake-corpus",
+            sample_id="ghost.wav",
+            audio_path=tmp_path / "ghost.wav",  # never written
+            task_family=TaskFamily.ASR,
+            label="unreachable",
+        )
+        monkeypatch.setattr(
+            dataset_ingestion, "get_loader", lambda name, **kw: _FakeLoader([ghost, present])
+        )
+
+        rows = dataset_service.load_metadata("some-new-corpus")
+
+        assert [r["filename"] for r in rows] == ["present.wav"]
+
+    def test_license_and_language_included_when_present(self, tmp_path, monkeypatch):
+        samples = [_sample(tmp_path, "a.wav", license="CC0-1.0", language="en")]
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: _FakeLoader(samples))
+
+        rows = dataset_service.load_metadata("some-new-corpus")
+
+        assert rows[0]["license"] == "CC0-1.0"
+        assert rows[0]["language"] == "en"
+
+    def test_demographic_fields_are_flattened_into_the_row(self, tmp_path, monkeypatch):
+        samples = [_sample(tmp_path, "a.wav", demographic={"age": "30", "sex": "female"})]
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: _FakeLoader(samples))
+
+        rows = dataset_service.load_metadata("some-new-corpus")
+
+        assert rows[0]["age"] == "30"
+        assert rows[0]["sex"] == "female"
+
+    def test_duration_included_for_real_decodable_audio(self, tmp_path, monkeypatch):
+        audio_path = tmp_path / "real.wav"
+        sf.write(str(audio_path), (0.1 * np.ones(16_000)).astype(np.float32), 16_000)
+        sample = SampleMetadata(
+            dataset="fake-corpus",
+            sample_id="real.wav",
+            audio_path=audio_path,
+            task_family=TaskFamily.ASR,
+            label="hi",
+        )
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: _FakeLoader([sample]))
+
+        rows = dataset_service.load_metadata("some-new-corpus")
+
+        assert rows[0]["duration"] == "1.0"

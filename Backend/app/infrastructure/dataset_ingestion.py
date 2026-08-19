@@ -121,6 +121,27 @@ def is_silent(audio: np.ndarray, rms_floor: float = SILENCE_RMS_FLOOR) -> bool:
     return rms < rms_floor
 
 
+#: FR2.3 / SAD C5 — corpora whose licence requires a user-visible notice on
+#: load. Matches the four corpora FR2.3 names explicitly; kept as one place
+#: so the API and frontend don't each maintain their own copy of this list.
+NON_COMMERCIAL_CORPORA = frozenset({"ravdess", "l2-arctic", "esd", "asvspoof-2021"})
+
+
+@dataclass(frozen=True)
+class IntegrityReport:
+    """One sample's FR2.1 integrity verdict.
+
+    ``reason`` is only set when ``ok`` is False: ``"missing"`` (no file at
+    ``audio_path``), ``"undecodable"`` (soundfile/librosa raised while
+    reading it), or ``"silent"`` (decodes fine but is empty/below the RMS
+    floor per :func:`is_silent`).
+    """
+
+    sample_id: str
+    ok: bool
+    reason: Optional[str] = None
+
+
 class DatasetLoader(ABC):
     """Common interface every corpus loader exposes.
 
@@ -133,11 +154,78 @@ class DatasetLoader(ABC):
         self.name = name
         self.task_family = task_family
         self.license = license
+        self._license_notice_logged = False
 
     @abstractmethod
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         """Yield each sample's metadata lazily, in catalog order."""
         raise NotImplementedError
+
+    def _maybe_log_license_notice(self) -> None:
+        """FR2.3 / SAD C5 — log a licence notice once per loader instance.
+
+        Concrete loaders for the four non-commercial corpora call this as the
+        first line of their :meth:`iter_metadata`; centralized here so every
+        one of them logs the same message instead of each hand-rolling it
+        (this replaced a one-off implementation that only ``ASVspoofLoader``
+        had).
+        """
+        if self._license_notice_logged or self.name not in NON_COMMERCIAL_CORPORA:
+            return
+        logger.warning(
+            "%s is a non-commercial/research-use corpus (licence: %s) — "
+            "SAD constraint C5 applies.",
+            self.name,
+            self.license or "unknown",
+        )
+        self._license_notice_logged = True
+
+    def check_integrity(self, meta: SampleMetadata, *, deep: bool = True) -> IntegrityReport:
+        """FR2.1 — validate one sample before it reaches a batch or a listing.
+
+        ``deep=False`` only checks the file exists (cheap — safe to run on
+        every row of a metadata listing). ``deep=True`` additionally decodes
+        the audio and runs :func:`is_silent`, for batch/evaluation callers
+        where a wrong WER/label attributed to the model is a worse outcome
+        than the extra decode cost.
+        """
+        if not meta.audio_path.exists():
+            return IntegrityReport(meta.sample_id, False, "missing")
+        if not deep:
+            return IntegrityReport(meta.sample_id, True)
+        try:
+            audio, _ = self.load_sample_audio(meta)
+        except Exception:
+            return IntegrityReport(meta.sample_id, False, "undecodable")
+        if is_silent(audio):
+            return IntegrityReport(meta.sample_id, False, "silent")
+        return IntegrityReport(meta.sample_id, True)
+
+    def validated_stream(
+        self,
+        limit: Optional[int] = None,
+        *,
+        deep: bool = True,
+        on_reject: Optional[Callable[[IntegrityReport], None]] = None,
+    ) -> Iterator[SampleMetadata]:
+        """Stream only samples that pass :meth:`check_integrity` (FR2.1).
+
+        ``limit`` counts accepted samples, not samples examined, so a caller
+        asking for 50 valid clips actually gets 50 (skipping rejects) rather
+        than getting fewer because some of the first 50 catalog rows were
+        corrupt. ``on_reject`` lets a caller collect/log what was excluded
+        instead of it disappearing silently.
+        """
+        accepted = 0
+        for meta in self.iter_metadata():
+            if limit is not None and accepted >= limit:
+                return
+            report = self.check_integrity(meta, deep=deep)
+            if report.ok:
+                accepted += 1
+                yield meta
+            elif on_reject is not None:
+                on_reject(report)
 
     def stream(self, limit: Optional[int] = None) -> Iterator[SampleMetadata]:
         """Stream metadata, optionally stopping after ``limit`` samples."""
@@ -238,6 +326,7 @@ class CsvCatalogLoader(DatasetLoader):
             raise FileNotFoundError(
                 f"Catalog for dataset '{self.name}' not found: {self.catalog_path}"
             )
+        self._maybe_log_license_notice()
 
         cmap = self.column_map
         with self.catalog_path.open("r", encoding=self.encoding, newline="") as fh:
@@ -443,19 +532,13 @@ class ASVspoofLoader(DatasetLoader):
         self.audio_ext = audio_ext
         self.file_col = file_col
         self.speaker_col = speaker_col
-        self._notice_logged = False
 
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         if not self.protocol_path.exists():
             raise FileNotFoundError(
                 f"ASVspoof protocol for '{self.name}' not found: {self.protocol_path}"
             )
-        if not self._notice_logged:
-            logger.warning(
-                "ASVspoof 2021 DF is a research-use-only corpus (SAD C5) — "
-                "ensure your use complies with its licence."
-            )
-            self._notice_logged = True
+        self._maybe_log_license_notice()
 
         with self.protocol_path.open("r", encoding="utf-8") as fh:
             for index, line in enumerate(fh, start=1):
@@ -544,6 +627,7 @@ class L2ArcticLoader(DatasetLoader):
             raise FileNotFoundError(
                 f"L2-ARCTIC root for '{self.name}' not found: {self.root_dir}"
             )
+        self._maybe_log_license_notice()
         for speaker in sorted(self.SPEAKER_L1):
             wav_dir = self.root_dir / speaker / "wav"
             if not wav_dir.is_dir():
@@ -745,6 +829,7 @@ class RavdessLoader(DatasetLoader):
             raise FileNotFoundError(
                 f"RAVDESS root for '{self.name}' not found: {self.root_dir}"
             )
+        self._maybe_log_license_notice()
         # Actor_* subdirectories are the documented layout, but tolerate a flat
         # dump too -- both appear in the wild depending on how it was unzipped.
         wav_paths = sorted(self.root_dir.glob("Actor_*/*.wav")) or sorted(
@@ -978,3 +1063,45 @@ def get_loader(name: str, **kwargs) -> DatasetLoader:
             f"{spec.owner_issue or 'a child issue of LIT-123'}."
         )
     return spec.loader_factory(**kwargs)
+
+
+def is_corpus_available(name: str) -> bool:
+    """FR2 §5.1 — does ``name`` have both a loader *and* provisioned data?
+
+    ``list_supported_corpora``/``CORPUS_REGISTRY`` only tell you whether code
+    is wired (a ``loader_factory``); they say nothing about whether
+    ``Backend/data/<corpus>`` actually exists on this machine. A corpus that
+    is wired but unprovisioned (LibriSpeech, until someone downloads it)
+    would otherwise appear selectable and then 404 on first use. This does
+    one lazy single-row probe rather than a full catalog walk.
+    """
+    try:
+        loader = get_loader(name)
+    except (ValueError, NotImplementedError):
+        return False
+    try:
+        next(iter(loader.stream(limit=1)))
+        return True
+    except (FileNotFoundError, StopIteration):
+        return False
+    except Exception:
+        logger.warning("Availability probe raised for corpus %r", name, exc_info=True)
+        return False
+
+
+def measure_footprint(data_dir: Optional[Path | str] = None) -> Dict[str, int]:
+    """FR2.2 — bytes on disk per corpus directory under ``data_dir``.
+
+    Walks ``Backend/data/<subdir>`` (one entry per provisioned corpus) rather
+    than the registry, so it reports what is actually on disk today,
+    including any corpus directory that isn't (yet) wired to a loader.
+    """
+    base = Path(data_dir) if data_dir is not None else DATA_DIR
+    if not base.is_dir():
+        return {}
+    usage: Dict[str, int] = {}
+    for entry in sorted(base.iterdir()):
+        if not entry.is_dir():
+            continue
+        usage[entry.name] = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+    return usage
