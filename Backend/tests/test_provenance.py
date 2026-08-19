@@ -131,3 +131,59 @@ def test_transcribe_whisper_provenance_unavailable(monkeypatch):
     assert res["provenance_reason"] == "All attention extraction methods failed"
     assert res["attention_is_fallback"] is False
     assert res["attention"] is None
+
+
+def test_saliency_energy_fallback_provenance(monkeypatch, tmp_path):
+    """Test saliency service returning Provenance.FALLBACK when attributions are flat or empty."""
+    from app.domain.saliency_service import generate_whisper_saliency
+
+    dummy_audio = np.zeros(16000, dtype=np.float32)
+    audio_file = tmp_path / "test.wav"
+    import soundfile as sf
+    sf.write(str(audio_file), dummy_audio, 16000)
+
+    monkeypatch.setattr("librosa.load", lambda file, sr=16000: (dummy_audio, 16000))
+    monkeypatch.setattr("app.domain.model_loader_service.resolve_whisper_model_id", lambda name: "openai/whisper-tiny")
+
+    # Mock whisper model whose encoder returns dummy hidden states
+    mock_model = MagicMock()
+    mock_model.encoder.return_value.last_hidden_state = torch.ones((1, 50, 64))
+    monkeypatch.setattr("app.domain.model_loader_service.get_whisper_base_models", lambda name: (mock_model, MagicMock()))
+
+    # Force IG to return zero attributions
+    monkeypatch.setattr("captum.attr.IntegratedGradients.attribute", lambda self, inputs, **kwargs: torch.zeros_like(inputs))
+
+    res = generate_whisper_saliency(str(audio_file), model_size="tiny", method="integrated_gradients")
+
+    assert res["provenance"] == "fallback"
+    assert res["provenance_reason"] is not None
+    assert "showing encoder energy" in res["provenance_reason"]
+
+
+def test_evaluation_faithfulness_refuses_fallback_attribution():
+    """Test evaluate_batch_faithfulness_scores refusing attributions with non-MEASURED provenance."""
+    from app.domain.evaluation_service import evaluate_batch_faithfulness_scores
+
+    eval_items = [
+        {
+            "file_path": "fallback_sample.wav",
+            "saliency_scores": [0.1, 0.2, 0.3],
+            "original_confidence": 0.9,
+            "provenance": "fallback",
+            "provenance_reason": "attribution was empty or constant",
+        },
+        {
+            "file_path": "measured_sample.wav",
+            "saliency_scores": [0.8, 0.9, 0.7],
+            "original_confidence": 0.9,
+            "provenance": "measured",
+        }
+    ]
+
+    res = evaluate_batch_faithfulness_scores(eval_items)
+
+    assert len(res["item_results"]) == 2
+    assert "error" in res["item_results"][0]
+    assert "cannot audit a fallback attribution" in res["item_results"][0]["error"]
+    assert "mean_deletion_score" in res["item_results"][1]
+
