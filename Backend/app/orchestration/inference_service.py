@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import functools
 import inspect
 import logging
 from pathlib import Path
@@ -18,6 +19,7 @@ from app.domain.model_loader_service import (
 )
 from app.infrastructure.dataset_service import resolve_file
 from app.infrastructure.redis import get_result, cache_result
+from app.infrastructure import cache_keys as ck
 
 logger = logging.getLogger(__name__)
 
@@ -81,14 +83,20 @@ async def run_inference(
         session_id,
     )
 
+    # Whisper is dispatched by family rather than by name so that any custom
+    # checkpoint runs as itself. Binding the selected id here is what stops
+    # `transcribe_whisper_base` from quietly transcribing with whisper-base
+    # and caching the result under the requested model's key (FR1, FR4).
     func = MODEL_FUNCTIONS.get(model)
-    if not func:
+    if func is transcribe_whisper_base or (func is None and "whisper" in model.lower()):
+        func = functools.partial(transcribe_whisper_base, model=model)
+    elif not func:
         # Check if resolved in ModelRegistry (LIT-231, FR1)
         from app.domain.model_registry_service import registry
         try:
             loaded_model = registry.get(model)
             if loaded_model.family == "whisper":
-                func = transcribe_whisper_base
+                func = functools.partial(transcribe_whisper_base, model=model)
             elif loaded_model.family == "wav2vec2":
                 func = wave2vec
             else:
@@ -108,7 +116,13 @@ async def run_inference(
     cached_result = await get_result(model, cache_key)
     if cached_result is not None:
         logger.info(f"Returning cached result for {resolved_path}")
-        return cached_result.get("prediction", cached_result)
+        prediction = ck.unwrap_prediction(cached_result)
+        # An ASR-with-attention payload written into the transcript family by
+        # an older dataset warmup. Callers of this family expect the bare
+        # transcript, so flatten rather than hand back a dict they cannot use.
+        if isinstance(prediction, dict) and "text" in prediction and "attention" in prediction:
+            prediction = ck.as_transcript(prediction)
+        return prediction
 
     if inspect.iscoroutinefunction(func):
         prediction = await func(str(resolved_path))
