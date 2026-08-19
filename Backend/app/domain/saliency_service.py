@@ -11,6 +11,7 @@ from app.domain.model_loader_service import (
     transcribe_whisper_with_timestamps,
     predict_emotion_wave2vec,
     get_whisper_base_models,
+    resolve_whisper_model_id,
 )
 import app.domain.model_loader_service as model_loader_service
 
@@ -63,7 +64,10 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
             # Keep only chunks inside the window
             chunks = [c for c in chunks if c.get("timestamp", [0, 0])[0] < max_seconds]
     
-    processor, model = get_whisper_base_models()
+    # Attribute over the checkpoint the user selected, not whisper-base -
+    # a heatmap from a different model than the prediction it explains is
+    # worse than no heatmap (FR1, FR8).
+    processor, model = get_whisper_base_models(resolve_whisper_model_id(model_size))
 
     device = next(model.parameters()).device
     input_features = processor(audio, sampling_rate=16000, return_tensors="pt").input_features
@@ -301,7 +305,7 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
             segment["intensity"] = max(0.1, segment["intensity"])  # Minimum 10% intensity
     
     return {
-        "model": f"whisper-{model_size}",
+        "model": resolve_whisper_model_id(model_size),
         "method": method,
         "segments": segments,
         "total_duration": total_duration,
@@ -555,7 +559,7 @@ def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam",
     model_type = detect_model_type(model)
 
     if model_type == "whisper":
-        return generate_whisper_saliency(audio_file_path, "base", method, existing_prediction)
+        return generate_whisper_saliency(audio_file_path, model, method, existing_prediction)
     elif model_type == "wav2vec2":
         return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
     elif model_type == "add":

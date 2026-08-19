@@ -1,0 +1,171 @@
+"""Dataset warmup must write the payload shape each key family promises (FR4).
+
+The defect these tests lock out: warmup ran
+``transcribe_whisper_with_attention`` and stored its ``{"text", "attention"}``
+dict under *every* key it wrote, including the transcript family whose
+consumers all treat ``prediction`` as a plain string. The keys matched, so no
+consumer fell back to recomputation - they read the value and died on
+``.lower()``, and the UI showed a spinner that never resolved.
+
+A key-alignment test alone would have passed. These assert the shapes.
+"""
+
+import hashlib
+from unittest.mock import patch
+
+import pytest
+
+from app.infrastructure import cache_keys as ck
+
+
+ASR_WITH_ATTENTION = {"text": " hello world", "attention": [[[0.1, 0.2]]]}
+SER_RESULT = {"predicted_emotion": "happy", "confidence": 0.91, "probabilities": {}}
+
+
+class TestTranscriptNormalisation:
+    def test_flattens_asr_dict_to_string(self):
+        assert ck.as_transcript(ASR_WITH_ATTENTION) == " hello world"
+
+    def test_passes_string_through(self):
+        assert ck.as_transcript(" already a string") == " already a string"
+
+    def test_none_becomes_empty_not_none_string(self):
+        assert ck.as_transcript(None) == ""
+
+    def test_nested_prediction_wrapper(self):
+        assert ck.as_transcript({"prediction": {"text": "x"}}) == "x"
+
+    @pytest.mark.parametrize("value", [ASR_WITH_ATTENTION, " plain", None, {"text": "t"}])
+    def test_result_always_supports_string_ops(self, value):
+        """`/inferences/whisper-accuracy` calls .lower() on this. Always must work."""
+        assert ck.as_transcript(value).lower() is not None
+
+    def test_unwrap_leaves_non_asr_dicts_intact(self):
+        """SER/ADD payloads are dicts by contract and must not be flattened."""
+        assert ck.unwrap_prediction({"prediction": SER_RESULT}) == SER_RESULT
+
+
+class TestKeyFamiliesMatchRouteSpelling:
+    """Keys the routes compute, reproduced literally from the route source."""
+
+    MODEL = "openai/whisper-tiny"
+    H = "0" * 32
+
+    def test_transcript_family(self):
+        keys = dict.fromkeys(ck.transcript_keys(self.MODEL, (self.H,)))
+        # inferences.py `/whisper-accuracy` and inference_service.run_inference
+        assert (self.MODEL, f"v2_{self.MODEL}_{self.H}") in keys
+        # inferences.py `/batch-check` and `/whisper-batch`
+        assert (self.MODEL, f"{self.MODEL}_{self.H}") in keys
+        # inferences.py `/whisper-accuracy` final fallback
+        assert ("predictions", f"v2_{self.MODEL}_{self.H}") in keys
+
+    def test_attention_family(self):
+        assert (self.MODEL, f"{self.MODEL}_attention_v2_{self.H}") in ck.attention_keys(
+            self.MODEL, (self.H,)
+        )
+
+    def test_ser_family_covers_both_detail_endpoints(self):
+        keys = ck.ser_keys((self.H,))
+        assert ("wav2vec2", f"wav2vec2_detailed_{self.H}") in keys
+        assert ("wav2vec2", f"wav2vec2_detailed_attention_v3_{self.H}") in keys
+
+    def test_acoustic_and_saliency_and_embedding_families(self):
+        assert ("acoustic", f"acoustic_profile_{self.H}") in ck.acoustic_keys((self.H,))
+        assert (
+            "saliency",
+            f"saliency_v2_{self.MODEL}_gradcam_{self.H}",
+        ) in ck.saliency_keys(self.MODEL, "gradcam", (self.H,))
+        assert (self.MODEL, f"{self.MODEL}_embeddings_{self.H}") in ck.embedding_keys(
+            self.MODEL, (self.H,)
+        )
+        assert ("audio_frequency", f"audio_frequency_{self.H}") in ck.audio_frequency_keys(
+            (self.H,)
+        )
+
+    def test_path_hash_matches_route_formula(self, sample_audio_file):
+        expected = hashlib.md5(str(sample_audio_file).encode()).hexdigest()
+        assert ck.path_hash(sample_audio_file) == expected
+
+    def test_content_hash_differs_from_path_hash(self, sample_audio_file):
+        p, c = ck.both_hashes(sample_audio_file)
+        assert p != c
+
+
+class TestWarmupWritesCorrectShapes:
+    """Drive the real warmup task with models stubbed; inspect what it stored."""
+
+    def _run(self, sample_audio_file, tasks):
+        from app.orchestration import task_orchestrator as to
+
+        writes: dict[tuple[str, str], object] = {}
+
+        def fake_cache(ns, key, payload, ttl=None):
+            writes[(ns, key)] = payload
+
+        with patch.object(to, "get_redis_connection", side_effect=Exception("no redis")), \
+             patch("app.infrastructure.dataset_service.load_metadata",
+                   return_value=[{"filename": sample_audio_file.name}]), \
+             patch("app.infrastructure.dataset_service.resolve_file",
+                   return_value=sample_audio_file), \
+             patch("app.infrastructure.redis.cache_result_sync", side_effect=fake_cache), \
+             patch("app.domain.model_loader_service.transcribe_whisper_with_attention",
+                   return_value=ASR_WITH_ATTENTION), \
+             patch("app.domain.model_loader_service.predict_emotion_wave2vec_with_attention",
+                   return_value=SER_RESULT), \
+             patch("app.domain.model_loader_service.extract_whisper_embeddings",
+                   side_effect=Exception("skip")), \
+             patch("app.domain.model_loader_service.extract_audio_frequency_features",
+                   side_effect=Exception("skip")):
+            to.run_batch_dataset_warmup_task(
+                "job-test", "common-voice", "openai/whisper-tiny", tasks, cooldown_ms=0
+            )
+        return writes
+
+    def test_transcript_keys_get_a_string_not_the_attention_dict(self, sample_audio_file):
+        """The regression. Every transcript-family key must hold a string."""
+        writes = self._run(sample_audio_file, ["asr"])
+        h = ck.path_hash(sample_audio_file)
+        transcript_written = False
+        for ns, key in ck.transcript_keys("openai/whisper-tiny", (h,)):
+            if (ns, key) in writes:
+                transcript_written = True
+                payload = writes[(ns, key)]
+                assert isinstance(payload["prediction"], str), (
+                    f"{ns}:{key} holds {type(payload['prediction']).__name__}; "
+                    "consumers call .lower() on it"
+                )
+        assert transcript_written, "warmup wrote no transcript keys at all"
+
+    def test_attention_keys_keep_the_full_dict(self, sample_audio_file):
+        writes = self._run(sample_audio_file, ["asr"])
+        h = ck.path_hash(sample_audio_file)
+        for ns, key in ck.attention_keys("openai/whisper-tiny", (h,)):
+            assert (ns, key) in writes, f"missing attention key {ns}:{key}"
+            assert writes[(ns, key)]["prediction"] == ASR_WITH_ATTENTION
+
+    def test_ser_is_warmed_even_when_the_selected_model_is_whisper(self, sample_audio_file):
+        """SER lives in a model-independent namespace; asking for it must run it.
+
+        Warmup used to dispatch purely on the model name, so `tasks=["ser"]`
+        with a Whisper model silently warmed nothing.
+        """
+        writes = self._run(sample_audio_file, ["ser"])
+        h = ck.path_hash(sample_audio_file)
+        for ns, key in ck.ser_keys((h,)):
+            assert (ns, key) in writes, f"missing SER key {ns}:{key}"
+            assert writes[(ns, key)]["prediction"] == SER_RESULT
+
+    def test_unrequested_tasks_are_not_warmed(self, sample_audio_file):
+        writes = self._run(sample_audio_file, ["asr"])
+        h = ck.path_hash(sample_audio_file)
+        for ns, key in ck.ser_keys((h,)):
+            assert (ns, key) not in writes
+
+    def test_both_hash_spellings_are_written(self, sample_audio_file):
+        """Consumers disagree on which hash to use; warm both or they miss."""
+        writes = self._run(sample_audio_file, ["asr"])
+        p, c = ck.both_hashes(sample_audio_file)
+        model = "openai/whisper-tiny"
+        assert (model, f"v2_{model}_{p}") in writes
+        assert (model, f"v2_{model}_{c}") in writes
