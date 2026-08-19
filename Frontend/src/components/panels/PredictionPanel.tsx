@@ -13,6 +13,8 @@ import { XAIOverlayCanvas, XAIMethod, XAIResult, F0Point } from "../visualizatio
 import { useState, useEffect } from "react";
 import { AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
 import { API_BASE } from "@/lib/api";
+import { ProvenanceBadge, provenanceOverlayStyle } from "../ui/ProvenanceBadge";
+import { DeepfakeForensicPanel } from "./DeepfakeForensicPanel";
 
 interface UploadedFile {
   file_id: string;
@@ -117,6 +119,11 @@ export const PredictionPanel = ({
 
   // State for dynamic XAI canvas layer opacity swapping and on-demand fetch
   const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('gradcam');
+  // FR8.4: overlay transparency must be adjustable, not hardcoded.
+  const [overlayOpacity, setOverlayOpacity] = useState(0.7);
+  // FR17.1: the saliency response says whether the map is measured or a
+  // synthesised stand-in. Rendering it is the half the requirement asks for.
+  const [xaiProvenance, setXaiProvenance] = useState<{ provenance?: string; reason?: string } | null>(null);
   const [spectrogramData, setSpectrogramData] = useState<number[][] | undefined>(
     unifiedResult?.tasks?.acoustic?.spectrogram
   );
@@ -159,6 +166,7 @@ export const PredictionPanel = ({
         if (data.base_spectrogram) {
           setSpectrogramData(data.base_spectrogram);
         }
+        setXaiProvenance({ provenance: data.provenance, reason: data.provenance_reason });
         if (data.saliency_matrix) {
           setXaiResult({
             method: data.method || activeXAIMethod,
@@ -297,7 +305,6 @@ export const PredictionPanel = ({
   const fileTranscript = whisperPrediction?.predicted_transcript || selectedFile?.prediction || selectedFile?.predicted_transcript;
   const asrResult = rawAsr || (fileTranscript ? { transcript: fileTranscript, tokens: [] } : undefined);
 
-  const waveformData = unifiedResult?.tasks?.acoustic?.waveform || cachedTaskResults?.acoustic?.waveform || [];
   // extract_acoustic_profile returns `timeline: [{t_ms, f0_hz, rms}]`. It has no
   // top-level `f0` key, which is why this contour was empty on every file.
   const acoustic = acousticProfile || cachedTaskResults?.acoustic;
@@ -306,6 +313,9 @@ export const PredictionPanel = ({
   );
   // librosa's mel ceiling is sr/2; the canvas would otherwise assume 8 kHz.
   const maxFreqHz = acoustic?.sample_rate ? acoustic.sample_rate / 2 : 8000;
+  // One peak per frame, so it shares the spectrogram's time axis. Nothing in
+  // the backend produced a waveform before, so this layer never drew.
+  const waveformData: number[] = acoustic?.waveform || [];
 
   return (
     <div className="h-full bg-panel-background border-t border-border flex flex-col">
@@ -507,6 +517,27 @@ export const PredictionPanel = ({
                 ))}
               </div>
 
+              {/* Overlay opacity (FR8.4) */}
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xs text-muted-foreground w-16">Overlay</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={Math.round(overlayOpacity * 100)}
+                  onChange={(e) => setOverlayOpacity(Number(e.target.value) / 100)}
+                  className="flex-1 max-w-[180px]"
+                  aria-label="XAI overlay opacity"
+                />
+                <span className="text-xs text-muted-foreground w-10 tabular-nums">
+                  {Math.round(overlayOpacity * 100)}%
+                </span>
+                <ProvenanceBadge
+                  provenance={xaiProvenance?.provenance}
+                  reason={xaiProvenance?.reason}
+                />
+              </div>
+
               {/* New High-Performance XAI Overlay Canvas */}
               {xaiError ? (
                 <Card className="w-full h-[400px] flex items-center justify-center bg-red-50 dark:bg-red-950/20 border-red-200 dark:border-red-900">
@@ -524,6 +555,7 @@ export const PredictionPanel = ({
                   </CardContent>
                 </Card>
               ) : spectrogramData || xaiResult ? (
+                <div style={provenanceOverlayStyle(xaiProvenance?.provenance)}>
                 <XAIOverlayCanvas
                   audioDuration={audioDuration}
                   baseSpectrogram={spectrogramData}
@@ -531,10 +563,12 @@ export const PredictionPanel = ({
                   xaiResults={xaiResult ? [xaiResult] : []}
                   f0Data={f0Data}
                   maxFreqHz={maxFreqHz}
+                  overlayOpacity={overlayOpacity}
                   activeMethod={activeXAIMethod}
                   width={800}
                   height={400}
                 />
+                </div>
               ) : (
                 <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
                   <CardContent className="text-center text-muted-foreground">
@@ -542,6 +576,13 @@ export const PredictionPanel = ({
                   </CardContent>
                 </Card>
               )}
+
+              {/* FR7.2 — where in the clip the detector suspects synthesis */}
+              <DeepfakeForensicPanel
+                selectedFile={selectedFile}
+                dataset={dataset}
+                clipVerdict={addResult}
+              />
 
               {/* Existing inherited Saliency Visualization */}
               <SaliencyVisualization

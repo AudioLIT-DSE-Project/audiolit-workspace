@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts";
+import { usePlayback } from '@/contexts/PlaybackContext';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { HelpCircle, Loader2 } from "lucide-react";
@@ -101,6 +102,8 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
     return () => abortController.abort();
   }, [selectedFile, selectedEmbeddingFile, dataset, originalDataset]);
 
+  // FR10.2: the same playhead the player and the XAI overlay use.
+  const { currentTime, seek } = usePlayback();
   const chartData = (profile?.timeline || []).map((p) => ({
     t: +(p.t_ms / 1000).toFixed(2),
     f0: p.f0_hz,
@@ -125,12 +128,16 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
             {error && <div className="text-xs text-destructive py-2">{error}</div>}
             {!loading && !error && chartData.length > 0 && (
               <ResponsiveContainer width="100%" height={140}>
-                <LineChart data={chartData}>
+                <LineChart data={chartData} onClick={(e: { activeLabel?: string | number }) => {
+                  const t = Number(e?.activeLabel);
+                  if (Number.isFinite(t)) seek(t);
+                }}>
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
                   <XAxis dataKey="t" tick={{ fontSize: 10 }} unit="s" />
                   <YAxis tick={{ fontSize: 10 }} unit="Hz" domain={['auto', 'auto']} />
                   <RechartsTooltip contentStyle={{ fontSize: 11 }} />
                   <Line type="monotone" dataKey="f0" stroke="hsl(var(--waveform-primary))" dot={false} strokeWidth={1.5} connectNulls={false} isAnimationActive={false} />
+                  <ReferenceLine x={Number(currentTime.toFixed(2))} stroke="hsl(var(--foreground))" strokeWidth={1} />
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -153,12 +160,16 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
           <CardContent>
             {!loading && !error && chartData.length > 0 && (
               <ResponsiveContainer width="100%" height={100}>
-                <LineChart data={chartData}>
+                <LineChart data={chartData} onClick={(e: { activeLabel?: string | number }) => {
+                  const t = Number(e?.activeLabel);
+                  if (Number.isFinite(t)) seek(t);
+                }}>
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
                   <XAxis dataKey="t" tick={{ fontSize: 10 }} unit="s" />
                   <YAxis tick={{ fontSize: 10 }} />
                   <RechartsTooltip contentStyle={{ fontSize: 11 }} />
                   <Line type="monotone" dataKey="rms" stroke="hsl(var(--waveform-secondary))" dot={false} strokeWidth={1.5} isAnimationActive={false} />
+                  <ReferenceLine x={Number(currentTime.toFixed(2))} stroke="hsl(var(--foreground))" strokeWidth={1} />
                 </LineChart>
               </ResponsiveContainer>
             )}

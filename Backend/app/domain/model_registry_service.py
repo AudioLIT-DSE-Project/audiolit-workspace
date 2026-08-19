@@ -53,6 +53,11 @@ class LoadedModel:
     weights_sha256: str
     model: torch.nn.Module
     available_layers: List[str] = field(default_factory=list)
+    device: str = "cpu"
+    # FR1.4 requires the fallback be *user-visible*, so it travels with the
+    # model rather than living only in a log line.
+    device_fallback: bool = False
+    device_fallback_reason: Optional[str] = None
 
     def attach_hooks(self) -> HookManager:
         """Fresh HookManager for this model, used as a context manager for
@@ -163,6 +168,14 @@ def _sha256_of_safetensors(local_dir: str) -> str:
     return digest.hexdigest()
 
 
+def _is_vram_exhaustion(exc: BaseException) -> bool:
+    """CUDA OOM, however torch chose to spell it this version."""
+    oom_type = getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(exc, oom_type):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
 def download_and_load(
     resolved: ResolvedModel,
     attn_implementation: str = "eager",
@@ -198,10 +211,29 @@ def download_and_load(
         ]
     model = model_class.from_pretrained(local_dir, low_cpu_mem_usage=False, attn_implementation=attn_implementation)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    device_fallback_reason = None
     try:
         model = model.to(device)
     except Exception as e:
-        if "meta tensor" in str(e):
+        if _is_vram_exhaustion(e) and device != "cpu":
+            # FR1.4: VRAM overflow degrades to CPU rather than failing the load,
+            # and says so. A silent retry would leave the user wondering why a
+            # model that "loaded fine" is suddenly an order of magnitude slower.
+            logger.warning(
+                "model_registry: VRAM exhausted loading %s, falling back to CPU: %s",
+                resolved.model_id, e,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                logger.debug("empty_cache failed during VRAM fallback", exc_info=True)
+            device = "cpu"
+            device_fallback_reason = (
+                "GPU memory exhausted while loading %s; running on CPU, which is "
+                "substantially slower." % resolved.model_id
+            )
+            model = model.to(device)
+        elif "meta tensor" in str(e):
             model = model.to_empty(device=device)
         else:
             raise
@@ -234,6 +266,9 @@ def download_and_load(
         weights_sha256=weights_sha256,
         model=model,
         available_layers=available_layers,
+        device=device,
+        device_fallback=device_fallback_reason is not None,
+        device_fallback_reason=device_fallback_reason,
     )
 
 

@@ -116,6 +116,23 @@ def extract_acoustic_profile(
         }
         for i in range(len(rms))
     ]
+    # Normalised amplitude envelope for the canvas waveform layer. Nothing in
+    # the backend produced one, so that layer drew nothing on every clip - the
+    # canvas bails on `waveformData.length === 0`. Downsampled to one peak per
+    # frame so it aligns with the spectrogram's time axis and stays small.
+    n_frames = len(rms)
+    needed = n_frames * hop_length
+    padded = np.abs(audio)
+    if len(padded) < needed:
+        # librosa centres its frames, so the signal is a little shorter than
+        # n_frames * hop_length. Pad rather than fall back to the raw signal:
+        # the fallback returned 241,920 points for a 473-frame clip, which is
+        # both unaligned with the spectrogram and far too large to ship as JSON.
+        padded = np.pad(padded, (0, needed - len(padded)))
+    peaks = padded[:needed].reshape(n_frames, hop_length).max(axis=1)
+    peak_max = float(peaks.max()) if peaks.size else 0.0
+    waveform = (peaks / peak_max) if peak_max > 0 else np.zeros_like(peaks)
+
     return {
         "sample_rate": sr,
         "frame_length": frame_length,
@@ -123,4 +140,5 @@ def extract_acoustic_profile(
         "duration_s": float(len(audio) / sr),
         "timeline": timeline,
         "spectrogram": S_norm.astype(np.float32).tolist(),
+        "waveform": waveform.astype(np.float32).tolist(),
     }

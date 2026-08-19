@@ -185,5 +185,10 @@ def test_evaluation_faithfulness_refuses_fallback_attribution():
     assert len(res["item_results"]) == 2
     assert "error" in res["item_results"][0]
     assert "cannot audit a fallback attribution" in res["item_results"][0]["error"]
-    assert "mean_deletion_score" in res["item_results"][1]
+    # The measured item is refused too, but for a different and honest reason:
+    # its file does not exist, so nothing could be masked or re-run. FR16.1
+    # means a score only exists where a measurement happened.
+    assert "error" in res["item_results"][1]
+    assert "cannot audit a fallback" not in res["item_results"][1]["error"]
+    assert res["audio_scored"] == 0
 

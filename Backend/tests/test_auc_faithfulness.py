@@ -27,27 +27,34 @@ def test_compute_deletion_auc_linear():
     auc = compute_deletion_auc(curve)
     assert 0.49 <= auc <= 0.51
 
-def test_evaluate_batch_faithfulness_scores_with_auc():
-    eval_items = [
-        {
-            "file_path": "sample1.wav",
-            "saliency_scores": [0.9, 0.7, 0.5, 0.3, 0.1],
-            "original_confidence": 0.95
-        },
-        {
-            "file_path": "sample2.wav",
-            "saliency_scores": [0.8, 0.6, 0.4, 0.2, 0.1],
-            "original_confidence": 0.85
-        }
-    ]
-    
-    result = evaluate_batch_faithfulness_scores(eval_items)
-    
-    assert "mean_deletion_score" in result
-    assert "mean_deletion_auc" in result
+def test_evaluate_batch_faithfulness_scores_with_auc(sample_audio_file, monkeypatch):
+    """AUC over a curve of REAL measurements (FR16.1).
+
+    This previously passed two filenames that did not exist and still asserted
+    an AUC for both, because the old implementation derived the curve from the
+    saliency values without running a model. Real audio and a stubbed model now
+    stand in for that.
+    """
+    def fake_ser(path):
+        masked = "faithfulness_masked_" in str(path)
+        return {"predicted_emotion": "happy",
+                "probabilities": {"happy": 0.3 if masked else 0.95},
+                "confidence": 0.3 if masked else 0.95}
+
+    monkeypatch.setattr("app.domain.model_loader_service.predict_ser", fake_ser)
+
+    result = evaluate_batch_faithfulness_scores(
+        [{"file_path": str(sample_audio_file),
+          "saliency_scores": [0.9, 0.7, 0.5, 0.3, 0.1],
+          "provenance": "measured"}],
+        top_k_percentages=[0.2, 0.5],
+    )
+
+    assert result["mean_deletion_auc"] is not None
     assert result["mean_deletion_auc"] >= 0.0
-    assert result["total_audio_evaluated"] == 2
+    assert result["audio_scored"] == 1
     assert "deletion_auc" in result["item_results"][0]
+
 
 def test_compute_multi_task_performance_summary_with_auc():
     group_wer = {
