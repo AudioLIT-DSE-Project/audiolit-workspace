@@ -67,12 +67,20 @@ async def run_inference(
     dataset: Optional[str] = None,
     dataset_file: Optional[str] = None,
     session_id: Optional[str] = None,
+    force_refresh: bool = False,
 ):
     """Run a model prediction, resolving/caching the audio and result.
 
     Shared by the /inferences/run route and the /upload route (previously
     upload.py imported this directly from the inferences route module —
     LIT-227 moves it here so neither route imports the other).
+
+    ``force_refresh`` skips the cache lookup and recomputes, then overwrites
+    the cache entry with the fresh result — backs the per-row "Regenerate"
+    button in AudioDataTable.tsx, which would otherwise just get the same
+    cached prediction handed back unchanged (a deterministic model on an
+    unchanged file always predicts the same thing; the point of that button
+    is forcing a real, visible recompute, not silently no-op-ing).
     """
     logger.info(
         "inference_service.run_inference model=%s file_path=%s dataset=%s dataset_file=%s session_id=%s",
@@ -113,7 +121,7 @@ async def run_inference(
     file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
     cache_key = f"v2_{model}_{file_content_hash}"
 
-    cached_result = await get_result(model, cache_key)
+    cached_result = None if force_refresh else await get_result(model, cache_key)
     if cached_result is not None:
         logger.info(f"Returning cached result for {resolved_path}")
         prediction = ck.unwrap_prediction(cached_result)

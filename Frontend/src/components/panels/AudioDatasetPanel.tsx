@@ -291,6 +291,49 @@ export const AudioDatasetPanel = ({
     toast.info("Inference stopped by user.");
   }, []);
 
+  // LIT-248: re-run inference for exactly one row on demand, independent of
+  // (and safe to call alongside) the batch queue above. force_refresh: true
+  // bypasses /inferences/run's cache - without it, a deterministic model on
+  // an unchanged file would just hand back the same cached prediction and
+  // the button would appear to do nothing.
+  const handleRegenerateRow = useCallback(async (fileId: string) => {
+    if (!model) return;
+    const currentRow = datasetMetadata.find(row => {
+      const id = row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"];
+      return String(id) === fileId;
+    });
+    if (!currentRow) return;
+
+    const pathVal = (currentRow["path"] || currentRow["filepath"] || currentRow["file"] || currentRow["filename"]) as string;
+    const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || fileId) : fileId;
+
+    setInferenceStatus(prev => ({ ...prev, [fileId]: 'loading' }));
+
+    try {
+      const response = await fetch(`${API_BASE}/inferences/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ model, dataset, dataset_file: filename, force_refresh: true }),
+        signal: abortControllerRef.current?.signal,
+      });
+
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+
+      const prediction = await response.json();
+      const predictionText = typeof prediction === 'string' ? prediction : prediction?.text || JSON.stringify(prediction);
+
+      if (onPredictionUpdate) onPredictionUpdate(fileId, predictionText);
+      setInferenceStatus(prev => ({ ...prev, [fileId]: 'done' }));
+      toast.success(`Regenerated prediction for ${filename}`);
+    } catch (error: any) {
+      if (error.name === 'AbortError') return;
+      console.error(`Regenerate failed for ${fileId}:`, error);
+      setInferenceStatus(prev => ({ ...prev, [fileId]: 'error' }));
+      toast.error(`Failed to regenerate prediction for ${filename}`);
+    }
+  }, [model, dataset, datasetMetadata, onPredictionUpdate]);
+
   // Process batch inference queue when active
   useEffect(() => {
     if (!isInferencingActive || batchInferenceQueue.length === 0) return;
@@ -678,6 +721,7 @@ export const AudioDatasetPanel = ({
               predictionMap={predictionMap}
               inferenceStatus={inferenceStatus}
               onVisibleRowIdsChange={handleVisibleRowIdsChange}
+              onRegenerateRow={handleRegenerateRow}
             />
           </CardContent>
         </Card>
