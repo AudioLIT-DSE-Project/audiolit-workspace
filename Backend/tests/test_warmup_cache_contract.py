@@ -71,7 +71,12 @@ class TestKeyFamiliesMatchRouteSpelling:
         assert ("wav2vec2", f"wav2vec2_detailed_attention_v3_{self.H}") in keys
 
     def test_acoustic_and_saliency_and_embedding_families(self):
-        assert ("acoustic", f"acoustic_profile_{self.H}") in ck.acoustic_keys((self.H,))
+        # Versioned: LIT-248 added `spectrogram` to the payload, and an
+        # unversioned key kept serving pre-LIT-248 entries without it.
+        assert (
+            "acoustic",
+            f"acoustic_profile_{ck.ACOUSTIC_SCHEMA_VERSION}_{self.H}",
+        ) in ck.acoustic_keys((self.H,))
         assert (
             "saliency",
             f"saliency_v2_{self.MODEL}_gradcam_{self.H}",
@@ -161,6 +166,31 @@ class TestWarmupWritesCorrectShapes:
         h = ck.path_hash(sample_audio_file)
         for ns, key in ck.ser_keys((h,)):
             assert (ns, key) not in writes
+
+    def test_add_does_not_overwrite_the_asr_transcript(self, sample_audio_file):
+        """ADD and the transcript family share a key shape (`v2_{model}_{h}`).
+
+        Warmup keyed ADD on the *selected* model, so running asr+add together
+        with a Whisper model wrote the deepfake dict straight over the
+        transcript it had just cached - and every transcript consumer then read
+        a dict and failed on .lower(). ADD must key on its own checkpoint.
+        """
+        with patch("app.domain.model_loader_service.predict_deepfake",
+                   return_value={"predicted_label": "bona-fide",
+                                 "synthetic_probability": 0.02, "confidence": 0.98}):
+            writes = self._run(sample_audio_file, ["asr", "add"])
+
+        h = ck.path_hash(sample_audio_file)
+        for ns, key in ck.transcript_keys("openai/whisper-tiny", (h,)):
+            if (ns, key) in writes:
+                assert isinstance(writes[(ns, key)]["prediction"], str), (
+                    f"{ns}:{key} holds a dict - ADD overwrote the transcript"
+                )
+        # and the ADD result still landed, under its own checkpoint
+        add_written = any(
+            k in writes for k in ck.deepfake_keys("melody-machine", (h,))
+        )
+        assert add_written, "ADD result was not cached under its own model key"
 
     def test_both_hash_spellings_are_written(self, sample_audio_file):
         """Consumers disagree on which hash to use; warm both or they miss."""

@@ -764,6 +764,7 @@ def run_batch_dataset_warmup_task(
     import json
     import time
     from app.infrastructure import cache_keys as ck
+    from app.orchestration.inference_service import ADD_MODEL_KEYS
     from app.infrastructure.dataset_service import load_metadata, resolve_file
 
     try:
@@ -930,10 +931,17 @@ def run_batch_dataset_warmup_task(
                         break
                     try:
                         update_subtask("Deepfake Detection")
-                        from app.domain.model_loader_service import predict_deepfake
-                        add = predict_deepfake(str(resolved_path))
+                        from app.domain.model_loader_service import (
+                            predict_deepfake, _DEFAULT_ADD_MODEL_KEY,
+                        )
+                        add_model = model if model in ADD_MODEL_KEYS else _DEFAULT_ADD_MODEL_KEY
+                        add = predict_deepfake(str(resolved_path), model_key=add_model)
                         if add is not None:
-                            write(ck.deepfake_keys(model, hashes), {"prediction": add})
+                            # Key on the ADD checkpoint, not the selected ASR
+                            # model - `deepfake_keys` shares the transcript key
+                            # shape, so keying on Whisper overwrites the
+                            # transcript this same run just cached.
+                            write(ck.deepfake_keys(add_model, hashes), {"prediction": add})
                             warmed.add("add")
                     except Exception as err:
                         failures.append(f"add:{filename}")

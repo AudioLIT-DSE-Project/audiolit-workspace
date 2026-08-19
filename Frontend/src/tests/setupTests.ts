@@ -1,5 +1,10 @@
 import "@testing-library/jest-dom";
 
+// Mock API_BASE for Jest test environment
+jest.mock("@/lib/api", () => ({
+  API_BASE: "http://localhost:8000",
+}));
+
 // Mock HTMLCanvasElement.prototype.getContext for jsdom compatibility without canvas native module
 if (typeof HTMLCanvasElement !== "undefined") {
   HTMLCanvasElement.prototype.getContext = jest.fn().mockReturnValue({

@@ -11,7 +11,8 @@ import { AccentBiasPanel } from "./AccentBiasPanel";
 import { FaithfulnessAuditPanel } from "./FaithfulnessAuditPanel";
 import { XAIOverlayCanvas, XAIMethod, XAIResult, F0Point } from "../visualization/XAIOverlayCanvas";
 import { useState, useEffect } from "react";
-import { AlertTriangle, ShieldCheck, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
 interface UploadedFile {
   file_id: string;
@@ -21,6 +22,10 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
+  // Present on rows coming from the dataset table, which carry a cached
+  // transcript alongside the file reference.
+  prediction?: string;
+  predicted_transcript?: string;
 }
 
 interface PerturbationResult {
@@ -81,6 +86,9 @@ interface PredictionPanelProps {
   onPredictionUpdate?: (fileId: string, prediction: string) => void;
   unifiedResult?: UnifiedTaskResult | null; 
   audioDuration?: number; 
+  whisperPrediction?: any;
+  wav2vecPrediction?: any;
+  addPrediction?: any;
 }
 
 export const PredictionPanel = ({ 
@@ -93,7 +101,10 @@ export const PredictionPanel = ({
   onPredictionRefresh, 
   onPredictionUpdate,
   unifiedResult,
-  audioDuration = 10.0
+  audioDuration = 10.0,
+  whisperPrediction,
+  wav2vecPrediction,
+  addPrediction
 }: PredictionPanelProps) => {
   const [originalFile, setOriginalFile] = useState<UploadedFile | null>(selectedFile || null);
   const [perturbedFile, setPerturbedFile] = useState<UploadedFile | null>(null);
@@ -104,9 +115,69 @@ export const PredictionPanel = ({
   // hidden behind this toggle so the default view isn't overloaded.
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // State for dynamic XAI canvas layer opacity swapping
-  const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('saliency');
+  // State for dynamic XAI canvas layer opacity swapping and on-demand fetch
+  const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('gradcam');
+  const [spectrogramData, setSpectrogramData] = useState<number[][] | undefined>(
+    unifiedResult?.tasks?.acoustic?.spectrogram
+  );
+  const [xaiResult, setXaiResult] = useState<XAIResult | undefined>(
+    unifiedResult?.tasks?.xai
+  );
+  const [xaiLoading, setXaiLoading] = useState(false);
+  const [xaiError, setXaiError] = useState<string | null>(null);
+  // The acoustic profile carries the pitch track. Fetched on demand rather
+  // than read from cachedTaskResults alone, so the F0 contour appears for any
+  // file instead of only ones a previous warmup happened to touch.
+  const [acousticProfile, setAcousticProfile] = useState<any | null>(null);
 
+  // Fetch /saliency/generate on demand for XAI Overlay Canvas
+  useEffect(() => {
+    let isMounted = true;
+    const targetFile = selectedFile?.filename || selectedEmbeddingFile;
+    if (!targetFile || !model) return;
+
+    setXaiLoading(true);
+    setXaiError(null);
+
+    const isCustomDataset = dataset?.startsWith('custom:');
+    const saliencyBody = isCustomDataset
+      ? { file_path: selectedFile?.file_path, model, method: activeXAIMethod }
+      : { dataset, dataset_file: targetFile, model, method: activeXAIMethod };
+
+    fetch(`${API_BASE}/saliency/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(saliencyBody),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Saliency generate failed: ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (!isMounted) return;
+        if (data.base_spectrogram) {
+          setSpectrogramData(data.base_spectrogram);
+        }
+        if (data.saliency_matrix) {
+          setXaiResult({
+            method: data.method || activeXAIMethod,
+            matrix: data.saliency_matrix,
+            max_val: data.max_val ?? 1.0,
+          });
+        }
+        setXaiLoading(false);
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setXaiError(err.message || "Failed to load XAI overlay");
+        setXaiLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedFile, selectedEmbeddingFile, model, dataset, activeXAIMethod]);
 
   // Handle perturbation completion
   const handlePerturbationComplete = async (result: PerturbationResult) => {
@@ -131,16 +202,110 @@ export const PredictionPanel = ({
     }
   };
 
+  // Fetch /acoustic/profile on demand for the F0 contour and its mel ceiling
+  useEffect(() => {
+    let isMounted = true;
+    const targetFile = selectedFile?.filename || selectedEmbeddingFile;
+    if (!targetFile) {
+      setAcousticProfile(null);
+      return;
+    }
+
+    const isCustomDataset = dataset?.startsWith('custom:');
+    const body = isCustomDataset || !dataset
+      ? { file_path: selectedFile?.file_path }
+      : { dataset, dataset_file: targetFile };
+
+    fetch(`${API_BASE}/acoustic/profile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (isMounted) setAcousticProfile(data);
+      })
+      .catch(() => {
+        // No placeholder pitch track (A2). An absent contour is honest; an
+        // invented one is not.
+        if (isMounted) setAcousticProfile(null);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedFile?.filename, selectedFile?.file_path, selectedEmbeddingFile, dataset]);
+
+  // On-demand fetch for cached multi-task results (ASR, SER, ADD, acoustic)
+  const [cachedTaskResults, setCachedTaskResults] = useState<{
+    asr?: any;
+    ser?: any;
+    add?: any;
+    acoustic?: any;
+  } | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    const targetFile = selectedFile?.file_path || selectedFile?.filename || selectedFile?.file_id || selectedEmbeddingFile;
+    if (!targetFile) return;
+
+    fetch(`${API_BASE}/api/inference/cached-results`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        audio_ref: selectedFile?.file_path || targetFile,
+        dataset: dataset,
+        dataset_file: selectedFile?.filename || targetFile,
+        model: model || "whisper-base",
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (isMounted && data?.tasks) {
+          setCachedTaskResults(data.tasks);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedFile?.file_id, selectedFile?.filename, selectedFile?.file_path, selectedEmbeddingFile, model, dataset]);
+
   const hasAttention = !!model && model.includes('whisper');
-  const addResult = unifiedResult?.tasks?.add;
-  const serResult = unifiedResult?.tasks?.ser;
-  const asrResult = unifiedResult?.tasks?.asr;
-  
-  // Extract XAI and Acoustic data from unified result
-  const xaiResult = unifiedResult?.tasks?.xai;
-  const spectrogramData = unifiedResult?.tasks?.acoustic?.spectrogram;
-  const waveformData = unifiedResult?.tasks?.acoustic?.waveform || []; // Extract waveform
-  const f0Data = unifiedResult?.tasks?.acoustic?.f0 || [];
+
+  // Synchronize ADD (Deepfake Warning Banner & Card)
+  const rawAdd = unifiedResult?.tasks?.add || cachedTaskResults?.add;
+  const addResult = rawAdd || (addPrediction?.probabilities ? {
+    label: addPrediction.predicted_label,
+    synthetic_probability: addPrediction.synthetic_probability,
+    confidence: addPrediction.confidence,
+    probabilities: addPrediction.probabilities
+  } : undefined);
+
+  // Synchronize SER (Emotion Analytics)
+  const rawSer = unifiedResult?.tasks?.ser || cachedTaskResults?.ser;
+  const serResult = rawSer || (wav2vecPrediction?.probabilities ? {
+    predicted_emotion: wav2vecPrediction.predicted_emotion,
+    probabilities: wav2vecPrediction.probabilities,
+    confidence: wav2vecPrediction.confidence
+  } : undefined);
+
+  // Synchronize ASR (Transcription Timeline)
+  const rawAsr = unifiedResult?.tasks?.asr || cachedTaskResults?.asr;
+  const fileTranscript = whisperPrediction?.predicted_transcript || selectedFile?.prediction || selectedFile?.predicted_transcript;
+  const asrResult = rawAsr || (fileTranscript ? { transcript: fileTranscript, tokens: [] } : undefined);
+
+  const waveformData = unifiedResult?.tasks?.acoustic?.waveform || cachedTaskResults?.acoustic?.waveform || [];
+  // extract_acoustic_profile returns `timeline: [{t_ms, f0_hz, rms}]`. It has no
+  // top-level `f0` key, which is why this contour was empty on every file.
+  const acoustic = acousticProfile || cachedTaskResults?.acoustic;
+  const f0Data: F0Point[] = (acoustic?.timeline || []).map(
+    (pt: { t_ms: number; f0_hz: number | null }) => ({ time_ms: pt.t_ms, freq_hz: pt.f0_hz })
+  );
+  // librosa's mel ceiling is sr/2; the canvas would otherwise assume 8 kHz.
+  const maxFreqHz = acoustic?.sample_rate ? acoustic.sample_rate / 2 : 8000;
 
   return (
     <div className="h-full bg-panel-background border-t border-border flex flex-col">
@@ -282,7 +447,7 @@ export const PredictionPanel = ({
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2">
-                  {Object.entries(serResult.probabilities)
+                  {Object.entries(serResult.probabilities as Record<string, number>)
                     .sort(([, a], [, b]) => b - a)
                     .map(([emotion, probability]) => {
                       const isPredicted = emotion === serResult.predicted_emotion;
@@ -309,9 +474,12 @@ export const PredictionPanel = ({
               </Card>
             ) : (
               !asrResult && (
-                <Card className="w-full h-full flex items-center justify-center min-h-[200px] bg-muted/20">
-                  <CardContent className="text-center text-muted-foreground">
-                    <p className="text-sm">Awaiting multi-task inference results...</p>
+                <Card className="w-full flex items-center justify-center min-h-[220px] bg-muted/20 border-dashed">
+                  <CardContent className="text-center text-muted-foreground p-6 max-w-md">
+                    <p className="text-sm font-semibold mb-1.5 text-foreground">Awaiting multi-task inference results</p>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Click <span className="font-semibold text-primary">"Get Inferences"</span> in the top dataset toolbar to run multi-task (ASR, SER, ADD) analytics on this sample.
+                    </p>
                   </CardContent>
                 </Card>
               )
@@ -323,8 +491,8 @@ export const PredictionPanel = ({
           <TabsContent value="saliency" forceMount className="m-0 h-full data-[state=inactive]:hidden">
             <div className="p-3 space-y-4">
               {/* Dynamic XAI Method Toggle Buttons */}
-              <div className="flex gap-2 mb-2">
-                {(['saliency', 'shap', 'lime', 'ig'] as XAIMethod[]).map(m => (
+              <div className="flex gap-2 mb-2 flex-wrap">
+                {(['gradcam', 'integrated_gradients', 'lime', 'shap'] as XAIMethod[]).map(m => (
                   <button 
                     key={m} 
                     onClick={() => setActiveXAIMethod(m)}
@@ -334,19 +502,35 @@ export const PredictionPanel = ({
                         : 'bg-muted text-muted-foreground border-border hover:bg-accent'
                     }`}
                   >
-                    {m.toUpperCase()}
+                    {m === 'integrated_gradients' ? 'INTEGRATED GRADIENTS' : m.toUpperCase()}
                   </button>
                 ))}
               </div>
 
               {/* New High-Performance XAI Overlay Canvas */}
-              {spectrogramData || xaiResult ? (
+              {xaiError ? (
+                <Card className="w-full h-[400px] flex items-center justify-center bg-red-50 dark:bg-red-950/20 border-red-200 dark:border-red-900">
+                  <CardContent className="text-center text-red-600 dark:text-red-400 p-6">
+                    <AlertTriangle className="h-8 w-8 mx-auto mb-2 opacity-80" />
+                    <p className="text-sm font-semibold">Failed to load XAI Overlay Canvas</p>
+                    <p className="text-xs mt-1 opacity-90">{xaiError}</p>
+                  </CardContent>
+                </Card>
+              ) : xaiLoading ? (
+                <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
+                  <CardContent className="text-center text-muted-foreground flex flex-col items-center gap-2">
+                    <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                    <p className="text-sm">Loading XAI Saliency & Spectrogram overlay...</p>
+                  </CardContent>
+                </Card>
+              ) : spectrogramData || xaiResult ? (
                 <XAIOverlayCanvas
                   audioDuration={audioDuration}
                   baseSpectrogram={spectrogramData}
                   waveformData={waveformData} // Pass waveform data to canvas
                   xaiResults={xaiResult ? [xaiResult] : []}
                   f0Data={f0Data}
+                  maxFreqHz={maxFreqHz}
                   activeMethod={activeXAIMethod}
                   width={800}
                   height={400}
@@ -354,7 +538,7 @@ export const PredictionPanel = ({
               ) : (
                 <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
                   <CardContent className="text-center text-muted-foreground">
-                    <p className="text-sm">Awaiting XAI & Spectrogram data from worker...</p>
+                    <p className="text-sm">Select an audio file and saliency method to render XAI overlay canvas.</p>
                   </CardContent>
                 </Card>
               )}
