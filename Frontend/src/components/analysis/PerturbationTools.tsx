@@ -417,6 +417,82 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
   const [spectrogramFrames, setSpectrogramFrames] = useState<SpectrogramBoundaryFrame[]>([])
   const [activeFrameId, setActiveFrameId] = useState<string | null>(null)
   const [frameMutationType, setFrameMutationType] = useState<FrameMutationType>('time_freq_mask')
+
+  // FR12.2 — client-side region preview, before any network call.
+  //
+  // AudioContext previously appeared only in a test mock: the suite asserted
+  // against a feature that had never been built, which is how this stayed
+  // invisible through several reviews. Decoding happens once per clip and is
+  // cached; nothing here touches the backend.
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const bufferRef = useRef<{ url: string; buffer: AudioBuffer } | null>(null);
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const [previewing, setPreviewing] = useState<'region' | 'muted' | null>(null);
+
+  const stopPreview = useCallback(() => {
+    try {
+      sourceRef.current?.stop();
+    } catch {
+      // already stopped
+    }
+    sourceRef.current = null;
+    setPreviewing(null);
+  }, []);
+
+  useEffect(() => () => {
+    stopPreview();
+    audioCtxRef.current?.close().catch(() => undefined);
+    audioCtxRef.current = null;
+  }, [stopPreview]);
+
+  const loadBuffer = useCallback(async (url: string) => {
+    if (bufferRef.current?.url === url) return bufferRef.current.buffer;
+    const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = audioCtxRef.current ?? new Ctor();
+    audioCtxRef.current = ctx;
+    const bytes = await (await fetch(url)).arrayBuffer();
+    const buffer = await ctx.decodeAudioData(bytes);
+    bufferRef.current = { url, buffer };
+    return buffer;
+  }, []);
+
+  /** Play only the selected region, or the clip with that region silenced. */
+  const previewFrame = useCallback(async (frame: SpectrogramBoundaryFrame, mode: 'region' | 'muted') => {
+    const url = getAudioUrl(selectedFile, dataset, originalDataset);
+    if (!url) return;
+    stopPreview();
+    const ctx = audioCtxRef.current ?? new (window.AudioContext)();
+    audioCtxRef.current = ctx;
+    const buffer = await loadBuffer(url);
+
+    const start = Math.max(0, frame.startTimeMs / 1000);
+    const end = Math.min(buffer.duration, frame.endTimeMs / 1000);
+    const source = ctx.createBufferSource();
+
+    if (mode === 'region') {
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0, start, Math.max(0.01, end - start));
+    } else {
+      // Copy, then zero the selected span: the counterfactual the mutation
+      // will produce, auditioned locally first.
+      const muted = ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+        const data = Float32Array.from(buffer.getChannelData(ch));
+        data.fill(0, Math.floor(start * buffer.sampleRate), Math.floor(end * buffer.sampleRate));
+        muted.copyToChannel(data, ch);
+      }
+      source.buffer = muted;
+      source.connect(ctx.destination);
+      source.start();
+    }
+
+    source.onended = () => setPreviewing(null);
+    sourceRef.current = source;
+    setPreviewing(mode);
+  }, [selectedFile, dataset, originalDataset, loadBuffer, stopPreview]);
+
+
   const [frameNoiseLevel, setFrameNoiseLevel] = useState([10])
   const activeFrame = spectrogramFrames.find(f => f.id === activeFrameId) ?? null
 
@@ -774,6 +850,38 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
                   {(frame.startTimeMs / 1000).toFixed(2)}s–{(frame.endTimeMs / 1000).toFixed(2)}s · {Math.round(frame.startFreqHz)}–{Math.round(frame.endFreqHz)}Hz
                 </button>
               ))}
+            </div>
+
+            <div className="flex flex-wrap gap-2 mb-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!activeFrameId}
+                onClick={() => {
+                  const f = spectrogramFrames.find((x) => x.id === activeFrameId);
+                  if (f) void previewFrame(f, 'region');
+                }}
+              >
+                Preview region{previewing === 'region' ? '…' : ''}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!activeFrameId}
+                onClick={() => {
+                  const f = spectrogramFrames.find((x) => x.id === activeFrameId);
+                  if (f) void previewFrame(f, 'muted');
+                }}
+              >
+                Preview muted{previewing === 'muted' ? '…' : ''}
+              </Button>
+              {previewing && (
+                <Button type="button" size="sm" variant="ghost" onClick={stopPreview}>
+                  Stop
+                </Button>
+              )}
             </div>
 
             <div className="flex flex-wrap gap-2">

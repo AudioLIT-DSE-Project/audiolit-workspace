@@ -49,9 +49,48 @@ def content_hash(resolved_path: str | Path) -> str:
     return hashlib.md5(f"{str(p)}_{st.st_size}_{st.st_mtime}".encode()).hexdigest()
 
 
-def both_hashes(resolved_path: str | Path) -> tuple[str, str]:
-    """``(path_hash, content_hash)`` for the given file."""
-    return path_hash(resolved_path), content_hash(resolved_path)
+def content_sha256(resolved_path: str | Path) -> str:
+    """Streamed SHA-256 over the audio bytes themselves (FR4.1).
+
+    This is the identity FR4 specifies: *"a SHA-256 hash of the (audio bytes,
+    model identifier, task, parameters) tuple"*. The two hashes above key on
+    where a file sits, so the same audio at two paths caches twice and a file
+    edited in place can serve a stale result.
+
+    Deliberately not memoised. A memo keyed on (size, mtime) is the obvious
+    optimisation and it is unsound here: two same-length writes milliseconds
+    apart share both values on this filesystem even at ``st_mtime_ns``
+    resolution, so the memo returned the pre-edit hash - reintroducing exactly
+    the staleness this function exists to remove. Measured at ~1.2 ms for a 5 s
+    clip, against a request that then runs a model; the trade is not close.
+    """
+    h = hashlib.sha256()
+    with open(resolved_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def both_hashes(resolved_path: str | Path) -> tuple[str, str, str]:
+    """``(content_sha256, path_hash, content_hash)`` — content first.
+
+    Content first so readers prefer the content-addressed key and fall back to
+    the two location-derived ones, which keeps every entry written before FR4.1
+    readable during the transition. Writers populate all three.
+
+    The name is now a misnomer (three, not both) but it is called from six
+    places; renaming belongs in the change that drops the path hashes, not this
+    one.
+    """
+    try:
+        content = content_sha256(resolved_path)
+    except OSError:
+        # An unreadable file still has a usable path identity; degrade rather
+        # than lose caching entirely.
+        content = ""
+    hashes = [content] if content else []
+    hashes += [path_hash(resolved_path), content_hash(resolved_path)]
+    return tuple(hashes)
 
 
 # --------------------------------------------------------------------------- #
@@ -117,7 +156,16 @@ def deepfake_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]:
 # `spectrogram` without one, so every entry cached before it kept being served
 # without a spectrogram for the whole 24 h TTL - a correct computation the UI
 # could never see (FR4.1: a shape change must not be serveable under an old key).
-ACOUSTIC_SCHEMA_VERSION = "v2"
+ACOUSTIC_SCHEMA_VERSION = "v3"
+
+
+def add_timeline_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Windowed ADD confidence timeline (FR7.2). Payload: ``{"timeline": [...]}``.
+
+    Its own family, not the clip-level one: the two carry different shapes and
+    sharing a key is how an ADD dict once landed on top of an ASR transcript.
+    """
+    return [(model, f"{model}_add_timeline_{CACHE_SCHEMA_VERSION}_{h}") for h in hashes]
 
 
 def acoustic_keys(hashes: tuple[str, ...]) -> list[tuple[str, str]]:

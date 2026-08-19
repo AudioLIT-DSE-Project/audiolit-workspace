@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePlayback } from '@/contexts/PlaybackContext';
 import { Card } from "@/components/ui/card";
 import WaveSurfer from "wavesurfer.js";
 
@@ -24,6 +25,9 @@ interface WaveformViewerProps {
 }
 
 export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSelectionChange }: WaveformViewerProps) => {
+  // FR10.2: this component owns the wavesurfer instance, so it is the single
+  // source of playback time for every other time-aligned view.
+  const { publish, registerSeek } = usePlayback();
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -66,6 +70,10 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSel
     });
 
     wavesurferRef.current = wavesurfer;
+    registerSeek((seconds: number) => {
+      const total = wavesurfer.getDuration();
+      if (total > 0) wavesurfer.seekTo(Math.min(1, Math.max(0, seconds / total)));
+    });
 
     // Set up event listeners
     wavesurfer.on('ready', () => {
@@ -77,15 +85,17 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSel
     });
 
     wavesurfer.on('audioprocess', (currentTime) => {
+      publish(currentTime, wavesurfer.getDuration());
       if (onProgress) {
         onProgress(currentTime, wavesurfer.getDuration());
       }
     });
 
     wavesurfer.on('interaction' as any, () => {
+      const currentTime = wavesurfer.getCurrentTime();
+      const duration = wavesurfer.getDuration();
+      publish(currentTime, duration || 0);
       if (onProgress) {
-        const currentTime = wavesurfer.getCurrentTime();
-        const duration = wavesurfer.getDuration();
         onProgress(currentTime, duration || 0);
       }
     });

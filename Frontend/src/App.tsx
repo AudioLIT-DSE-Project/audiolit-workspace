@@ -8,6 +8,7 @@ import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 
 import { ModelRegistryProvider } from "@/context/ModelRegistryContext";
+import { PlaybackProvider } from "@/contexts/PlaybackContext";
 import { ModelDownloadBanner } from "@/components/layout/ModelDownloadBanner";
 
 const queryClient = new QueryClient();
@@ -18,6 +19,7 @@ const App = () => (
   <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
     <QueryClientProvider client={queryClient}>
       <ModelRegistryProvider>
+        <PlaybackProvider>
         <TooltipProvider>
           <Toaster />
           <Sonner />
@@ -30,6 +32,7 @@ const App = () => (
             </Routes>
           </BrowserRouter>
         </TooltipProvider>
+        </PlaybackProvider>
       </ModelRegistryProvider>
     </QueryClientProvider>
   </ThemeProvider>
