@@ -25,6 +25,42 @@ transformers.logging.set_verbosity_error()
 logger = logging.getLogger(__name__)
 
 
+# Whisper model resolution (FR1).
+#
+# Every entry point below takes whatever the user selected - a short alias
+# from the built-in list, or an arbitrary Hugging Face repo id added at
+# runtime - and resolves it here. Nothing downstream may substitute a
+# different checkpoint: doing so silently returns another model's output
+# under the requested model's cache key, which breaks both FR1 (the selected
+# model is the one that runs) and FR4 (a key identifies exactly one result).
+DEFAULT_WHISPER_MODEL_ID = "openai/whisper-base"
+
+_WHISPER_ALIASES = {
+    "tiny": "openai/whisper-tiny",
+    "base": "openai/whisper-base",
+    "small": "openai/whisper-small",
+    "medium": "openai/whisper-medium",
+    "large": "openai/whisper-large-v3",
+}
+
+
+def resolve_whisper_model_id(model: str | None) -> str:
+    """Map a selection to a concrete Hugging Face id.
+
+    A bare size alias expands to the matching OpenAI checkpoint; anything
+    else - including any custom `org/name` repo - passes through untouched.
+    """
+    if not model:
+        return DEFAULT_WHISPER_MODEL_ID
+    name = str(model).strip()
+    if "/" in name:
+        return name
+    key = name.lower()
+    if key.startswith("whisper-"):
+        key = key[len("whisper-"):]
+    return _WHISPER_ALIASES.get(key, name)
+
+
 _whisper_cond_gen_cache = {}
 
 def _get_whisper_cond_gen(model_id: str):
@@ -107,6 +143,7 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
             
             # Try multiple approaches for attention extraction
             attention_data = []
+            attention_is_fallback = False
             
             # Method 1: Use generated IDs as decoder input
             try:
@@ -292,10 +329,13 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                     try:
                         # Analyze audio to create meaningful attention
                         seq_length = min(1500, len(audio) // 320)  # Rough estimate of sequence length
-                        # Derive model size from model_id
-                        model_size = "base" if "base" in model_id else "large"
-                        num_layers = 6 if model_size == "base" else 12 
-                        num_heads = 8 if model_size == "base" else 16
+                        # Shape the placeholder to the loaded checkpoint's own
+                        # config. The previous "base" in model_id test gave
+                        # whisper-tiny 12 layers / 16 heads - a shape no
+                        # Whisper-tiny ever produces.
+                        cfg = getattr(model, "config", None)
+                        num_layers = getattr(cfg, "decoder_layers", None) or 6
+                        num_heads = getattr(cfg, "decoder_attention_heads", None) or 8
                         
                         # Create attention patterns based on audio characteristics
                         for layer_idx in range(num_layers):
@@ -321,7 +361,12 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                             
                             attention_data.append(layer_data)
                         
-                        logger.info(f"Generated {len(attention_data)} layers of structured attention patterns")
+                        attention_is_fallback = True
+                        logger.warning(
+                            "Fabricated %d layers of structured attention - NOT real "
+                            "attention; flagged via attention_is_fallback (FR17)",
+                            len(attention_data),
+                        )
                         
                     except Exception as pattern_error:
                         logger.error(f"Pattern generation failed: {pattern_error}")
@@ -334,7 +379,11 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
             
             result_dict = {
                 "text": transcript,
-                "attention": attention_data if attention_data else None
+                "attention": attention_data if attention_data else None,
+                # FR17.1: a caller must be able to tell a genuine extraction
+                # from the synthesised stand-in below, which has the same
+                # shape and would otherwise be indistinguishable.
+                "attention_is_fallback": bool(attention_data) and attention_is_fallback,
             }
             
             logger.info(f"Whisper result: text='{transcript[:50]}...', attention_layers={len(attention_data) if attention_data else 0}")
@@ -400,18 +449,18 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
         }
     return result["text"]
 
-def transcribe_whisper_base(audio_file_path):
-    model_id = "openai/whisper-base"
-    return transcribe_whisper(model_id, audio_file_path)
+def transcribe_whisper_base(audio_file_path, model=None):
+    """Transcribe with the selected model, defaulting to whisper-base."""
+    return transcribe_whisper(resolve_whisper_model_id(model), audio_file_path)
 
 def transcribe_whisper_with_timestamps(audio_file_path, model_size="base"):
-    model_id = "openai/whisper-base" if model_size in ("base", "whisper-base") else model_size
+    model_id = resolve_whisper_model_id(model_size)
     return transcribe_whisper(model_id, audio_file_path, return_timestamps=True)
 
 def transcribe_whisper_with_attention(audio_file_path, model_size="base"):
     """Transcribe audio and return attention weights"""
     logger.info(f"transcribe_whisper_with_attention called: file={audio_file_path}, model_size={model_size}")
-    model_id = "openai/whisper-base" if model_size in ("base", "whisper-base") else model_size
+    model_id = resolve_whisper_model_id(model_size)
     result = transcribe_whisper(model_id, audio_file_path, return_attention=True)
     logger.info(f"transcribe_whisper_with_attention result: has_attention={bool(result.get('attention'))}")
     return result
@@ -1107,13 +1156,17 @@ def wave2vec(audio_file_path: str, return_probabilities: bool = False):
 # Whisper embeddings - Load models for embedding extraction
 _whisper_processor_base = None
 
-def get_whisper_base_models():
-    """Whisper-base (processor + model), model loaded lazily via the ModelRegistry (LIT-207)."""
+def get_whisper_base_models(model_id: str = DEFAULT_WHISPER_MODEL_ID):
+    """Processor + model for `model_id`, loaded lazily via the ModelRegistry."""
     global _whisper_processor_base
-    if _whisper_processor_base is None:
-        _whisper_processor_base = WhisperProcessor.from_pretrained("openai/whisper-base")
-    loaded = _model_registry.get("openai/whisper-base")
-    return _whisper_processor_base, loaded.model
+    if model_id == DEFAULT_WHISPER_MODEL_ID:
+        if _whisper_processor_base is None:
+            _whisper_processor_base = WhisperProcessor.from_pretrained(model_id)
+        processor = _whisper_processor_base
+    else:
+        processor = WhisperProcessor.from_pretrained(model_id)
+    loaded = _model_registry.get(model_id)
+    return processor, loaded.model
 
 def extract_whisper_embeddings(audio_file_path: str, model_size_or_id: str = "base") -> np.ndarray:
     """Extract Whisper encoder embeddings from audio file for builtin or custom HF models.
@@ -1122,16 +1175,17 @@ def extract_whisper_embeddings(audio_file_path: str, model_size_or_id: str = "ba
     audio, sample_rate = librosa.load(audio_file_path, sr=16000)
     audio = audio.astype(np.float32)
     
-    if model_size_or_id in ("base", "whisper-base", "openai/whisper-base"):
-        processor, model = get_whisper_base_models()
+    model_id = resolve_whisper_model_id(model_size_or_id)
+    if model_id == DEFAULT_WHISPER_MODEL_ID:
+        processor, model = get_whisper_base_models(model_id)
     else:
-        try:
-            from transformers import WhisperProcessor, WhisperModel
-            processor = WhisperProcessor.from_pretrained(model_size_or_id)
-            model = WhisperModel.from_pretrained(model_size_or_id)
-        except Exception as e:
-            logger.warning("Could not load custom processor/model '%s' for embeddings, falling back to whisper-base: %s", model_size_or_id, e)
-            processor, model = get_whisper_base_models()
+        # Deliberately no fall back to whisper-base on failure: the caller
+        # stores this vector under the *requested* model's cache key, so
+        # substituting another checkpoint would poison the projection with
+        # embeddings from a model the user never asked for (FR1, FR4).
+        from transformers import WhisperProcessor, WhisperModel
+        processor = WhisperProcessor.from_pretrained(model_id)
+        model = WhisperModel.from_pretrained(model_id)
     
     device = next(model.parameters()).device if hasattr(model, "parameters") else "cpu"
     model.eval()
@@ -1340,7 +1394,7 @@ def process_attention_into_pairs(attention_result, audio_file_path, model_size, 
                 "attention_pairs": [],
                 "timestamp_attention": [], 
                 "total_duration": 0,
-                "model": f"whisper-{model_size}",
+                "model": resolve_whisper_model_id(model_size),
                 "layer": layer_idx,
                 "head": head_idx
             }
@@ -1465,7 +1519,7 @@ def process_attention_into_pairs(attention_result, audio_file_path, model_size, 
                 })
         
         result = {
-            "model": f"whisper-{model_size}",
+            "model": resolve_whisper_model_id(model_size),
             "layer": layer_idx,
             "head": head_idx,
             "attention_pairs": attention_pairs,

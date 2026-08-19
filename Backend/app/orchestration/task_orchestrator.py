@@ -763,6 +763,7 @@ def run_batch_dataset_warmup_task(
     """
     import json
     import time
+    from app.infrastructure import cache_keys as ck
     from app.infrastructure.dataset_service import load_metadata, resolve_file
 
     try:
@@ -776,6 +777,12 @@ def run_batch_dataset_warmup_task(
 
     completed = 0
     cancelled = False
+    # A file only counts as warmed if something was actually written for it.
+    # The previous version incremented `completed` inside the exception
+    # handler, so a run that failed on every file still reported 100%.
+    warmed_files = 0
+    failures: list[str] = []
+    warmed: set[str] = set()
     start_time = time.time()
 
     def format_eta(seconds: int) -> str:
@@ -839,49 +846,100 @@ def run_batch_dataset_warmup_task(
             target_file = filename or row.get("path", "")
             resolved_path = resolve_file(dataset, target_file)
             if resolved_path and resolved_path.exists():
-                file_stat = resolved_path.stat()
-                file_path_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-                file_content_hash = hashlib.md5(
-                    f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()
-                ).hexdigest()
+                path_h, content_h = ck.both_hashes(resolved_path)
+                hashes = (path_h, content_h)
                 from app.infrastructure.redis import cache_result_sync
 
-                # 1. Predictions (ASR / SER / ADD)
-                if ("asr" in tasks or "ser" in tasks or "add" in tasks):
+                def write(keys, payload):
+                    """Store one payload under every spelling its consumers read."""
+                    for ns, key in keys:
+                        cache_result_sync(ns, key, payload, ttl=86400)
+
+                model_l = model.lower()
+                is_whisper = "whisper" in model_l
+                is_wav2vec = "wav2vec" in model_l
+
+                # 1. ASR transcript + attention.
+                #
+                # These are two contracts sharing one forward pass. The
+                # transcript family stores a plain string - its consumers call
+                # .lower() on it - while the attention family stores the full
+                # {"text", "attention"} dict. Writing the dict into both is the
+                # defect that made warmed datasets unreadable.
+                if "asr" in tasks and is_whisper:
                     if is_job_cancelled():
                         cancelled = True
                         cleanup_memory()
                         break
                     try:
-                        update_subtask("ML Inference & Classification")
+                        update_subtask("ASR Transcription & Attention")
                         from app.domain.model_loader_service import (
                             transcribe_whisper_with_attention,
-                            predict_emotion_wave2vec,
-                            predict_deepfake,
+                            extract_whisper_embeddings,
                         )
-                        if "whisper" in model.lower():
-                            pred = transcribe_whisper_with_attention(str(resolved_path), model)
-                        elif "wav2vec" in model.lower():
-                            pred = predict_emotion_wave2vec(str(resolved_path))
-                        else:
-                            pred = predict_deepfake(str(resolved_path))
+                        asr = transcribe_whisper_with_attention(str(resolved_path), model)
+                        if asr is not None:
+                            write(
+                                ck.transcript_keys(model, hashes),
+                                {"prediction": ck.as_transcript(asr)},
+                            )
+                            write(ck.attention_keys(model, hashes), {"prediction": asr})
+                            warmed.add("asr")
 
-                        if pred is not None:
-                            cache_payload = {"prediction": pred, "status": "completed"}
-                            # Multi-key caching so all prediction/attention endpoints hit cache
-                            cache_result_sync(model, f"v2_{model}_{file_path_hash}", cache_payload, ttl=86400)
-                            cache_result_sync(model, f"v2_{model}_{file_content_hash}", cache_payload, ttl=86400)
-                            cache_result_sync(model, f"{model}_attention_v2_{file_path_hash}", cache_payload, ttl=86400)
-                            cache_result_sync(model, f"{model}_attention_v2_{file_content_hash}", cache_payload, ttl=86400)
-                            cache_result_sync(model, f"{model}_{file_path_hash}", cache_payload, ttl=86400)
-                            cache_result_sync("predictions", f"v2_{model}_{file_path_hash}", cache_payload, ttl=86400)
-                            cache_result_sync("predictions", f"v2_{model}_{file_content_hash}", cache_payload, ttl=86400)
-                            if "wav2vec" in model.lower():
-                                cache_result_sync("wav2vec2", f"wav2vec2_detailed_{file_path_hash}", cache_payload, ttl=86400)
+                        # Latent projection (FR11) reads its own key family.
+                        try:
+                            update_subtask("Latent Embeddings")
+                            emb = extract_whisper_embeddings(str(resolved_path), model)
+                            write(
+                                ck.embedding_keys(model, hashes),
+                                {"embedding": emb.tolist()},
+                            )
+                            warmed.add("embeddings")
+                        except Exception as err:
+                            logger.warning(f"Embedding warmup failed for {filename}: {err}")
                     except Exception as err:
-                        logger.error(f"Prediction warmup failed for {filename}: {err}", exc_info=True)
+                        failures.append(f"asr:{filename}")
+                        logger.error(f"ASR warmup failed for {filename}: {err}", exc_info=True)
 
-                # 2. Acoustic Profiling (Pitch F0, Energy, Spectrogram)
+                # 2. SER. Cached under the model-independent "wav2vec2"
+                # namespace, so it is warmed whenever requested regardless of
+                # which ASR model the user selected.
+                if "ser" in tasks:
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
+                    try:
+                        update_subtask("Speech Emotion Recognition")
+                        from app.domain.model_loader_service import (
+                            predict_emotion_wave2vec_with_attention,
+                        )
+                        ser = predict_emotion_wave2vec_with_attention(str(resolved_path))
+                        if ser is not None:
+                            write(ck.ser_keys(hashes), {"prediction": ser})
+                            warmed.add("ser")
+                    except Exception as err:
+                        failures.append(f"ser:{filename}")
+                        logger.error(f"SER warmup failed for {filename}: {err}", exc_info=True)
+
+                # 3. Audio deepfake detection.
+                if "add" in tasks or (not is_whisper and not is_wav2vec):
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
+                    try:
+                        update_subtask("Deepfake Detection")
+                        from app.domain.model_loader_service import predict_deepfake
+                        add = predict_deepfake(str(resolved_path))
+                        if add is not None:
+                            write(ck.deepfake_keys(model, hashes), {"prediction": add})
+                            warmed.add("add")
+                    except Exception as err:
+                        failures.append(f"add:{filename}")
+                        logger.error(f"ADD warmup failed for {filename}: {err}", exc_info=True)
+
+                # 4. Acoustic profile (FR10) and frequency features.
                 if "acoustic" in tasks:
                     if is_job_cancelled():
                         cancelled = True
@@ -890,17 +948,34 @@ def run_batch_dataset_warmup_task(
                     try:
                         update_subtask("Acoustic Profiling (F0 / Spectrogram)")
                         import soundfile as sf
-                        from app.domain.acoustic_profiler_service import extract_acoustic_profile
+                        from app.domain.acoustic_profiler_service import (
+                            extract_acoustic_profile,
+                        )
                         audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
                         if audio.ndim > 1:
                             audio = audio.mean(axis=1)
                         prof = extract_acoustic_profile(audio, sr)
-                        cache_result_sync("acoustic", f"acoustic_profile_{file_path_hash}", prof, ttl=86400)
-                        cache_result_sync("acoustic", f"acoustic_profile_{file_content_hash}", prof, ttl=86400)
+                        write(ck.acoustic_keys(hashes), prof)
+                        warmed.add("acoustic")
                     except Exception as err:
-                        logger.error(f"Acoustic warmup failed for {filename}: {err}", exc_info=True)
+                        failures.append(f"acoustic:{filename}")
+                        logger.error(
+                            f"Acoustic warmup failed for {filename}: {err}", exc_info=True
+                        )
 
-                # 3. Saliency / XAI Grad-CAM Attribution Heatmaps
+                    try:
+                        from app.domain.model_loader_service import (
+                            extract_audio_frequency_features,
+                        )
+                        feats = extract_audio_frequency_features(str(resolved_path))
+                        write(ck.audio_frequency_keys(hashes), {"features": feats})
+                        warmed.add("audio_frequency")
+                    except Exception as err:
+                        logger.warning(
+                            f"Frequency-feature warmup failed for {filename}: {err}"
+                        )
+
+                # 5. Saliency / XAI attribution heatmaps.
                 if "saliency" in tasks:
                     if is_job_cancelled():
                         cancelled = True
@@ -911,14 +986,21 @@ def run_batch_dataset_warmup_task(
                         from app.domain.saliency_service import generate_saliency
                         sal_res = generate_saliency(str(resolved_path), model, "gradcam")
                         if sal_res:
-                            cache_result_sync("saliency", f"saliency_v2_{model}_gradcam_{file_content_hash}", sal_res, ttl=86400)
-                            cache_result_sync("saliency", f"saliency_v2_{model}_gradcam_{file_path_hash}", sal_res, ttl=86400)
+                            write(ck.saliency_keys(model, "gradcam", hashes), sal_res)
+                            warmed.add("saliency")
                     except Exception as err:
-                        logger.error(f"Saliency warmup failed for {filename}: {err}", exc_info=True)
+                        failures.append(f"saliency:{filename}")
+                        logger.error(
+                            f"Saliency warmup failed for {filename}: {err}", exc_info=True
+                        )
         except Exception as e:
+            failures.append(f"file:{filename}")
             logger.error(f"Batch warmup error on {filename}: {e}", exc_info=True)
 
         completed += 1
+        if warmed:
+            warmed_files += 1
+            warmed.clear()
         cleanup_memory()
 
         # CPU Thermal Cooldown Interval
@@ -932,7 +1014,14 @@ def run_batch_dataset_warmup_task(
         "current_file": "Done" if not cancelled else "Cancelled",
         "status": final_status,
         "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
+        "cached_files": warmed_files,
+        "failed_subtasks": len(failures),
     }
+    if failures:
+        logger.warning(
+            "Warmup %s: %d/%d files cached, %d subtask failures (first 10: %s)",
+            job_id, warmed_files, completed, len(failures), failures[:10],
+        )
     cleanup_memory()
     if conn:
         conn.set(f"job_progress_{job_id}", json.dumps(final_progress), ex=86400)
