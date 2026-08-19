@@ -7,8 +7,15 @@ import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/comp
 import { Upload, Search, Play, Pause, Square, RefreshCw, HelpCircle } from "lucide-react";
 import { AudioUploader } from "../audio/AudioUploader";
 import { AudioDataTable } from "../audio/AudioDataTable";
+import { DatasetLicenseNotice } from "../dataset/DatasetLicenseNotice";
 import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
+
+interface DatasetLicenseInfo {
+  license: string | null;
+  task_family: string | null;
+  non_commercial: boolean;
+}
 
 interface UploadedFile {
   file_id: string;
@@ -68,6 +75,27 @@ export const AudioDatasetPanel = ({
   const [isInferenceComplete, setIsInferenceComplete] = useState(false);
   const [currentModelDataset, setCurrentModelDataset] = useState<string>("");
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // FR2.3 / SAD C5 — licence metadata for the built-in benchmark corpora, so a
+  // non-commercial dataset (RAVDESS, L2-ARCTIC, ESD, ASVspoof 2021 DF) can show
+  // a notice on load instead of the licence info being retained server-side
+  // but never surfaced to the user.
+  const [datasetLicenses, setDatasetLicenses] = useState<Record<string, DatasetLicenseInfo>>({});
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/datasets/list`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.licenses) setDatasetLicenses(data.licenses);
+      })
+      .catch(() => {
+        // Non-fatal: the dataset table still works without licence info.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const currentLicenseInfo = datasetLicenses[dataset];
 
   // Sync selectedRow when selectedFile changes from external selection (e.g., embeddings)
   useEffect(() => {
@@ -598,7 +626,12 @@ export const AudioDatasetPanel = ({
             </span>
           </div>
         )}
-        
+
+        {/* FR2.3 / SAD C5 — licence notice for non-commercial corpora */}
+        {currentLicenseInfo?.non_commercial && currentLicenseInfo.license && (
+          <DatasetLicenseNotice datasetName={dataset} license={currentLicenseInfo.license} />
+        )}
+
         {/* Search bar */}
         <div className="px-3 pt-2.5 pb-1">
           <div className="relative border border-gray-200 rounded-lg px-2 py-1">

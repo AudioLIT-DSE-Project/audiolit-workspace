@@ -1,4 +1,5 @@
 from pathlib import Path
+from itertools import islice
 from typing import Dict, List, Optional
 import csv
 import librosa
@@ -9,6 +10,7 @@ from .custom_dataset_service import (
     is_custom_dataset,
     parse_custom_dataset_name
 )
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -34,20 +36,39 @@ DATASET_BASE_DIRS: Dict[str, Path] = {
 }
 
 
-def _registry_metadata_rows(dataset: str) -> List[Dict[str, str]]:
-    """Metadata rows for any dataset_ingestion-registered corpus (LIT-235).
+def _registry_metadata_rows(
+    dataset: str, *, limit: Optional[int] = None, offset: int = 0
+) -> List[Dict[str, str]]:
+    """Metadata rows for any dataset_ingestion-registered corpus (LIT-235; LIT-237).
 
     Converts each SampleMetadata into the same dict-row shape the frontend
     already reads generically (checks "path"/"filepath"/"file"/"filename" in
     that order, per AudioDatasetPanel.tsx) so no frontend contract changes.
+
+    Two FR2 fixes on top of the original LIT-235 version:
+
+    - FR2.1: streams through ``validated_stream(deep=False)`` so rows whose
+      audio file doesn't exist on disk are excluded rather than shown and
+      then failing on playback. ``deep=False`` is an existence check only
+      (no decode) — this runs on every row of a listing request, so it has
+      to stay cheap; the full decode+silence check lives in the batch/eval
+      path (``accent_bias_profiler.load_accent_cohorts``) instead.
+    - FR2.2: capped to ``settings.DATASET_METADATA_ROW_CAP`` (or an explicit
+      ``limit``) via a windowed ``islice`` instead of materializing the
+      entire corpus into a list, which is what this function did before and
+      is exactly what the "nothing materialized whole" acceptance line in
+      the SRS forbids.
     """
     try:
         loader = dataset_ingestion.get_loader(dataset)
     except (ValueError, NotImplementedError) as e:
         raise ValueError(str(e))
 
+    cap = limit if limit is not None else settings.DATASET_METADATA_ROW_CAP
+    window = islice(loader.validated_stream(deep=False), offset, offset + cap)
+
     rows: List[Dict[str, str]] = []
-    for sample in loader.iter_metadata():
+    for sample in window:
         row: Dict[str, str] = {
             "filename": sample.audio_path.name,
             "label": sample.label or "",
@@ -56,6 +77,15 @@ def _registry_metadata_rows(dataset: str) -> List[Dict[str, str]]:
             row["speaker_id"] = sample.speaker_id
         if sample.accent:
             row["accent"] = sample.accent
+        if sample.language:
+            row["language"] = sample.language
+        if sample.license:
+            row["license"] = sample.license
+        for key, value in sample.demographic.items():
+            row.setdefault(key, value)
+        duration = calculate_audio_duration(sample.audio_path)
+        if duration:
+            row["duration"] = str(duration)
         rows.append(row)
     return rows
 
@@ -96,14 +126,20 @@ def calculate_audio_duration(audio_path: Path) -> float:
             logger.warning(f"Could not calculate duration for {audio_path}: {e}")
             return 0.0
 
-def load_metadata(dataset: str, session_id: Optional[str] = None) -> List[Dict[str, str]]:
+def load_metadata(
+    dataset: str,
+    session_id: Optional[str] = None,
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> List[Dict[str, str]]:
     """Load metadata for both global and custom datasets"""
-    
+
     # Handle custom datasets
     if is_custom_dataset(dataset):
         if not session_id:
             raise ValueError("session_id is required for custom datasets")
-        
+
         session_id_from_name, dataset_name = parse_custom_dataset_name(dataset)
         logger.info(f"Custom dataset metadata: session_id_from_name='{session_id_from_name}', current_session_id='{session_id}'")
         if session_id_from_name != session_id:
@@ -111,14 +147,14 @@ def load_metadata(dataset: str, session_id: Optional[str] = None) -> List[Dict[s
             # Use the dataset's session ID instead
             manager = get_custom_dataset_manager(session_id_from_name)
             return manager.get_dataset_files_as_csv_format(dataset_name)
-        
+
         manager = get_custom_dataset_manager(session_id)
         return manager.get_dataset_files_as_csv_format(dataset_name)
-    
+
     # Handle global datasets (existing logic)
     ds = dataset.lower()
     if ds not in DATASET_PATHS:
-        return _registry_metadata_rows(ds)
+        return _registry_metadata_rows(ds, limit=limit, offset=offset)
 
     csv_path = DATASET_PATHS[ds]
     if not csv_path.exists():
@@ -131,25 +167,6 @@ def load_metadata(dataset: str, session_id: Optional[str] = None) -> List[Dict[s
             for row in reader:
                 # normalize keys to lowercase; strip whitespace
                 normalized = {str(k).strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
-                
-                # Add duration for datasets that don't have it (like RAVDESS)
-                if ds == "ravdess" and "duration" not in normalized:
-                    try:
-                        # Try to find the audio file and calculate duration
-                        filename = normalized.get("filename", "")
-                        if filename:
-                            audio_path = DATASET_BASE_DIRS[ds] / filename
-                            if audio_path.exists():
-                                duration = calculate_audio_duration(audio_path)
-                                normalized["duration"] = str(duration)
-                            else:
-                                normalized["duration"] = "0.0"
-                        else:
-                            normalized["duration"] = "0.0"
-                    except Exception as e:
-                        logger.warning(f"Error calculating duration for {filename}: {e}")
-                        normalized["duration"] = "0.0"
-                
                 rows.append(normalized)
     except Exception:
         # Re-raise to let the route map to a 500

@@ -72,28 +72,47 @@ def load_accent_cohorts(
     uses, applied per group) -- a single global cap would let large cohorts
     exhaust it before smaller-represented accents are ever seen, silently
     starving them out of the profile.
+
+    Streams through ``validated_stream(deep=True)`` (FR2.1) rather than
+    ``iter_metadata`` directly, so a missing, undecodable, or all-silence
+    clip is excluded before it can be transcribed and scored as a WER
+    outlier attributed to the model rather than to a bad source file.
+    Rejections are logged with a per-reason count rather than one line per
+    clip, since a batch run over hundreds of utterances shouldn't flood the
+    log.
     """
     loader = get_loader(corpus, **loader_kwargs)
     cohorts: Dict[str, List[SampleMetadata]] = {}
+    rejected: Dict[str, int] = {}
+
+    def _on_reject(report) -> None:
+        rejected[report.reason] = rejected.get(report.reason, 0) + 1
+
+    samples = loader.validated_stream(deep=True, on_reject=_on_reject)
 
     if samples_per_cohort is None:
-        for meta in loader.iter_metadata():
+        for meta in samples:
             cohorts.setdefault(meta.accent or "unknown", []).append(meta)
-        return cohorts
+    else:
+        rng = random.Random(seed)
+        seen: Dict[str, int] = {}
+        for meta in samples:
+            key = meta.accent or "unknown"
+            reservoir = cohorts.setdefault(key, [])
+            i = seen.get(key, 0)
+            seen[key] = i + 1
+            if i < samples_per_cohort:
+                reservoir.append(meta)
+            else:
+                j = rng.randint(0, i)
+                if j < samples_per_cohort:
+                    reservoir[j] = meta
 
-    rng = random.Random(seed)
-    seen: Dict[str, int] = {}
-    for meta in loader.iter_metadata():
-        key = meta.accent or "unknown"
-        reservoir = cohorts.setdefault(key, [])
-        i = seen.get(key, 0)
-        seen[key] = i + 1
-        if i < samples_per_cohort:
-            reservoir.append(meta)
-        else:
-            j = rng.randint(0, i)
-            if j < samples_per_cohort:
-                reservoir[j] = meta
+    if rejected:
+        logger.warning(
+            "load_accent_cohorts(%s): excluded %d sample(s) failing integrity check: %s",
+            corpus, sum(rejected.values()), rejected,
+        )
     return cohorts
 
 

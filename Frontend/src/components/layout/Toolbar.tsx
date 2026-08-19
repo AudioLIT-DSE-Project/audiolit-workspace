@@ -105,6 +105,7 @@ const DATASET_LABELS: Record<string, string> = {
   "crema-d": "CREMA-D",
   ravdess: "RAVDESS",
   "l2-arctic": "L2-ARCTIC",
+  esd: "ESD",
   "asvspoof-2021": "ASVspoof 2021",
 };
 
@@ -136,6 +137,11 @@ export const Toolbar = ({
   // Built-in corpora (LIT-235) - was a hardcoded 2-entry list disconnected
   // from the backend's actual dataset registry; now fetched for real.
   const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess", "l2-arctic", "librispeech", "crema-d", "esd"]);
+  // FR2 §5.1 — which built-in corpora actually have data provisioned under
+  // Backend/data/ (as opposed to just having a loader wired). A corpus can
+  // be code-complete but unprovisioned on a given machine (LibriSpeech,
+  // today); this lets the dropdown say so instead of offering it and 404ing.
+  const [datasetAvailability, setDatasetAvailability] = useState<Record<string, boolean>>({});
 
   const activeModelFamily = getModelTaskFamily(model);
 
@@ -165,6 +171,9 @@ export const Toolbar = ({
         const data = await response.json();
         if (Array.isArray(data.datasets) && data.datasets.length > 0) {
           setBuiltinDatasets(data.datasets);
+        }
+        if (data.available && typeof data.available === "object") {
+          setDatasetAvailability(data.available);
         }
       }
     } catch (err) {
@@ -309,9 +318,18 @@ export const Toolbar = ({
                     .map((ds) => {
                       const dsFamily = DATASET_TASK_FAMILIES[ds];
                       const isCompatible = !dsFamily || dsFamily === activeModelFamily;
+                      // `undefined` means the availability probe hasn't
+                      // resolved yet - treat as available rather than
+                      // disabling every option until the fetch completes.
+                      const isProvisioned = datasetAvailability[ds] !== false;
+                      const suffix = !isCompatible
+                        ? `(${dsFamily} only)`
+                        : !isProvisioned
+                        ? "(not provisioned)"
+                        : "";
                       return (
-                        <SelectItem key={ds} value={ds} disabled={!isCompatible}>
-                          {DATASET_LABELS[ds] || ds} {!isCompatible ? `(${dsFamily} only)` : ""}
+                        <SelectItem key={ds} value={ds} disabled={!isCompatible || !isProvisioned}>
+                          {DATASET_LABELS[ds] || ds} {suffix}
                         </SelectItem>
                       );
                     })}
