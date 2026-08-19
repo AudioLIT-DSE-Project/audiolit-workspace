@@ -35,6 +35,24 @@ interface UploadedFile {
 // Metrics panel was hardcoding "" instead of reading this).
 const GROUND_TRUTH_KEYS = ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"];
 
+// LIT-249: /inferences/run returns a bare string for Whisper (ASR) but a
+// structured object for everything else - deepfake (ADD) predictions come
+// back as {predicted_label, confidence, probabilities, ...}. The dataset
+// table only ever needs a short display value per cell (the full object,
+// with its probability breakdown, is fetched separately for the sidebar's
+// "Deepfake Detection Results" card by MainLayout's fetchAddPrediction
+// effect) - stringifying the whole object here used to dump raw JSON into
+// the table cell instead of just the label.
+const extractPredictionDisplayText = (prediction: unknown): string => {
+  if (typeof prediction === 'string') return prediction;
+  if (prediction && typeof prediction === 'object') {
+    const p = prediction as Record<string, unknown>;
+    const candidate = p.text ?? p.predicted_transcript ?? p.predicted_emotion ?? p.predicted_label ?? p.prediction;
+    if (typeof candidate === 'string') return candidate;
+  }
+  return JSON.stringify(prediction);
+};
+
 interface AudioDatasetPanelProps {
   apiData?: unknown;
   model: string | null;
@@ -321,7 +339,7 @@ export const AudioDatasetPanel = ({
       if (!response.ok) throw new Error(`API error: ${response.status}`);
 
       const prediction = await response.json();
-      const predictionText = typeof prediction === 'string' ? prediction : prediction?.text || JSON.stringify(prediction);
+      const predictionText = extractPredictionDisplayText(prediction);
 
       if (onPredictionUpdate) onPredictionUpdate(fileId, predictionText);
       setInferenceStatus(prev => ({ ...prev, [fileId]: 'done' }));
@@ -385,7 +403,7 @@ export const AudioDatasetPanel = ({
         }
 
         const prediction = await response.json();
-        const predictionText = typeof prediction === 'string' ? prediction : prediction?.text || JSON.stringify(prediction);
+        const predictionText = extractPredictionDisplayText(prediction);
 
         if (onPredictionUpdate) {
           onPredictionUpdate(currentFileId, predictionText);
