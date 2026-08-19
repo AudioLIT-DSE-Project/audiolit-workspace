@@ -97,8 +97,15 @@ def ser_keys(hashes: tuple[str, ...]) -> list[tuple[str, str]]:
 
 
 def deepfake_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]:
-    """ADD. Payload: ``{"prediction": <add dict>}``. Shares the transcript
-    family's key shape because ``/inferences/run`` serves every model."""
+    """ADD. Payload: ``{"prediction": <add dict>}``.
+
+    ``model`` MUST be the deepfake checkpoint that produced the result (e.g.
+    ``melody-machine``), never the ASR model the user happens to have selected.
+    This family shares the transcript family's key shape because
+    ``/inferences/run`` serves every model from one route - so passing a Whisper
+    id here writes an ADD dict straight over that model's transcript, and the
+    transcript consumers then read a dict and fail on ``.lower()``.
+    """
     keys: list[tuple[str, str]] = []
     for h in hashes:
         keys.append((model, f"{CACHE_SCHEMA_VERSION}_{model}_{h}"))
@@ -106,9 +113,18 @@ def deepfake_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]:
     return keys
 
 
+# Bumped when the acoustic payload gains or loses a field. LIT-248 added
+# `spectrogram` without one, so every entry cached before it kept being served
+# without a spectrogram for the whole 24 h TTL - a correct computation the UI
+# could never see (FR4.1: a shape change must not be serveable under an old key).
+ACOUSTIC_SCHEMA_VERSION = "v2"
+
+
 def acoustic_keys(hashes: tuple[str, ...]) -> list[tuple[str, str]]:
     """Acoustic profile. Payload: the profile dict itself, unwrapped."""
-    return [("acoustic", f"acoustic_profile_{h}") for h in hashes]
+    return [
+        ("acoustic", f"acoustic_profile_{ACOUSTIC_SCHEMA_VERSION}_{h}") for h in hashes
+    ]
 
 
 def saliency_keys(model: str, method: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]:

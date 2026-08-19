@@ -81,11 +81,13 @@ describe('PredictionPanel XAI Fetch Error Handling', () => {
 
   test('displays explicit error card when /saliency/generate fetch fails (A2 compliance)', async () => {
     // Mock failed fetch
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      json: async () => ({ detail: 'Internal backend error during Grad-CAM generation' })
-    }) as any;
+    (global as any).fetch = jest.fn().mockImplementation(() =>
+      Promise.resolve({
+        ok: false,
+        status: 500,
+        json: async () => ({ detail: 'Internal backend error during Grad-CAM generation' })
+      })
+    );
 
     render(
       <PredictionPanel
@@ -101,7 +103,7 @@ describe('PredictionPanel XAI Fetch Error Handling', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Failed to load XAI Overlay Canvas')).toBeInTheDocument();
-      expect(screen.getByText(/Internal backend error during Grad-CAM generation/)).toBeInTheDocument();
+      expect(screen.getAllByText(/Internal backend error during Grad-CAM generation/)[0]).toBeInTheDocument();
     });
   });
 });

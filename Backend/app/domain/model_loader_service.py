@@ -67,9 +67,15 @@ _whisper_cond_gen_cache = {}
 def _get_whisper_cond_gen(model_id: str):
     if model_id not in _whisper_cond_gen_cache:
         processor = WhisperProcessor.from_pretrained(model_id)
-        model = WhisperForConditionalGeneration.from_pretrained(model_id, attn_implementation="eager")
+        model = WhisperForConditionalGeneration.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
+        try:
+            model = model.to(device)
+        except Exception as e:
+            if "meta tensor" in str(e):
+                model = model.to_empty(device=device)
+            else:
+                raise
         model.eval()
         _whisper_cond_gen_cache[model_id] = (processor, model)
     return _whisper_cond_gen_cache[model_id]
@@ -219,11 +225,17 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                     # Load model specifically for attention (reuse existing processor)
                     from transformers import WhisperModel
                     
-                    whisper_model = WhisperModel.from_pretrained(model_id)
+                    whisper_model = WhisperModel.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
                     # Use the processor that's already defined above
                     
                     # Move to same device
-                    whisper_model = whisper_model.to(device)
+                    try:
+                        whisper_model = whisper_model.to(device)
+                    except Exception as e:
+                        if "meta tensor" in str(e):
+                            whisper_model = whisper_model.to_empty(device=device)
+                        else:
+                            raise
                     
                     # Process audio using existing processor
                     input_features = processor(audio, sampling_rate=16000, return_tensors="pt").input_features
@@ -285,16 +297,22 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                         from transformers import AutoProcessor, AutoModel
                         processor = AutoProcessor.from_pretrained(model_id)
                         # CRITICAL FIX: Use eager attention for output_attentions=True
-                        model_for_attention = AutoModel.from_pretrained(model_id, attn_implementation="eager")
+                        model_for_attention = AutoModel.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
                         logger.info("Using AutoProcessor and AutoModel with eager attention")
                     except Exception as auto_error:
                         logger.info(f"AutoProcessor failed: {auto_error}, trying WhisperProcessor")
                         processor = WhisperProcessor.from_pretrained(model_id)  
                         # CRITICAL FIX: Use eager attention for output_attentions=True
-                        model_for_attention = WhisperModel.from_pretrained(model_id, attn_implementation="eager")
+                        model_for_attention = WhisperModel.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
                     
                     if device and device != "cpu":
-                        model_for_attention = model_for_attention.to(device)
+                        try:
+                            model_for_attention = model_for_attention.to(device)
+                        except Exception as e:
+                            if "meta tensor" in str(e):
+                                model_for_attention = model_for_attention.to_empty(device=device)
+                            else:
+                                raise
                     
                     # Process audio properly
                     inputs = processor(audio, sampling_rate=sample_rate, return_tensors="pt")

@@ -281,17 +281,21 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         header: `Predicted ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const rowId = row.id as string;
-          const status = inferenceStatus?.[rowId];
+          const data = row.original as DatasetRow;
+          const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
+          const filename = path.split("/").pop() || path;
+          const fileId = String(data.id || path || filename);
+          const status = inferenceStatus?.[rowId] || inferenceStatus?.[fileId] || inferenceStatus?.[filename];
           
           if (status === 'loading') {
             return <span className="text-xs text-blue-600">Loading...</span>;
           }
           
-          if (status !== 'done') {
+          const pred = predictionMap?.[rowId] ?? predictionMap?.[fileId] ?? predictionMap?.[filename] ?? (data.prediction as string) ?? "";
+          
+          if (!pred && status !== 'done') {
             return <span className="text-xs text-gray-400">-</span>;
           }
-          
-          const pred = predictionMap?.[rowId] ?? "";
           
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
@@ -299,7 +303,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
-          return <span className="text-xs">{predictionText || <span className="text-gray-400">No prediction</span>}</span>;
+          return <span className="text-xs">{predictionText || <span className="text-gray-400">-</span>}</span>;
         },
       },
     ];

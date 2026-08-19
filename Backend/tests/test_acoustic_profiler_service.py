@@ -126,3 +126,16 @@ class TestExtractAcousticProfile:
         decoded = json.loads(encoded)
         assert decoded["sample_rate"] == SR
         assert len(decoded["timeline"]) == len(profile["timeline"])
+
+    def test_extract_acoustic_profile_returns_valid_log_mel_spectrogram(self):
+        audio = _sine(220.0, duration_s=1.0)
+        profile = extract_acoustic_profile(audio, sr=SR)
+        assert "spectrogram" in profile
+        spec = np.asarray(profile["spectrogram"])
+        expected_frames = 1 + len(audio) // profile["hop_length"]
+        assert spec.ndim == 2
+        assert spec.shape[0] == 128
+        assert spec.shape[1] == expected_frames
+        assert spec.min() >= 0.0
+        assert spec.max() <= 1.0
+        assert not np.isnan(spec).any()

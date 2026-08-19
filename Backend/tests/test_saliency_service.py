@@ -359,4 +359,27 @@ class TestAddAndGradCamSaliency:
         ig_arr = np.array(res_ig["series"])
         assert not np.allclose(cam_arr, ig_arr)
 
+    def test_generate_whisper_saliency_gradcam_end_to_end(self, dummy_audio_file):
+        """End-to-end test for generate_whisper_saliency with method='gradcam'.
+
+        Asserts a non-empty saliency_matrix is returned with MEASURED provenance.
+        """
+        from app.domain.saliency_service import generate_whisper_saliency
+
+        res = generate_whisper_saliency(str(dummy_audio_file), model_size="whisper-base", method="gradcam")
+        assert res["model"] == "openai/whisper-base"
+        assert res["method"] == "gradcam"
+        assert res["provenance"] == "measured"
+        assert res["provenance_reason"] is None
+        assert "saliency_matrix" in res
+        matrix = np.array(res["saliency_matrix"])
+        assert matrix.size > 0
+        assert matrix.shape[0] == 128
+        assert "base_spectrogram" in res
+        base_spect = np.array(res["base_spectrogram"])
+        assert base_spect.size > 0
+        assert base_spect.shape[0] == 128
+        assert res["total_duration"] > 0
+
+
 
