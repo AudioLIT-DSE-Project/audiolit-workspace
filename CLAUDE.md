@@ -90,13 +90,22 @@ Backend/app/{api/routes, domain, orchestration, infrastructure}
 Frontend/src/{pages, contexts, components/{layout,panels,audio,visualization,ui,analysis,dataset,predictions}, hooks, lib}
 ```
 
-`app/core/` **and** `app/services/` are both **gone** (LIT-230 removed the last
-of `services/`). The tree now matches SAD §5.1's five layers exactly:
+`app/services/` is **gone** (LIT-230 removed the last of it). `app/core/` is
+**not** — `app/core/redis.py` is still on `develop`, holding the FR4
+content-addressed cache manager (`RedisCacheManager`, SHA-256 over audio bytes +
+model + task + params, msgpack/lz4, dedup lock). Its only production consumer is
+`app/api/routes/results.py`; every hot path still uses the inherited MD5-of-path
+scheme in `app/infrastructure/cache_keys.py`. Whether that module moves to
+`app/infrastructure/` or `app/core/` is formally retired is an open decision —
+raise it, don't resolve it by deleting the module a route depends on.
+Otherwise the tree matches SAD §5.1's five layers:
 `settings`/`redis`/`session`/`rq_connection` in `app/infrastructure/`, model +
 explanation logic in `app/domain/`, the RQ fabric in `app/orchestration/`,
 routes in `app/api/routes/`. **If you find yourself adding a file to
 `app/services/`, stop** — that directory is ECHO 1.0 legacy and its return is
-the exact bug LIT-230 fixed. **Don't trust this block over the repo** — `ls
+the exact bug LIT-230 fixed. That warning is about `app/services/` only; it was
+previously written to cover `app/core/` too, which had already stopped being
+true. **Don't trust this block over the repo** — `ls
 Backend/app/` settles the current shape in one command, and this doc drifts the
 moment someone forgets to update it (the whole reason the previous version of
 this section was wrong).
