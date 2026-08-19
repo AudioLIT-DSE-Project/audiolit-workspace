@@ -18,6 +18,8 @@ module.exports = {
       {
         tsconfig: {
           jsx: "react-jsx",
+          module: "esnext",
+          moduleResolution: "node",
           esModuleInterop: true,
         },
       },
