@@ -199,13 +199,30 @@ class TestRegistryMetadataRowsFR2Fixes:
 
 
 class TestResolveAudioReference:
-    def test_resolves_dataset_file_with_relative_directory_prefix(self):
+    def test_resolves_dataset_file_with_relative_directory_prefix(self, monkeypatch, tmp_path):
+        data_dir = tmp_path / "data"
+        target_dir = data_dir / "cv-valid-dev"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / "sample-000775.mp3"
+        target_file.write_bytes(b"fake audio data")
+
+        monkeypatch.setattr(dataset_service, "DATA_DIR", data_dir)
+
         resolved = dataset_service.resolve_audio_reference(file_path="cv-valid-dev/sample-000775.mp3")
         assert resolved.exists()
         assert resolved.name == "sample-000775.mp3"
 
-    def test_resolves_dataset_and_dataset_file(self):
+    def test_resolves_dataset_and_dataset_file(self, monkeypatch, tmp_path):
+        data_dir = tmp_path / "data"
+        target_dir = data_dir / "cv-valid-dev"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / "sample-000775.mp3"
+        target_file.write_bytes(b"fake audio data")
+
+        monkeypatch.setattr(dataset_service, "DATA_DIR", data_dir)
+
         resolved = dataset_service.resolve_audio_reference(dataset="cv-valid-dev", dataset_file="sample-000775.mp3")
         assert resolved.exists()
         assert resolved.name == "sample-000775.mp3"
+
 
