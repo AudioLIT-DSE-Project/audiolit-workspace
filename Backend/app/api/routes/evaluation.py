@@ -73,6 +73,14 @@ async def evaluation_faithfulness(http_request: Request, request: FaithfulnessRe
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Saliency generation failed: {e}")
 
+    prov = str(saliency.get("provenance", "measured")).lower()
+    if prov != "measured":
+        reason = saliency.get("provenance_reason", "attribution is a fallback or unavailable")
+        raise HTTPException(
+            status_code=400,
+            detail=f"cannot audit a fallback attribution: {reason}"
+        )
+
     series = saliency.get("series") or []
     if not series:
         raise HTTPException(
