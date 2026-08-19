@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from app.api.dependencies import get_session_id
 from app.domain.acoustic_profiler_service import extract_acoustic_profile
-from app.infrastructure.dataset_service import resolve_file
+from app.infrastructure.dataset_service import resolve_audio_reference
 
 router = APIRouter()
 logger = logging.getLogger("audiolit.api.acoustic")
@@ -34,31 +34,32 @@ class AcousticProfileRequest(BaseModel):
 def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> dict:
     session_id = get_session_id(http_request)
 
-    if request.file_path:
-        resolved_path = Path(request.file_path)
-    elif request.dataset and request.dataset_file:
-        try:
-            resolved_path = resolve_file(request.dataset, request.dataset_file, session_id)
-        except (FileNotFoundError, ValueError) as e:
-            raise HTTPException(status_code=404, detail=str(e))
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing audio reference. Provide either 'file_path' or 'dataset' + 'dataset_file'.",
+    try:
+        resolved_path = resolve_audio_reference(
+            file_path=request.file_path,
+            dataset=request.dataset,
+            dataset_file=request.dataset_file,
+            session_id=session_id,
         )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if not resolved_path.exists():
         raise HTTPException(status_code=404, detail=f"Audio file not found: {resolved_path}")
 
-    import hashlib
     from app.infrastructure.redis import get_result_sync, cache_result_sync
-    file_path_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-    file_stat = resolved_path.stat()
-    file_content_hash = hashlib.md5(f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()).hexdigest()
+    from app.infrastructure import cache_keys as ck
 
-    cached = get_result_sync("acoustic", f"acoustic_profile_{file_path_hash}") or get_result_sync("acoustic", f"acoustic_profile_{file_content_hash}")
-    if cached:
-        return cached
+    # Keys come from cache_keys so this route, the dataset warmup and any future
+    # writer cannot drift apart. Hand-rolled duplicates are how the transcript
+    # family ended up holding two incompatible payload shapes.
+    keys = ck.acoustic_keys(ck.both_hashes(resolved_path))
+    for ns, key in keys:
+        cached = get_result_sync(ns, key)
+        if cached:
+            return cached
 
     try:
         audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
@@ -69,7 +70,8 @@ def acoustic_profile(http_request: Request, request: AcousticProfileRequest) -> 
 
     try:
         prof = extract_acoustic_profile(audio, sr)
-        cache_result_sync("acoustic", f"acoustic_profile_{file_path_hash}", prof, ttl=86400)
+        for ns, key in keys:
+            cache_result_sync(ns, key, prof, ttl=86400)
         return prof
     except Exception as e:
         logger.error("Acoustic profiling failed for %s: %s", resolved_path, e)
