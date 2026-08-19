@@ -60,8 +60,9 @@ async def run_inference_endpoint(
     request: dict = Body(..., example={
         "model": "whisper-base",
         "file_path": "/path/to/audio.wav",
-        "dataset": "common-voice", 
-        "dataset_file": "sample-001.mp3"
+        "dataset": "common-voice",
+        "dataset_file": "sample-001.mp3",
+        "force_refresh": False
     })
 ):
     # Extract parameters from request body
@@ -69,12 +70,17 @@ async def run_inference_endpoint(
     file_path = request.get("file_path")
     dataset = request.get("dataset")
     dataset_file = request.get("dataset_file")
-    
+    # LIT-248: bypasses the cached prediction for the per-row "Regenerate"
+    # button - without this, re-running the same deterministic model on the
+    # same file just hands back the same cached result, which looks like the
+    # button silently did nothing.
+    force_refresh = bool(request.get("force_refresh", False))
+
     if not model:
         raise HTTPException(status_code=400, detail="Model is required")
-    
+
     session_id = get_session_id(http_request)
-    return await run_inference(model, file_path, dataset, dataset_file, session_id)
+    return await run_inference(model, file_path, dataset, dataset_file, session_id, force_refresh=force_refresh)
 
 
 @router.post("/inferences/batch-check")
