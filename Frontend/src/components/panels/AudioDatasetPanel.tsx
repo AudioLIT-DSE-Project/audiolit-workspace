@@ -26,7 +26,14 @@ interface UploadedFile {
   duration?: number;
   sample_rate?: number;
   prediction?:string
+  ground_truth?: string;
 }
+
+// Same generic key list AudioDataTable.tsx's "Ground Truth" column reads,
+// so a row selected here carries the same ground truth the table displays
+// for it (LIT-247 follow-up: custom datasets' Original Transcription
+// Metrics panel was hardcoding "" instead of reading this).
+const GROUND_TRUTH_KEYS = ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"];
 
 interface AudioDatasetPanelProps {
   apiData?: unknown;
@@ -157,12 +164,14 @@ export const AudioDatasetPanel = ({
 
     const pathVal = (match["path"] || match["filepath"] || match["file"] || match["filename"]) as string | undefined;
     const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || String(id)) : String(id);
+    const groundTruth = GROUND_TRUTH_KEYS.map((k) => match[k]).find((v) => typeof v === "string" && v.trim() !== "") as string | undefined;
 
     const fileLike: UploadedFile = {
       file_id: String(id),
       filename,
       file_path: pathVal || filename,
       message: dataset.startsWith('custom:') ? "Selected from custom dataset" : "Selected from dataset", // This indicates it's a dataset file
+      ground_truth: groundTruth,
     };
 
     // Just select the file for UI purposes, no inference

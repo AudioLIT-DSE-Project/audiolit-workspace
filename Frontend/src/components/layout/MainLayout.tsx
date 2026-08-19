@@ -22,6 +22,7 @@ interface UploadedFile {
   duration?: number;
   sample_rate?: number;
   prediction?: string;
+  ground_truth?: string;
 }
 
 interface Wav2Vec2Prediction {
@@ -360,9 +361,15 @@ export const MainLayout = () => {
 
         let whisperPrediction: WhisperPrediction;
         if (isCustomDataset) {
+          // LIT-247 follow-up: custom datasets can now carry ground truth
+          // (uploaded via the Ground Truth CSV tab), but /inferences/run
+          // doesn't compute WER/accuracy for them - selectedFile.ground_truth
+          // (populated by AudioDatasetPanel's row selection) is the only
+          // source for it here, so metrics stay null while the text itself
+          // still displays instead of "No Ground Truth Available".
           whisperPrediction = {
             predicted_transcript: typeof prediction === 'string' ? prediction : prediction?.text || JSON.stringify(prediction),
-            ground_truth: "", accuracy_percentage: null, word_error_rate: null, character_error_rate: null,
+            ground_truth: selectedFile?.ground_truth || "", accuracy_percentage: null, word_error_rate: null, character_error_rate: null,
             levenshtein_distance: null, exact_match: null, character_similarity: null,
             word_count_predicted: 0, word_count_truth: 0
           };
