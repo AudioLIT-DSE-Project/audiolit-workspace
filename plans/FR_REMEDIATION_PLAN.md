@@ -1,5 +1,15 @@
 # AudioLIT FR Remediation Plan
 
+> **CLOSED 2026-08-20.** Every order below is done and verified against
+> `develop`. Re-audited mechanically at that date: 13/13 met, backend 581
+> accounted for and matching collected, frontend lint/test/build clean, removal
+> ledger empty. Two orders were closed by other work rather than by this plan
+> (PR-9 by LIT-237, PR-2/3/4/5 partly by LIT-238/239/147/240), and two gaps were
+> found *after* it was written — FR16.1's fabricated deletion score and the
+> canvas waveform layer — both now closed and recorded in §5.
+>
+> Kept as the record of what was wrong and why, not as a to-do list.
+
 **Audited at:** `ceee3c8` on `feature/lit-232-dataset-warmup-eta-cancellation-and-memory-cleanup`
 **Baseline suite:** 486 passed, 6 skipped, 0 failed
 **Scope:** the 14 gaps found auditing all 14 committed FRs against the working tree.
@@ -1049,3 +1059,54 @@ also touches. The instruction to make only the listed edits is not bureaucratic:
 repo has already shipped two individually green PRs whose *combination* broke pytest
 collection for everyone, and a stale `Path:` field that caused a 383-line module to be
 written twice. Sequence matters more than speed here.
+
+
+---
+
+# 5. Closure record — 2026-08-20
+
+Re-audited against `develop` at `b709c39` + this branch. Probes are claims about
+the tree, re-run mechanically rather than read off a status column.
+
+| FR | What closed it | Evidence |
+|---|---|---|
+| FR1.4 | OOM caught, retried on CPU, `device_fallback` on `LoadedModel` | 2 tests incl. "a non-OOM error is not swallowed" |
+| FR3.2 | `/upload` no longer awaits `run_inference`/`extract_single_embedding` | test asserts zero model calls on the request path |
+| FR4.1 | `content_sha256` added; `both_hashes` returns content-first | same audio at two paths shares a key; in-place edit changes it |
+| FR7.2 | `predict_deepfake_timeline` + `DeepfakeForensicPanel` | 9 windows for a 5 s clip, model loaded **once**, not per window |
+| FR8.4 | viridis LUT, opacity slider, colourbar legend | luminance asserted monotonic across 64 steps |
+| FR10.2 | `PlaybackContext`; playhead on canvas, F0 and RMS charts; click-to-seek | one publisher (`WaveformViewer`), three subscribers |
+| FR11 | `generateMockData` deleted, explicit empty state | `Math.random` count in EmbeddingPlot: 0 |
+| FR11.3 | `_point_labels` in the embeddings route; colour-by selector | labels are model output or corpus metadata, `null` otherwise |
+| FR12.2 | real `AudioContext` preview, region + muted, no network call | `AudioContext` in components: 7 (was 0, mocks only) |
+| FR16.1 | auditor routed through `perturbation_service.compute_deletion_score` | test fails if no inference ran; null, never 0.0, when unmeasurable |
+| FR17.1 | `ProvenanceBadge` + desaturation of fabricated overlays | badge renders for `fallback`, nothing for `measured` |
+| — | waveform layer given a producer in the acoustic profile | 473 frames, aligned with spectrogram and F0 |
+| docs | CLAUDE.md corrected on `app/core/` | it exists; the claim that it is gone was stale |
+
+## Defects found while closing, not in the original audit
+
+1. **The deletion score never ran a model.** `evaluate_batch_faithfulness_scores`
+   derived it from `orig_conf * (1.0 - k_pct * (0.5 + saliency_weight))` — monotone
+   in `k_pct` by construction, so a random attribution scored like a real one. FR16
+   is the requirement whose purpose is catching exactly that. The real masking and
+   re-inference already existed, unwired, in `perturbation_service`.
+
+2. **ADD overwrote the ASR transcript.** `deepfake_keys` shares the transcript
+   family's key shape, and warmup passed the *selected ASR model*, so `tasks=[asr,add]`
+   on a Whisper model wrote the deepfake dict over the transcript it had just cached.
+   Introduced by the very module built to stop payload-shape collisions.
+
+3. **`resolve_audio_reference` called with swapped positional arguments** in the
+   cached-results route, so every analytics lookup missed and the panel fell back
+   to ground-truth metadata that looked like a model prediction.
+
+4. **Acoustic cache had no schema version**, so the FR10.1 spectrogram was
+   computed correctly and never served to any file cached before it.
+
+5. **Three of four analytics lookups read invented key names** (`ser_{h}`,
+   `add_{h}`) that no writer produces.
+
+Each is the same shape: a key or a contract asserted in one place and not checked
+against the other side. `ag verify`'s removal ledger and the payload-shape tests
+in `test_warmup_cache_contract.py` exist to make that class mechanically visible.

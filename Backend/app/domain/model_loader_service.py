@@ -1085,6 +1085,71 @@ def ensure_add_model_loaded(model_key: str = _DEFAULT_ADD_MODEL_KEY):
     return extra_feature_extractor, extra_model, emo_device
 
 
+def predict_deepfake_timeline(
+    audio_path,
+    model_key: str = _DEFAULT_ADD_MODEL_KEY,
+    window_s: float = 1.0,
+    overlap: float = 0.5,
+):
+    """Per-window deepfake confidence across a clip (FR7.2).
+
+    FR7 is the headline new model task, and clip-level detection (FR7.1) has
+    worked for a while. FR7.2 asks the forensic question that makes it
+    interpretable - *where* in the clip the synthesis is - and nothing produced
+    that: the `timeline` field on the results schema was declared and never set.
+
+    The model is loaded once and reused across windows; reloading per window
+    turned a 5 s clip into nine full model loads.
+
+    Returns ``[{start_s, end_s, synthetic_probability, confidence,
+    predicted_label}]``, one entry per window, in time order.
+    """
+    if not 0.0 <= overlap < 1.0:
+        raise ValueError("overlap must be in [0, 1)")
+    if window_s <= 0:
+        raise ValueError("window_s must be positive")
+
+    feature_extractor_, model_, device_ = ensure_add_model_loaded(model_key)
+    audio, rate = librosa.load(audio_path, sr=16000)
+
+    win = int(window_s * rate)
+    hop = max(1, int(win * (1.0 - overlap)))
+    if len(audio) <= win:
+        starts = [0]
+        win = len(audio)
+    else:
+        starts = list(range(0, len(audio) - win + 1, hop))
+        # keep the tail rather than silently dropping up to `hop` samples
+        if starts[-1] + win < len(audio):
+            starts.append(len(audio) - win)
+
+    timeline = []
+    for start in starts:
+        chunk = audio[start:start + win]
+        inputs = feature_extractor_(chunk, sampling_rate=rate, return_tensors="pt", padding=True)
+        input_values = inputs.input_values.to(device_)
+        attention_mask = inputs.attention_mask.to(device_) if "attention_mask" in inputs else None
+        with torch.no_grad():
+            outputs = model_(input_values=input_values, attention_mask=attention_mask)
+            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
+
+        id2label = model_.config.id2label if isinstance(model_.config.id2label, dict) else {}
+        class_probs = {DEEPFAKE_BONA_FIDE: 0.0, DEEPFAKE_SPOOF: 0.0}
+        for i, prob in enumerate(probs):
+            class_probs[_normalize_deepfake_label(id2label.get(i, i))] += float(prob)
+
+        label = max(class_probs, key=class_probs.get)
+        timeline.append({
+            "start_s": round(start / rate, 3),
+            "end_s": round((start + win) / rate, 3),
+            "synthetic_probability": round(class_probs[DEEPFAKE_SPOOF], 4),
+            "confidence": round(max(class_probs.values()), 4),
+            "predicted_label": label,
+        })
+
+    return timeline
+
+
 def predict_deepfake(audio_path, model_key: str = _DEFAULT_ADD_MODEL_KEY):
     """Binary audio-deepfake detection (FR7).
 

@@ -119,3 +119,58 @@ class TestSecondAddCheckpoint:
         out = predict_deepfake(str(clip), model_key="wav2vec2-add")
 
         assert out["predicted_label"] == DEEPFAKE_SPOOF
+
+
+class TestDeepfakeTimeline:
+    """FR7.2 — windowed confidence across the clip."""
+
+    def _stub(self, monkeypatch, n_classes=2):
+        import app.domain.model_loader_service as ml
+        import numpy as np, torch
+
+        loads = []
+
+        class _FE:
+            def __call__(self, audio, sampling_rate=16000, **kw):
+                return type("O", (), {
+                    "input_values": torch.zeros(1, len(audio)),
+                    "__contains__": lambda self, k: False,
+                })()
+
+        class _M:
+            config = type("C", (), {"id2label": {0: "bonafide", 1: "spoof"}})()
+
+            def __call__(self, input_values=None, attention_mask=None):
+                return type("O", (), {"logits": torch.tensor([[0.2, 0.8]])})()
+
+        def fake_ensure(model_key="melody-machine"):
+            loads.append(model_key)
+            return _FE(), _M(), "cpu"
+
+        monkeypatch.setattr(ml, "ensure_add_model_loaded", fake_ensure)
+        monkeypatch.setattr(ml.librosa, "load",
+                            lambda p, sr=16000: (np.zeros(5 * sr, dtype="float32"), sr))
+        return loads
+
+    def test_window_count_and_ordering(self, monkeypatch):
+        from app.domain.model_loader_service import predict_deepfake_timeline
+        self._stub(monkeypatch)
+        tl = predict_deepfake_timeline("x.wav", window_s=1.0, overlap=0.5)
+        assert len(tl) == 9  # 5 s at 1 s / 50 % overlap
+        assert all(a["start_s"] <= b["start_s"] for a, b in zip(tl, tl[1:]))
+        assert all(0.0 <= w["synthetic_probability"] <= 1.0 for w in tl)
+        assert tl[-1]["end_s"] == 5.0
+
+    def test_model_is_loaded_once_not_per_window(self, monkeypatch):
+        from app.domain.model_loader_service import predict_deepfake_timeline
+        loads = self._stub(monkeypatch)
+        predict_deepfake_timeline("x.wav", window_s=1.0, overlap=0.5)
+        assert len(loads) == 1, f"model loaded {len(loads)} times; reload per window is the bug"
+
+    def test_rejects_impossible_parameters(self, monkeypatch):
+        from app.domain.model_loader_service import predict_deepfake_timeline
+        self._stub(monkeypatch)
+        with pytest.raises(ValueError):
+            predict_deepfake_timeline("x.wav", overlap=1.0)
+        with pytest.raises(ValueError):
+            predict_deepfake_timeline("x.wav", window_s=0)
