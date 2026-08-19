@@ -10,7 +10,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, ChevronLeft, ChevronRight } from "lucide-react";
+import { Play, ChevronLeft, ChevronRight, RotateCw } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
 
 interface UploadedFile {
@@ -48,6 +48,8 @@ interface AudioDataTableProps {
   predictionMap?: Record<string, string>;
   inferenceStatus?: Record<string, 'idle' | 'loading' | 'done' | 'error'>;
   onVisibleRowIdsChange?: (rowIds: string[]) => void;
+  /** LIT-248: re-run inference for exactly this row, bypassing the cache. */
+  onRegenerateRow?: (rowId: string) => void;
 }
 
 const ADD_MODEL_KEYS = ["melody-machine", "wav2vec2-add"];
@@ -60,7 +62,7 @@ const predictionColumnNoun = (model: string): string => {
   return "Emotion";
 };
 
-export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange }: AudioDataTableProps) => {
+export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange, onRegenerateRow }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads
   const hasDatasetMetadata = (datasetMetadata?.length || 0) > 0;
   const hasUploadedFiles = uploadedFiles && uploadedFiles.length > 0;
@@ -76,6 +78,29 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     }
     return fallback;
   }, []);
+
+  // LIT-248: one "Regenerate" button cell, shared by all three column sets
+  // below so they don't each re-implement the same loading/disabled logic.
+  const regenerateCell = useCallback((rowId: string) => {
+    const isLoading = inferenceStatus?.[rowId] === 'loading';
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="h-6 w-6 p-0"
+        title="Regenerate: re-run the selected model on just this file"
+        disabled={isLoading || !model || !onRegenerateRow}
+        onClick={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          onRegenerateRow?.(rowId);
+        }}
+      >
+        <RotateCw className={`h-3 w-3 ${isLoading ? "animate-spin" : ""}`} />
+      </Button>
+    );
+  }, [inferenceStatus, model, onRegenerateRow]);
 
   // Custom uploads data and columns
   const customTableData: AudioData[] = useMemo(() => (
@@ -219,7 +244,17 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         }
       },
     },
-  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom]);
+    {
+      id: "actions",
+      header: "Actions",
+      cell: ({ row }) => {
+        // Regenerate only applies to dataset rows - uploaded files run
+        // through the separate async multitask job, not /inferences/run.
+        if ('file_id' in (row.original as any)) return null;
+        return regenerateCell(row.id as string);
+      },
+    },
+  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
     const v = row["filename"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["id"];
@@ -292,8 +327,14 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
     });
 
+    baseColumns.push({
+      id: "actions",
+      header: "Actions",
+      cell: ({ row }) => regenerateCell(row.id as string),
+    });
+
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
 
   const datasetColumnsRavdess: ColumnDef<unknown, unknown>[] = useMemo(() => {
     const baseColumns = [
@@ -362,8 +403,14 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
     });
 
+    baseColumns.push({
+      id: "actions",
+      header: "Actions",
+      cell: ({ row }) => regenerateCell(row.id as string),
+    });
+
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
 
   // Build table config based on mode
   const data: unknown[] = useMemo(() => {
