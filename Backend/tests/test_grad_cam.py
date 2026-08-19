@@ -110,3 +110,47 @@ class TestGradCam:
         for _ in range(3):
             compute_grad_cam(m, torch.randn(1, 1, 8, 8))
         assert not m.conv2._forward_hooks
+
+    def test_gradcam_output_not_equal_to_ig_attribution(self):
+        """Verify Grad-CAM attribution is NOT numerically equal to IG attribution on same input (FR8.2 requirement)."""
+        from captum.attr import IntegratedGradients
+        torch.manual_seed(42)
+        model = _ConvNet2d()
+        inputs = torch.randn(1, 1, 8, 8, requires_grad=True)
+
+        cam = compute_grad_cam(model, inputs)
+
+        def forward_fn(x):
+            return model(x)
+
+        ig = IntegratedGradients(forward_fn)
+        ig_attr = ig.attribute(inputs, target=0).detach().cpu().numpy().squeeze()
+
+        ig_norm = np.abs(ig_attr)
+        if ig_norm.max() > 0:
+            ig_norm = ig_norm / ig_norm.max()
+
+        assert not np.allclose(cam, ig_norm)
+
+    def test_gradcam_output_not_equal_to_ig_attribution_1d(self):
+        """Verify 1D Conv Grad-CAM attribution is NOT numerically equal to IG attribution on same input."""
+        from captum.attr import IntegratedGradients
+        torch.manual_seed(42)
+        model = _ConvNet1d()
+        inputs = torch.randn(1, 1, 16, requires_grad=True)
+
+        cam = compute_grad_cam(model, inputs)
+
+        def forward_fn(x):
+            return model(x)
+
+        ig = IntegratedGradients(forward_fn)
+        ig_attr = ig.attribute(inputs, target=0).detach().cpu().numpy().squeeze()
+
+        ig_norm = np.abs(ig_attr)
+        if ig_norm.max() > 0:
+            ig_norm = ig_norm / ig_norm.max()
+
+        assert not np.allclose(cam, ig_norm)
+
+

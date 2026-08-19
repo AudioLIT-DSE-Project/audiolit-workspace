@@ -92,15 +92,22 @@ class MockFeatureExtractor:
 class MockEmoModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear = torch.nn.Linear(16000, 6)
+        self.conv = torch.nn.Conv1d(1, 4, 3, padding=1)
+        self.linear = torch.nn.Linear(4 * 16000, 6)
         self.config = type('obj', (object,), {'id2label': {0: 'neutral', 1: 'happy', 2: 'sad'}})()
 
     def forward(self, input_values, attention_mask=None):
-        x = input_values[:, :16000]
+        if input_values.ndim == 2:
+            x = input_values.unsqueeze(1)
+        else:
+            x = input_values
         if x.shape[-1] < 16000:
             x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
-        logits = self.linear(x)
-        
+        else:
+            x = x[:, :, :16000]
+        feat = torch.relu(self.conv(x))
+        logits = self.linear(feat.flatten(1))
+
         class MockOutput:
             def __init__(self, logits):
                 self.logits = logits
@@ -265,3 +272,93 @@ class TestWav2Vec2Saliency:
         
         assert np.max(saliency_matrix) <= 1.0
         assert np.min(saliency_matrix) >= 0.0
+
+
+class TestAddAndGradCamSaliency:
+    """Test ADD model Grad-CAM saliency and fallback contract (FR8.2)."""
+
+    def test_generate_saliency_add_model_gradcam_success(self, monkeypatch, dummy_audio_file):
+        from app.domain.saliency_service import generate_saliency
+
+        class DummyAddModule(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv1d(1, 4, 3, padding=1)
+                self.fc = nn.Linear(4, 2)
+
+            def forward(self, input_values):
+                x = self.conv(input_values)
+                return self.fc(x.mean(dim=-1))
+
+        class DummyFeatureExtractor:
+            def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
+                class Inputs:
+                    def __init__(self, audio):
+                        self.input_values = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+                        if self.input_values.ndim == 2:
+                            self.input_values = self.input_values.unsqueeze(1)
+
+                    def __contains__(self, key):
+                        return key == "input_values"
+
+                return Inputs(audio)
+
+        dummy_model = DummyAddModule()
+        dummy_fe = DummyFeatureExtractor()
+        monkeypatch.setattr(
+            "app.domain.model_loader_service.ensure_add_model_loaded",
+            lambda key: (dummy_fe, dummy_model, "cpu"),
+        )
+
+        res = generate_saliency(str(dummy_audio_file), model="melody-machine", method="gradcam")
+        assert res["model"] == "melody-machine"
+        assert res["method"] == "gradcam"
+        assert res["provenance"] == "measured"
+        assert res["provenance_reason"] is None
+        assert "saliency_matrix" in res
+        assert "base_spectrogram" in res
+
+    def test_generate_saliency_add_model_non_gradcam_raises(self, dummy_audio_file):
+        from app.domain.saliency_service import generate_saliency
+        with pytest.raises(ValueError, match="is not supported for deepfake-detection models"):
+            generate_saliency(str(dummy_audio_file), model="melody-machine", method="ig")
+
+    def test_generate_saliency_no_conv_layer_returns_unavailable(self, monkeypatch, dummy_audio_file):
+        from app.domain.saliency_service import generate_add_gradcam_saliency
+
+        class LinearOnlyModule(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(16000, 2)
+
+            def forward(self, input_values):
+                return self.fc(input_values)
+
+        class DummyFeatureExtractor:
+            def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
+                class Inputs:
+                    def __init__(self, audio):
+                        self.input_values = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+
+                return Inputs(audio)
+
+        monkeypatch.setattr(
+            "app.domain.model_loader_service.ensure_add_model_loaded",
+            lambda key: (DummyFeatureExtractor(), LinearOnlyModule(), "cpu"),
+        )
+
+        res = generate_add_gradcam_saliency(str(dummy_audio_file), model_key="melody-machine")
+        assert res["provenance"] == "unavailable"
+        assert "no Conv1d/Conv2d layer" in res["provenance_reason"]
+
+    def test_gradcam_not_equal_to_ig_for_wav2vec2(self, mock_model_loader, dummy_audio_file):
+        from app.domain.saliency_service import generate_saliency
+
+        res_gradcam = generate_saliency(str(dummy_audio_file), model="wav2vec2", method="gradcam")
+        res_ig = generate_saliency(str(dummy_audio_file), model="wav2vec2", method="ig")
+
+        cam_arr = np.array(res_gradcam["series"])
+        ig_arr = np.array(res_ig["series"])
+        assert not np.allclose(cam_arr, ig_arr)
+
+
