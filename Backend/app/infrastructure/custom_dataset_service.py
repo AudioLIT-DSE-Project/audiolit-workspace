@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import logging
 from pathlib import Path
@@ -10,6 +12,73 @@ logger = logging.getLogger(__name__)
 
 # Base directory for session-based custom datasets
 SESSIONS_BASE_DIR = Path("uploads/sessions")
+
+# LIT-247 — ground-truth CSV column name candidates, tried in order (same
+# flexible-header pattern as dataset_ingestion.py's ColumnMap, kept separate
+# here since custom datasets aren't part of the CORPUS_REGISTRY machinery).
+_GROUND_TRUTH_FILENAME_COLUMNS = ("filename", "file", "audio_file", "audio", "name")
+_GROUND_TRUTH_TEXT_COLUMNS = ("ground_truth", "transcript", "label", "text", "sentence")
+
+
+def normalize_filename_key(filename: str) -> str:
+    """Match key for ground-truth lookups: lowercased, extension-stripped.
+
+    Files can get renamed on upload collision (``sample.wav`` -> a second
+    upload of the same name becomes ``sample_1.wav``), so matching is done
+    against this normalized form of ``original_filename`` (what the user
+    actually named the file), not the possibly-renamed on-disk ``filename``.
+    Extension-stripped so a CSV listing ``sample`` or ``sample.wav`` both
+    match a file the user uploaded as ``sample.WAV``.
+    """
+    return Path(filename).stem.strip().lower()
+
+
+def parse_ground_truth_csv(raw: bytes) -> Dict[str, str]:
+    """Parse a ground-truth CSV into ``{normalized_filename: text}``.
+
+    Column names are resolved case-insensitively against
+    ``_GROUND_TRUTH_FILENAME_COLUMNS``/``_GROUND_TRUTH_TEXT_COLUMNS`` (first
+    match wins), the same tolerant-header approach
+    ``dataset_ingestion.ColumnMap`` uses for the benchmark corpora, so a CSV
+    exported as ``file,label`` or ``filename,transcript`` both work without
+    the user needing to match an exact schema.
+
+    Raises ``ValueError`` (not a silent empty result) when the CSV has no
+    rows or neither expected column is present, so the route can return a
+    typed 400 instead of the upload looking like it "succeeded" with zero
+    matches.
+    """
+    try:
+        text = raw.decode("utf-8-sig")  # -sig strips a BOM if present
+    except UnicodeDecodeError as e:
+        raise ValueError(f"Ground truth CSV must be UTF-8 encoded: {e}")
+
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("Ground truth CSV has no header row")
+
+    lower_fields = {f.strip().lower(): f for f in reader.fieldnames if f}
+    filename_col = next((c for c in _GROUND_TRUTH_FILENAME_COLUMNS if c in lower_fields), None)
+    text_col = next((c for c in _GROUND_TRUTH_TEXT_COLUMNS if c in lower_fields), None)
+    if filename_col is None or text_col is None:
+        raise ValueError(
+            "Ground truth CSV must have a filename column "
+            f"({', '.join(_GROUND_TRUTH_FILENAME_COLUMNS)}) and a ground-truth "
+            f"column ({', '.join(_GROUND_TRUTH_TEXT_COLUMNS)}); found: "
+            f"{', '.join(reader.fieldnames)}"
+        )
+
+    mapping: Dict[str, str] = {}
+    for row in reader:
+        raw_filename = (row.get(lower_fields[filename_col]) or "").strip()
+        raw_text = (row.get(lower_fields[text_col]) or "").strip()
+        if not raw_filename or not raw_text:
+            continue
+        mapping[normalize_filename_key(raw_filename)] = raw_text
+
+    if not mapping:
+        raise ValueError("Ground truth CSV had a valid header but no usable rows")
+    return mapping
 
 class CustomDatasetManager:
     """Manages session-based custom datasets"""
@@ -92,16 +161,82 @@ class CustomDatasetManager:
             "size": file_path.stat().st_size,
             "uploaded_at": datetime.utcnow().isoformat()
         }
-        
+
+        # LIT-247: if a ground-truth CSV was already uploaded for this
+        # dataset (order-independent - CSV can arrive before the audio),
+        # match this new file against it immediately rather than only at
+        # CSV-upload time.
+        gt_map = metadata.get("ground_truth_map", {})
+        key = normalize_filename_key(original_filename)
+        if key in gt_map:
+            file_metadata["ground_truth"] = gt_map[key]
+
         metadata["files"].append(file_metadata)
         metadata["total_files"] = len(metadata["files"])
-        
+
         # Save updated metadata
         with metadata_file.open("w") as f:
             json.dump(metadata, f, indent=2)
-        
+
         logger.info(f"Added file '{filename}' to dataset '{dataset_name}' in session {self.session_id}")
         return file_metadata
+
+    def set_ground_truth(self, dataset_name: str, mapping: Dict[str, str]) -> Dict:
+        """LIT-247: store ``mapping`` (normalized filename -> ground truth) as
+        this dataset's ground-truth map, replacing any previous one, and
+        re-match it against every file currently in the dataset.
+
+        Replace (not merge) semantics: the CSV just uploaded is treated as
+        authoritative, so a file matched by an older CSV but absent from the
+        new one loses its ``ground_truth`` rather than keeping a stale value
+        silently. Returns a match summary the route can hand back to the
+        caller so a typo or wrong file is visible immediately.
+        """
+        dataset_dir = self.datasets_dir / dataset_name
+        metadata_file = dataset_dir / "dataset_metadata.json"
+
+        if not dataset_dir.exists() or not metadata_file.exists():
+            raise ValueError(f"Dataset '{dataset_name}' does not exist")
+
+        with metadata_file.open("r") as f:
+            metadata = json.load(f)
+
+        metadata["ground_truth_map"] = mapping
+        metadata["ground_truth_uploaded_at"] = datetime.utcnow().isoformat()
+        summary = self._apply_ground_truth(metadata)
+
+        with metadata_file.open("w") as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.info(
+            "Applied ground truth to dataset '%s' in session %s: %s",
+            dataset_name, self.session_id, summary,
+        )
+        return summary
+
+    @staticmethod
+    def _apply_ground_truth(metadata: Dict) -> Dict:
+        """Set/clear ``ground_truth`` on every file per ``metadata``'s map.
+
+        Mutates ``metadata["files"]`` in place. Split out from
+        ``set_ground_truth`` so ``add_file_to_dataset`` doesn't need its own
+        copy of the matching logic.
+        """
+        gt_map: Dict[str, str] = metadata.get("ground_truth_map", {})
+        matched_keys = set()
+        for file_info in metadata["files"]:
+            key = normalize_filename_key(file_info["original_filename"])
+            if key in gt_map:
+                file_info["ground_truth"] = gt_map[key]
+                matched_keys.add(key)
+            else:
+                file_info.pop("ground_truth", None)
+
+        return {
+            "matched_files": len(matched_keys),
+            "total_files": len(metadata["files"]),
+            "unmatched_csv_rows": sorted(set(gt_map) - matched_keys),
+        }
     
     def list_datasets(self) -> List[Dict]:
         """List all custom datasets in the session"""
@@ -172,14 +307,20 @@ class CustomDatasetManager:
         
         csv_format_files = []
         for file_info in metadata["files"]:
-            csv_format_files.append({
+            row = {
                 "filename": file_info["filename"],
                 "duration": str(file_info["duration"]),
                 "sample_rate": str(file_info.get("sample_rate", 0)),
                 "size": str(file_info["size"]),
                 "uploaded_at": file_info["uploaded_at"]
-            })
-        
+            }
+            # LIT-247: AudioDataTable.tsx's "Ground Truth" column already
+            # reads "ground_truth" generically off any dataset row - this is
+            # the only change needed to make it show up for custom datasets.
+            if file_info.get("ground_truth"):
+                row["ground_truth"] = file_info["ground_truth"]
+            csv_format_files.append(row)
+
         return csv_format_files
 
 
