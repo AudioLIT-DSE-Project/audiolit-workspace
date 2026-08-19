@@ -92,13 +92,18 @@ class MockFeatureExtractor:
 class MockEmoModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear = torch.nn.Linear(16000, 6)
+        self.conv = torch.nn.Conv1d(1, 4, 3, padding=1)
+        self.linear = torch.nn.Linear(16000 * 4, 6)
         self.config = type('obj', (object,), {'id2label': {0: 'neutral', 1: 'happy', 2: 'sad'}})()
 
     def forward(self, input_values, attention_mask=None):
-        x = input_values[:, :16000]
-        if x.shape[-1] < 16000:
-            x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
+        inp = input_values.unsqueeze(1) if input_values.dim() == 2 else input_values
+        conv_out = self.conv(inp)
+        x = conv_out.view(conv_out.shape[0], -1)
+        if x.shape[-1] < 16000 * 4:
+            x = torch.nn.functional.pad(x, (0, 16000 * 4 - x.shape[-1]))
+        else:
+            x = x[:, :16000 * 4]
         logits = self.linear(x)
         
         class MockOutput:
@@ -265,3 +270,22 @@ class TestWav2Vec2Saliency:
         
         assert np.max(saliency_matrix) <= 1.0
         assert np.min(saliency_matrix) >= 0.0
+
+    def test_integrated_gradients_method_branch(self, mock_model_loader, dummy_audio_file):
+        """Verify method='integrated_gradients' produces valid attributions."""
+        result = generate_wav2vec2_saliency(str(dummy_audio_file), method="integrated_gradients")
+        assert result["model"] == "wav2vec2"
+        assert result["method"] == "integrated_gradients"
+        assert "base_spectrogram" in result
+        assert "saliency_matrix" in result
+
+    def test_unknown_method_raises_value_error(self, mock_model_loader, dummy_audio_file):
+        """Verify an unsupported method string raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported saliency method"):
+            generate_wav2vec2_saliency(str(dummy_audio_file), method="invalid_foo_bar")
+
+    def test_saliency_schema_version_v3(self):
+        """Verify SALIENCY_SCHEMA_VERSION is bumped to v3 to invalidate stale v2 cache entries."""
+        from app.api.routes.saliency import SALIENCY_SCHEMA_VERSION
+        assert SALIENCY_SCHEMA_VERSION == "v3"
+
