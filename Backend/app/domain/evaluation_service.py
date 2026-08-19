@@ -156,6 +156,17 @@ def evaluate_batch_faithfulness_scores(
     
     for item in eval_items:
         file_path = item.get("file_path", "")
+        prov = str(item.get("provenance", "measured")).lower()
+        if prov != "measured":
+            reason = item.get("provenance_reason", "attribution is not measured")
+            item_results.append({
+                "file_path": file_path,
+                "error": f"cannot audit a fallback attribution: {reason}",
+                "provenance": item.get("provenance"),
+                "provenance_reason": reason,
+            })
+            continue
+            
         saliency_scores = item.get("saliency_scores", [])
         orig_conf = float(item.get("original_confidence", 0.85))
         
