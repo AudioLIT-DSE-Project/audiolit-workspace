@@ -11,7 +11,8 @@ import { AccentBiasPanel } from "./AccentBiasPanel";
 import { FaithfulnessAuditPanel } from "./FaithfulnessAuditPanel";
 import { XAIOverlayCanvas, XAIMethod, XAIResult, F0Point } from "../visualization/XAIOverlayCanvas";
 import { useState, useEffect } from "react";
-import { AlertTriangle, ShieldCheck, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, ShieldCheck, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
 interface UploadedFile {
   file_id: string;
@@ -104,42 +105,94 @@ export const PredictionPanel = ({
   // hidden behind this toggle so the default view isn't overloaded.
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // State for dynamic XAI canvas layer opacity swapping
-  const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('saliency');
+  // State for dynamic XAI canvas layer opacity swapping and on-demand fetch
+  const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('gradcam');
+  const [spectrogramData, setSpectrogramData] = useState<number[][] | undefined>(
+    unifiedResult?.tasks?.acoustic?.spectrogram
+  );
+  const [xaiResult, setXaiResult] = useState<XAIResult | undefined>(
+    unifiedResult?.tasks?.xai
+  );
+  const [xaiLoading, setXaiLoading] = useState(false);
+  const [xaiError, setXaiError] = useState<string | null>(null);
 
+  // Fetch /saliency/generate on demand for XAI Overlay Canvas
+  useEffect(() => {
+    const fileRef = selectedFile || selectedEmbeddingFile;
+    if (!fileRef) return;
 
-  // Handle perturbation completion
-  const handlePerturbationComplete = async (result: PerturbationResult) => {
-    if (!result.success) {
-      console.error("Perturbation failed:", result.error);
-      return;
-    }
+    let isMounted = true;
+    const fetchXAISaliency = async () => {
+      setXaiLoading(true);
+      setXaiError(null);
+      try {
+        const requestBody: any = {
+          model: model || "whisper-base",
+          method: activeXAIMethod,
+        };
 
-    const perturbedFileObj: UploadedFile = {
-      file_id: result.filename,
-      filename: result.filename,
-      file_path: result.perturbed_file,
-      message: "Perturbed audio",
-      duration: result.duration_ms / 1000,
-      sample_rate: result.sample_rate
+        if (typeof fileRef === 'object' && fileRef.file_path) {
+          requestBody.file_path = fileRef.file_path;
+        } else if (typeof fileRef === 'string') {
+          if (dataset) {
+            requestBody.dataset = dataset;
+            requestBody.dataset_file = fileRef;
+          } else {
+            requestBody.file_path = fileRef;
+          }
+        } else if (typeof selectedFile === 'object' && selectedFile?.filename && dataset) {
+          requestBody.dataset = dataset;
+          requestBody.dataset_file = selectedFile.filename;
+        }
+
+        const response = await fetch(`${API_BASE}/saliency/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: 'include',
+          body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+          let detail = '';
+          try {
+            const err = await response.json();
+            detail = err?.detail || '';
+          } catch {}
+          throw new Error(detail || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (!isMounted) return;
+
+        if (data.base_spectrogram) {
+          setSpectrogramData(data.base_spectrogram);
+        }
+        const matrix = data.saliency_matrix || data.matrix;
+        if (matrix) {
+          setXaiResult({
+            method: activeXAIMethod,
+            saliency_matrix: matrix,
+            matrix: matrix,
+          });
+        }
+      } catch (err: any) {
+        if (!isMounted) return;
+        setXaiError(err?.message || "Failed to load XAI saliency overlay data");
+        setSpectrogramData(undefined);
+        setXaiResult(undefined);
+      } finally {
+        if (isMounted) setXaiLoading(false);
+      }
     };
-    
-    setPerturbedFile(perturbedFileObj);
-    
-    if (onPerturbationComplete) {
-      onPerturbationComplete(result);
-    }
-  };
 
-  const hasAttention = !!model && model.includes('whisper');
-  const addResult = unifiedResult?.tasks?.add;
-  const serResult = unifiedResult?.tasks?.ser;
-  const asrResult = unifiedResult?.tasks?.asr;
-  
-  // Extract XAI and Acoustic data from unified result
-  const xaiResult = unifiedResult?.tasks?.xai;
-  const spectrogramData = unifiedResult?.tasks?.acoustic?.spectrogram;
-  const waveformData = unifiedResult?.tasks?.acoustic?.waveform || []; // Extract waveform
+    fetchXAISaliency();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedFile, selectedEmbeddingFile, model, dataset, activeXAIMethod]);
+
+  const waveformData = unifiedResult?.tasks?.acoustic?.waveform || [];
   const f0Data = unifiedResult?.tasks?.acoustic?.f0 || [];
 
   return (
@@ -323,8 +376,8 @@ export const PredictionPanel = ({
           <TabsContent value="saliency" forceMount className="m-0 h-full data-[state=inactive]:hidden">
             <div className="p-3 space-y-4">
               {/* Dynamic XAI Method Toggle Buttons */}
-              <div className="flex gap-2 mb-2">
-                {(['saliency', 'shap', 'lime', 'ig'] as XAIMethod[]).map(m => (
+              <div className="flex gap-2 mb-2 flex-wrap">
+                {(['gradcam', 'integrated_gradients', 'lime', 'shap'] as XAIMethod[]).map(m => (
                   <button 
                     key={m} 
                     onClick={() => setActiveXAIMethod(m)}
@@ -334,13 +387,28 @@ export const PredictionPanel = ({
                         : 'bg-muted text-muted-foreground border-border hover:bg-accent'
                     }`}
                   >
-                    {m.toUpperCase()}
+                    {m === 'integrated_gradients' ? 'INTEGRATED GRADIENTS' : m.toUpperCase()}
                   </button>
                 ))}
               </div>
 
               {/* New High-Performance XAI Overlay Canvas */}
-              {spectrogramData || xaiResult ? (
+              {xaiError ? (
+                <Card className="w-full h-[400px] flex items-center justify-center bg-red-50 dark:bg-red-950/20 border-red-200 dark:border-red-900">
+                  <CardContent className="text-center text-red-600 dark:text-red-400 p-6">
+                    <AlertTriangle className="h-8 w-8 mx-auto mb-2 opacity-80" />
+                    <p className="text-sm font-semibold">Failed to load XAI Overlay Canvas</p>
+                    <p className="text-xs mt-1 opacity-90">{xaiError}</p>
+                  </CardContent>
+                </Card>
+              ) : xaiLoading ? (
+                <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
+                  <CardContent className="text-center text-muted-foreground flex flex-col items-center gap-2">
+                    <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                    <p className="text-sm">Loading XAI Saliency & Spectrogram overlay...</p>
+                  </CardContent>
+                </Card>
+              ) : spectrogramData || xaiResult ? (
                 <XAIOverlayCanvas
                   audioDuration={audioDuration}
                   baseSpectrogram={spectrogramData}
@@ -354,7 +422,7 @@ export const PredictionPanel = ({
               ) : (
                 <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
                   <CardContent className="text-center text-muted-foreground">
-                    <p className="text-sm">Awaiting XAI & Spectrogram data from worker...</p>
+                    <p className="text-sm">Select an audio file and saliency method to render XAI overlay canvas.</p>
                   </CardContent>
                 </Card>
               )}

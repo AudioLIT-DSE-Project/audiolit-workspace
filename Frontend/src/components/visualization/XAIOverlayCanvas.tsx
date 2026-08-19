@@ -1,10 +1,11 @@
 import React, { useEffect, useRef } from 'react';
 
-export type XAIMethod = 'saliency' | 'shap' | 'lime' | 'ig';
+export type XAIMethod = 'gradcam' | 'integrated_gradients' | 'lime' | 'shap';
 
 export interface XAIResult {
   method: XAIMethod;
-  matrix: number[][]; // [mel_bins][time_frames]
+  matrix?: number[][]; // [mel_bins][time_frames]
+  saliency_matrix?: number[][]; // API alias from /saliency/generate
   max_val?: number;
 }
 
@@ -38,7 +39,7 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
   waveformData = [],
   xaiResults = [],
   f0Data = [],
-  activeMethod = 'saliency',
+  activeMethod = 'gradcam',
   width = 800,
   height = 400,
 }) => {
@@ -46,10 +47,10 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const f0CanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRefs = useRef<Record<XAIMethod, HTMLCanvasElement | null>>({
-    saliency: null,
-    shap: null,
+    gradcam: null,
+    integrated_gradients: null,
     lime: null,
-    ig: null,
+    shap: null,
   });
 
   const mapTimeToX = (timeMs: number) => (timeMs / 1000 / audioDuration) * width;
@@ -121,16 +122,29 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
       if (!ctx) return;
       ctx.clearRect(0, 0, width, height);
 
-      const melBins = res.matrix.length;
-      const timeFrames = res.matrix[0]?.length || 0;
+      const targetMatrix = res.saliency_matrix || res.matrix;
+      if (!targetMatrix || targetMatrix.length === 0) return;
+
+      const melBins = targetMatrix.length;
+      const timeFrames = targetMatrix[0]?.length || 0;
       if (timeFrames === 0) return;
       
-      const maxVal = res.max_val || 1.0;
+      let maxVal = res.max_val;
+      if (maxVal === undefined || maxVal <= 0) {
+        let currentMax = 0;
+        for (let y = 0; y < melBins; y++) {
+          for (let x = 0; x < timeFrames; x++) {
+            if (targetMatrix[y][x] > currentMax) currentMax = targetMatrix[y][x];
+          }
+        }
+        maxVal = currentMax > 0 ? currentMax : 1.0;
+      }
+
       const imgData = ctx.createImageData(timeFrames, melBins);
 
       for (let y = 0; y < melBins; y++) {
         for (let x = 0; x < timeFrames; x++) {
-          const normVal = res.matrix[y][x] / maxVal;
+          const normVal = targetMatrix[y][x] / maxVal;
           const [r, g, b] = getHeatmapColor(normVal);
           const idx = (y * timeFrames + x) * 4;
           imgData.data[idx] = r;
@@ -175,7 +189,7 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
     <div className="relative bg-black rounded-lg overflow-hidden border border-border" style={{ width, height }}>
       <canvas ref={baseCanvasRef} width={width} height={height} className="absolute top-0 left-0" />
       <canvas ref={waveCanvasRef} width={width} height={height} className="absolute top-0 left-0 pointer-events-none" />
-      {(['saliency', 'shap', 'lime', 'ig'] as XAIMethod[]).map((method) => (
+      {(['gradcam', 'integrated_gradients', 'lime', 'shap'] as XAIMethod[]).map((method) => (
         <canvas
           key={method}
           ref={(el) => (overlayRefs.current[method] = el)}
