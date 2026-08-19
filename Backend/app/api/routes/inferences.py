@@ -24,6 +24,7 @@ from app.domain.model_loader_service import (
 from app.infrastructure.dataset_service import resolve_file
 from app.orchestration.inference_service import run_inference, extract_single_embedding, ADD_MODEL_KEYS
 from app.infrastructure.redis import get_result, cache_result
+from app.infrastructure import cache_keys as ck
 from app.api.dependencies import get_session_id
 
 router = APIRouter()
@@ -110,7 +111,9 @@ async def check_batch_cache(
             # Check cache
             cached_result = await get_result(model, cache_key)
             if cached_result is not None:
-                cached_results[filename] = cached_result.get("prediction", cached_result)
+                cached_results[filename] = ck.as_transcript(
+                    ck.unwrap_prediction(cached_result)
+                )
             else:
                 missing_files.append(filename)
                 
@@ -192,10 +195,7 @@ async def batch_whisper_analysis(request: Request):
                 transcript = None
                 if cached_result is not None:
                     # Extract transcript from cached result
-                    if isinstance(cached_result, dict):
-                        transcript = cached_result.get("prediction", cached_result.get("transcript"))
-                    else:
-                        transcript = cached_result
+                    transcript = ck.as_transcript(ck.unwrap_prediction(cached_result))
                     cached_count += 1
                     logger.info(f"Using cached transcript for {filename}")
                 else:
@@ -349,11 +349,15 @@ async def get_whisper_accuracy(request: Request):
                 print(f"DEBUG: Failed to run inference: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to run inference for {dataset_file}: {str(e)}")
         
-        # Extract transcript from cached result
-        if isinstance(cached_result, dict):
-            predicted_transcript = cached_result.get("prediction", cached_result.get("transcript", ""))
-        else:
-            predicted_transcript = str(cached_result)
+        # Extract transcript from cached result.
+        #
+        # Entries written by dataset warmup before the transcript and
+        # attention shapes were separated store `prediction` as a
+        # {"text", "attention"} dict. `as_transcript` flattens any of those
+        # shapes to the plain string the accuracy maths below requires -
+        # without it, clean_text() raises AttributeError on .lower() and the
+        # UI sits on a spinner.
+        predicted_transcript = ck.as_transcript(ck.unwrap_prediction(cached_result))
         
         # Get ground truth from dataset metadata
         ground_truth = ""
@@ -1119,7 +1123,7 @@ async def get_whisper_with_attention(
     
     # Get transcription with attention
     try:
-        result = await asyncio.to_thread(transcribe_whisper_with_attention, str(resolved_path), "base")
+        result = await asyncio.to_thread(transcribe_whisper_with_attention, str(resolved_path), model)
         
         # Cache the result
         await cache_result(model, cache_key, {"prediction": result}, ttl=6*60*60)
@@ -1227,7 +1231,7 @@ async def extract_attention_pairs_endpoint(
             return cached_result
         
         # Extract attention pairs using your existing infrastructure
-        model_size = "base"
+        model_size = model
         
         # Use your existing attention function as base
         attention_result = transcribe_whisper_with_attention(str(resolved_path), model_size)
