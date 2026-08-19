@@ -117,6 +117,54 @@ class TestRunInferenceBindsTheSelection:
         assert loaded == [resolve_whisper_model_id(model)]
 
 
+class TestForceRefreshBypassesCache:
+    """LIT-248: the per-row Regenerate button needs a real recompute, not
+    the same cached prediction handed back unchanged."""
+
+    async def test_default_returns_cached_result_without_recomputing(self, loaded):
+        import app.orchestration.inference_service as isvc
+
+        async def cached(*a, **k):
+            return {"prediction": "cached-value"}
+
+        with patch.object(isvc, "_resolve_audio_path", return_value=Path("a.wav")), \
+             patch.object(Path, "exists", return_value=True), \
+             patch.object(isvc, "get_result", new=cached):
+            result = await isvc.run_inference("whisper-base", file_path="a.wav")
+
+        assert result == "cached-value"
+        assert loaded == []  # never recomputed
+
+    async def test_force_refresh_skips_cache_and_recomputes(self, loaded):
+        import app.orchestration.inference_service as isvc
+
+        async def cached(*a, **k):
+            return {"prediction": "stale-cached-value"}
+
+        cache_writes = []
+
+        async def record_write(model, key, payload, ttl=None):
+            cache_writes.append((model, key, payload))
+
+        with patch.object(isvc, "_resolve_audio_path", return_value=Path("a.wav")), \
+             patch.object(Path, "exists", return_value=True), \
+             patch.object(isvc, "get_result", new=cached), \
+             patch.object(isvc, "cache_result", new=record_write):
+            result = await isvc.run_inference("whisper-base", file_path="a.wav", force_refresh=True)
+
+        assert result == "stub"  # the freshly computed value, not the stale cache
+        assert loaded == ["openai/whisper-base"]  # the model actually ran
+        assert len(cache_writes) == 1  # fresh result overwrites the cache entry
+        assert cache_writes[0][2] == {"prediction": "stub"}
+
+    async def test_force_refresh_false_is_the_default(self, loaded):
+        import app.orchestration.inference_service as isvc
+        import inspect as _inspect
+
+        sig = _inspect.signature(isvc.run_inference)
+        assert sig.parameters["force_refresh"].default is False
+
+
 class TestEmbeddingsDoNotSilentlySubstitute:
     def test_a_broken_custom_model_raises_rather_than_using_whisper_base(self, tmp_path):
         """Falling back would file whisper-base vectors under the custom key."""
