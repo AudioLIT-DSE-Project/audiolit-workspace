@@ -8,7 +8,8 @@ import json
 from app.infrastructure.custom_dataset_service import (
     get_custom_dataset_manager,
     format_custom_dataset_name,
-    cleanup_session_datasets
+    cleanup_session_datasets,
+    parse_ground_truth_csv,
 )
 from app.api.dependencies import require_session_id as get_session_id
 
@@ -134,6 +135,56 @@ async def upload_files_to_dataset(
     except Exception as e:
         logger.error(f"Error uploading files to dataset {dataset_name}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to upload files: {str(e)}")
+
+
+@router.post("/dataset/{dataset_name}/ground-truth")
+async def upload_ground_truth(
+    request: Request,
+    dataset_name: str,
+    file: UploadFile = File(..., description="CSV mapping filename to ground truth text"),
+):
+    """Upload/replace ground truth for a custom dataset (LIT-247).
+
+    Order-independent: can be uploaded before or after the dataset's audio
+    files. Matching is by filename (extension-stripped, case-insensitive)
+    against each file's original_filename, and re-runs automatically as new
+    audio files are added later. Re-uploading replaces the previous map
+    rather than merging with it.
+    """
+    session_id = get_session_id(request)
+
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Ground truth file must be a .csv")
+
+    manager = get_custom_dataset_manager(session_id)
+    if manager.get_dataset_metadata(dataset_name) is None:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_name}' does not exist")
+
+    raw = await file.read()
+    try:
+        mapping = parse_ground_truth_csv(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        summary = manager.set_ground_truth(dataset_name, mapping)
+    except ValueError as e:
+        # Dataset deleted between the existence check above and here - rare
+        # race, but cheaper to handle explicitly than to assume it can't happen.
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error applying ground truth to dataset {dataset_name}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to apply ground truth: {str(e)}")
+
+    formatted_name = format_custom_dataset_name(session_id, dataset_name)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "message": f"Matched {summary['matched_files']} of {summary['total_files']} files.",
+            "dataset_name": formatted_name,
+            **summary,
+        }
+    )
 
 
 @router.get("/dataset/list")
