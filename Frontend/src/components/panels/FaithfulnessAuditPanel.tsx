@@ -143,7 +143,8 @@ export const FaithfulnessAuditPanel: React.FC<FaithfulnessAuditPanelProps> = ({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="gradcam">GradCAM</SelectItem>
+                    <SelectItem value="gradcam">Grad-CAM</SelectItem>
+                    <SelectItem value="integrated_gradients">Integrated Gradients</SelectItem>
                     <SelectItem value="lime">LIME</SelectItem>
                     <SelectItem value="shap">SHAP</SelectItem>
                   </SelectContent>

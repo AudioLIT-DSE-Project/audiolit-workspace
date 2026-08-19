@@ -93,21 +93,19 @@ class MockEmoModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = torch.nn.Conv1d(1, 4, 3, padding=1)
-        self.linear = torch.nn.Linear(4 * 16000, 6)
+        self.linear = torch.nn.Linear(16000 * 4, 6)
         self.config = type('obj', (object,), {'id2label': {0: 'neutral', 1: 'happy', 2: 'sad'}})()
 
     def forward(self, input_values, attention_mask=None):
-        if input_values.ndim == 2:
-            x = input_values.unsqueeze(1)
+        inp = input_values.unsqueeze(1) if input_values.dim() == 2 else input_values
+        conv_out = self.conv(inp)
+        x = conv_out.view(conv_out.shape[0], -1)
+        if x.shape[-1] < 16000 * 4:
+            x = torch.nn.functional.pad(x, (0, 16000 * 4 - x.shape[-1]))
         else:
-            x = input_values
-        if x.shape[-1] < 16000:
-            x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
-        else:
-            x = x[:, :, :16000]
-        feat = torch.relu(self.conv(x))
-        logits = self.linear(feat.flatten(1))
-
+            x = x[:, :16000 * 4]
+        logits = self.linear(x)
+        
         class MockOutput:
             def __init__(self, logits):
                 self.logits = logits
