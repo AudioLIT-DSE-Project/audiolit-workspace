@@ -6,6 +6,7 @@ import librosa
 from typing import Dict, List, Tuple, Optional, Union
 from pathlib import Path
 from captum.attr import IntegratedGradients, GradientShap, Lime
+from app.domain.provenance import Provenance, provenance_fields
 from app.domain.model_loader_service import (
     transcribe_whisper_base,
     transcribe_whisper_with_timestamps,
@@ -80,6 +81,34 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
         return enc.pow(2).mean(dim=(1, 2))             # [B]
     
     if method == "gradcam":
+        try:
+            target_layer = find_last_conv_layer(model)
+            cam_np = compute_grad_cam(model, input_features, target_layer=target_layer)
+            attributions = torch.from_numpy(cam_np).to(device=input_features.device, dtype=input_features.dtype)
+            if attributions.dim() < input_features.dim():
+                attributions = attributions.unsqueeze(0)
+            if attributions.shape != input_features.shape:
+                attributions = torch.nn.functional.interpolate(
+                    attributions.unsqueeze(0).unsqueeze(0) if attributions.dim() == 2 else attributions.unsqueeze(0),
+                    size=input_features.shape[-2:],
+                    mode="bilinear" if input_features.dim() == 4 else "linear",
+                    align_corners=False,
+                ).squeeze(0)
+        except ValueError as e:
+            return {
+                "model": "whisper",
+                "method": "gradcam",
+                "segments": [],
+                "total_duration": segment_duration,
+                "series": [],
+                "base_spectrogram": [],
+                "saliency_matrix": [],
+                **provenance_fields(
+                    Provenance.UNAVAILABLE,
+                    reason=f"No convolutional layer found for Grad-CAM: {e}",
+                ),
+            }
+    elif method in ("integrated_gradients", "ig"):
         # Optimize memory usage for GPU
         torch.cuda.empty_cache()
         
@@ -159,7 +188,7 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
             logger.exception("Whisper SHAP failed; falling back to energy map")
             attributions = None
     else:
-        attributions = torch.zeros_like(input_features)
+        raise ValueError(f"Unsupported saliency method '{method}'. Supported methods: 'gradcam', 'integrated_gradients', 'lime', 'shap'")
     
     # Reduce to 1D timeline and normalize to [0,1] for visible intensities
     if attributions is not None:
@@ -317,11 +346,13 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
 def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
     model_loader_service.ensure_emo_model_loaded()
     audio, rate = librosa.load(audio_file_path, sr=16000)
+    segment_duration = len(audio) / rate if rate > 0 else 0.0
     # Crop to safe max duration to bound memory
     max_seconds = MAX_SALIENCY_SECONDS_SHAP if method == "shap" else MAX_SALIENCY_SECONDS
     max_len = int(max_seconds * rate)
     if len(audio) > max_len:
         audio = audio[:max_len]
+        segment_duration = len(audio) / rate
     inputs = model_loader_service.feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
     
     input_values = inputs.input_values.to(model_loader_service.emo_device)
@@ -334,12 +365,46 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
         tmp_out = model_loader_service.emo_model(input_values=input_values, attention_mask=attention_mask)
         tmp_probs = torch.nn.functional.softmax(tmp_out.logits, dim=-1)
         target_idx = int(torch.argmax(tmp_probs, dim=-1).item())
+        id2label = getattr(model_loader_service.emo_model.config, "id2label", {})
+        emotion = id2label.get(target_idx, f"emotion_{target_idx}")
 
     def model_forward(inputs, mask=None, cls_idx: int = 0):
         outputs = model_loader_service.emo_model(input_values=inputs, attention_mask=mask)
         return outputs.logits[:, cls_idx]
     
     if method == "gradcam":
+        try:
+            target_layer = find_last_conv_layer(model_loader_service.emo_model)
+            cam_np = compute_grad_cam(
+                model_loader_service.emo_model,
+                input_values,
+                target_layer=target_layer,
+                target_index=target_idx,
+            )
+            attributions = torch.from_numpy(cam_np).to(device=input_values.device, dtype=input_values.dtype)
+            if attributions.shape != input_values.shape:
+                attributions = torch.nn.functional.interpolate(
+                    attributions.view(1, 1, -1),
+                    size=input_values.shape[-1],
+                    mode="linear",
+                    align_corners=False,
+                ).squeeze(0)
+        except ValueError as e:
+            return {
+                "model": "wav2vec2",
+                "method": "gradcam",
+                "emotion": emotion,
+                "segments": [],
+                "total_duration": segment_duration,
+                "series": [],
+                "base_spectrogram": [],
+                "saliency_matrix": [],
+                **provenance_fields(
+                    Provenance.UNAVAILABLE,
+                    reason=f"No convolutional layer found for Grad-CAM: {e}",
+                ),
+            }
+    elif method in ("integrated_gradients", "ig"):
         ig = IntegratedGradients(model_forward)
         n_steps_val = 4 if not torch.cuda.is_available() else 16
         try:
@@ -408,7 +473,7 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
             logger.exception("Wav2Vec2 SHAP failed; falling back to energy map")
             attributions = None
     else:
-        attributions = torch.zeros_like(input_values)
+        raise ValueError(f"Unsupported saliency method '{method}'. Supported methods: 'gradcam', 'integrated_gradients', 'lime', 'shap'")
     
     # Normalize to [0,1] for visible intensities
     if attributions is not None:
@@ -555,6 +620,61 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
         "saliency_matrix": mel_saliency.tolist()          # Added for XAI canvas
     }
 
+def generate_add_gradcam_saliency(audio_file_path: str, model_name: str) -> Dict:
+    audio, sr = librosa.load(audio_file_path, sr=16000)
+    spect = audio_to_spectrogram(audio)
+    spect_norm = (spect - spect.min()) / (spect.max() - spect.min() + 1e-8)
+    
+    add_model = model_loader_service.get_model(model_name)
+    if add_model is None:
+        add_model = model_loader_service.load_add_model(model_name)
+    
+    try:
+        target_layer = find_last_conv_layer(add_model)
+        inputs = torch.from_numpy(spect_norm).unsqueeze(0).unsqueeze(0).to(model_loader_service.device)
+        cam = compute_grad_cam(add_model, inputs, target_layer=target_layer)
+        
+        timeline = cam.mean(axis=0) if cam.ndim == 2 else cam
+        timeline_norm = (timeline - timeline.min()) / (timeline.max() - timeline.min() + 1e-8)
+        
+        total_duration = len(audio) / sr
+        n_frames = len(timeline_norm)
+        segments = []
+        for idx, w in enumerate(timeline_norm):
+            t_start = (idx / n_frames) * total_duration
+            t_end = ((idx + 1) / n_frames) * total_duration
+            segments.append({
+                "start": round(float(t_start), 3),
+                "end": round(float(t_end), 3),
+                "score": round(float(w), 4),
+            })
+            
+        return {
+            "model": model_name,
+            "method": "gradcam",
+            "segments": segments,
+            "total_duration": round(float(total_duration), 3),
+            "series": timeline_norm.tolist(),
+            "base_spectrogram": spect_norm.tolist(),
+            "saliency_matrix": cam.tolist() if cam.ndim == 2 else spect_norm.tolist(),
+            **provenance_fields(Provenance.MEASURED),
+        }
+    except ValueError as e:
+        return {
+            "model": model_name,
+            "method": "gradcam",
+            "segments": [],
+            "total_duration": len(audio) / sr if len(audio) > 0 else 0.0,
+            "series": [],
+            "base_spectrogram": spect_norm.tolist(),
+            "saliency_matrix": [],
+            **provenance_fields(
+                Provenance.UNAVAILABLE,
+                reason=f"No convolutional layer found for Grad-CAM on ADD model {model_name}: {e}"
+            ),
+        }
+
+
 def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
     model_type = detect_model_type(model)
 
@@ -563,9 +683,12 @@ def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam",
     elif model_type == "wav2vec2":
         return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
     elif model_type == "add":
-        raise ValueError(
-            f"Saliency/Grad-CAM is not yet supported for deepfake-detection models ({model})."
-        )
+        if method == "gradcam":
+            return generate_add_gradcam_saliency(audio_file_path, model)
+        else:
+            raise ValueError(
+                f"Saliency method '{method}' is not supported for deepfake-detection models ({model})."
+            )
     else:
         raise ValueError(f"Unsupported model: {model}")
 
