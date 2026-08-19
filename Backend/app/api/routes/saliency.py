@@ -13,7 +13,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path("uploads")
-SALIENCY_SCHEMA_VERSION = "v2"  # bump to bust stale caches after logic changes
+SALIENCY_SCHEMA_VERSION = "v3"  # bump to bust stale caches after logic changes (v3: gradcam vs integrated_gradients split)
 
 class SaliencyRequest(BaseModel):
     model: str
@@ -87,6 +87,9 @@ async def generate_saliency_endpoint(http_request: Request, request: SaliencyReq
         
         return SaliencyResponse(**result)
         
+    except ValueError as e:
+        logger.warning(f"Saliency generation bad request: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error generating saliency: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Saliency generation failed: {str(e)}")
