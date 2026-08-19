@@ -93,8 +93,10 @@ class TestKeyFamiliesMatchRouteSpelling:
         assert ck.path_hash(sample_audio_file) == expected
 
     def test_content_hash_differs_from_path_hash(self, sample_audio_file):
-        p, c = ck.both_hashes(sample_audio_file)
-        assert p != c
+        hashes = ck.both_hashes(sample_audio_file)
+        assert len(set(hashes)) == len(hashes), "hash variants must be distinct"
+        # content first: readers should prefer the content-addressed key (FR4.1)
+        assert hashes[0] == ck.content_sha256(sample_audio_file)
 
 
 class TestWarmupWritesCorrectShapes:
@@ -195,7 +197,46 @@ class TestWarmupWritesCorrectShapes:
     def test_both_hash_spellings_are_written(self, sample_audio_file):
         """Consumers disagree on which hash to use; warm both or they miss."""
         writes = self._run(sample_audio_file, ["asr"])
-        p, c = ck.both_hashes(sample_audio_file)
-        model = "openai/whisper-tiny"
-        assert (model, f"v2_{model}_{p}") in writes
-        assert (model, f"v2_{model}_{c}") in writes
+        for h in ck.both_hashes(sample_audio_file):
+            assert ("openai/whisper-tiny", f"v2_openai/whisper-tiny_{h}") in writes
+
+
+class TestContentAddressing:
+    """FR4.1 — cache identity follows the audio, not the path."""
+
+    def test_same_audio_at_two_paths_shares_a_key(self, tmp_path, sample_audio_file):
+        import shutil
+        copy = tmp_path / "renamed_copy.wav"
+        shutil.copyfile(sample_audio_file, copy)
+
+        assert ck.content_sha256(sample_audio_file) == ck.content_sha256(copy)
+        # ...while the location-derived hashes necessarily differ, which is
+        # exactly why FR4.1 asks for content addressing.
+        assert ck.path_hash(sample_audio_file) != ck.path_hash(copy)
+
+        a = ck.transcript_keys("m", (ck.content_sha256(sample_audio_file),))
+        b = ck.transcript_keys("m", (ck.content_sha256(copy),))
+        assert a == b
+
+    def test_editing_a_file_in_place_changes_its_key(self, tmp_path):
+        import numpy as np, soundfile as sf
+        p = tmp_path / "clip.wav"
+        sf.write(p, np.zeros(16000, dtype="float32"), 16000)
+        before = ck.content_sha256(p)
+        sf.write(p, np.ones(16000, dtype="float32") * 0.5, 16000)
+        assert ck.content_sha256(p) != before
+
+    def test_content_hash_is_tried_first(self, sample_audio_file):
+        """Readers must prefer the content key over the path keys."""
+        assert ck.both_hashes(sample_audio_file)[0] == ck.content_sha256(sample_audio_file)
+
+    def test_edited_file_rehashes_despite_the_memo(self, tmp_path):
+        """The memo is keyed on size and mtime, so an edit must not be cached."""
+        import numpy as np, soundfile as sf, os, time
+        p = tmp_path / "clip.wav"
+        sf.write(p, np.zeros(16000, dtype="float32"), 16000)
+        first = ck.content_sha256(p)
+        time.sleep(0.01)
+        sf.write(p, np.ones(8000, dtype="float32") * 0.5, 16000)
+        os.utime(p, None)
+        assert ck.content_sha256(p) != first

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { usePlayback } from '@/contexts/PlaybackContext';
 
 export type XAIMethod = 'gradcam' | 'integrated_gradients' | 'lime' | 'shap';
 
@@ -26,16 +27,46 @@ interface XAIOverlayCanvasProps {
   // Upper bound of the spectrogram's mel axis. librosa defaults fmax to sr/2,
   // so a fixed 8000 puts the F0 line at the wrong height on any other rate.
   maxFreqHz?: number;
+  /** Overlay transparency, 0-1 (FR8.4 requires it be adjustable). */
+  overlayOpacity?: number;
   width?: number;
   height?: number;
 }
 
+// Viridis, 32 control points, linearly interpolated (FR8.4).
+//
+// The previous ramp was blue->cyan->green->yellow->red - the jet family. Jet's
+// luminance is non-monotonic, so it invents banding that is not in the data,
+// loses ordering in greyscale print, and is not colourblind-safe. The SRS names
+// "perceptually uniform, accessible" explicitly, so this is a stated
+// requirement rather than a preference.
+const VIRIDIS: [number, number, number][] = [
+  [68, 1, 84], [71, 13, 96], [72, 24, 106], [72, 35, 116], [71, 45, 123],
+  [69, 55, 129], [66, 64, 134], [62, 73, 137], [59, 82, 139], [55, 91, 141],
+  [51, 99, 141], [47, 107, 142], [44, 114, 142], [41, 122, 142], [38, 130, 142],
+  [35, 137, 142], [33, 145, 140], [31, 152, 139], [31, 160, 136], [34, 167, 133],
+  [40, 174, 128], [51, 182, 122], [64, 189, 114], [80, 196, 105], [99, 203, 95],
+  [119, 209, 83], [141, 215, 68], [164, 220, 53], [187, 225, 39], [210, 229, 34],
+  [232, 233, 39], [253, 231, 37],
+];
+
 const getHeatmapColor = (value: number): [number, number, number] => {
   const v = Math.max(0, Math.min(1, value));
-  if (v < 0.25) return [0, 0, 255 * (v * 4)]; // Blue to Cyan
-  if (v < 0.5) return [0, 255 * ((v - 0.25) * 4), 255]; // Cyan to Green
-  if (v < 0.75) return [255 * ((v - 0.5) * 4), 255, 255 - (255 * ((v - 0.5) * 4))]; // Green to Yellow
-  return [255, 255 - (255 * ((v - 0.75) * 4)), 0]; // Yellow to Red
+  const pos = v * (VIRIDIS.length - 1);
+  const i = Math.floor(pos);
+  const j = Math.min(i + 1, VIRIDIS.length - 1);
+  const t = pos - i;
+  return [
+    VIRIDIS[i][0] + (VIRIDIS[j][0] - VIRIDIS[i][0]) * t,
+    VIRIDIS[i][1] + (VIRIDIS[j][1] - VIRIDIS[i][1]) * t,
+    VIRIDIS[i][2] + (VIRIDIS[j][2] - VIRIDIS[i][2]) * t,
+  ];
+};
+
+/** Relative luminance, for the monotonicity test FR8.4 actually requires. */
+export const heatmapLuminance = (v: number): number => {
+  const [r, g, b] = getHeatmapColor(v);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 };
 
 export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
@@ -46,9 +77,12 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
   f0Data = [],
   activeMethod = 'gradcam',
   maxFreqHz = 8000,
+  overlayOpacity = 0.7,
   width = 800,
   height = 400,
 }) => {
+  // FR10.2: one shared playhead across the player, profiler and this overlay.
+  const { currentTime, duration: playDuration, seek } = usePlayback();
   const baseCanvasRef = useRef<HTMLCanvasElement>(null);
   const waveCanvasRef = useRef<HTMLCanvasElement>(null);
   const f0CanvasRef = useRef<HTMLCanvasElement>(null);
@@ -213,10 +247,43 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
           width={width}
           height={height}
           className="absolute top-0 left-0 transition-opacity duration-150 ease-out"
-          style={{ opacity: activeMethod === method ? 0.85 : 0, mixBlendMode: 'screen' }}
+          style={{ opacity: activeMethod === method ? overlayOpacity : 0, mixBlendMode: 'screen' }}
         />
       ))}
       <canvas ref={f0CanvasRef} width={width} height={height} className="absolute top-0 left-0 pointer-events-none" />
+      {/* Playhead. Click anywhere on the canvas to seek (FR10.2). */}
+      <div
+        className="absolute inset-0 cursor-crosshair"
+        onClick={(e) => {
+          const total = playDuration || audioDuration;
+          if (!total) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          seek(((e.clientX - rect.left) / rect.width) * total);
+        }}
+      >
+        {(playDuration || audioDuration) > 0 && (
+          <div
+            className="absolute top-0 bottom-0 w-px bg-white/90 pointer-events-none"
+            style={{ left: `${Math.min(100, (currentTime / (playDuration || audioDuration)) * 100)}%` }}
+          />
+        )}
+      </div>
+      {/* Colourbar. A heatmap without a scale is not readable (FR8.4). */}
+      <div className="absolute bottom-2 right-2 flex items-center gap-2 rounded bg-black/60 px-2 py-1">
+        <span className="text-[10px] text-white/80">low</span>
+        <div
+          className="h-2 w-24 rounded-sm"
+          style={{
+            background: `linear-gradient(to right, ${[0, 0.25, 0.5, 0.75, 1]
+              .map((v) => {
+                const [r, g, b] = getHeatmapColor(v);
+                return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+              })
+              .join(', ')})`,
+          }}
+        />
+        <span className="text-[10px] text-white/80">high</span>
+      </div>
     </div>
   );
 };
