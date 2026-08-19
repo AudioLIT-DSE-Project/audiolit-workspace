@@ -220,9 +220,11 @@ class TestResolveAudioReference:
         target_file.write_bytes(b"fake audio data")
 
         monkeypatch.setattr(dataset_service, "DATA_DIR", data_dir)
+        monkeypatch.setitem(dataset_service.DATASET_BASE_DIRS, "cv-valid-dev", target_dir)
 
         resolved = dataset_service.resolve_audio_reference(dataset="cv-valid-dev", dataset_file="sample-000775.mp3")
         assert resolved.exists()
         assert resolved.name == "sample-000775.mp3"
+
 
 
