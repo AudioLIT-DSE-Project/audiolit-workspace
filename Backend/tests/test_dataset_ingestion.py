@@ -7,12 +7,14 @@ corpora are downloaded, so these run fast and offline.
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 import soundfile as sf
 
+from app.infrastructure import dataset_ingestion
 from app.infrastructure.dataset_ingestion import (
     CORPUS_REGISTRY,
     ColumnMap,
@@ -153,6 +155,146 @@ class TestSubsample:
     def test_negative_n_rejected(self, catalog_corpus):
         with pytest.raises(ValueError):
             catalog_corpus.subsample(-1)
+
+
+class TestIntegrityValidation:
+    """FR2.1 — file integrity checking (LIT-237)."""
+
+    def test_all_real_clips_pass_deep_check(self, catalog_corpus):
+        for sample in catalog_corpus.iter_metadata():
+            report = catalog_corpus.check_integrity(sample, deep=True)
+            assert report.ok is True
+            assert report.reason is None
+
+    def test_missing_file_is_rejected(self, catalog_corpus, tmp_path: Path):
+        sample = next(iter(catalog_corpus))
+        ghost = replace(sample, audio_path=tmp_path / "does-not-exist.wav")
+        report = catalog_corpus.check_integrity(ghost, deep=True)
+        assert report.ok is False
+        assert report.reason == "missing"
+
+    def test_shallow_check_skips_decode(self, catalog_corpus, tmp_path: Path):
+        # A corrupt (non-audio) file that exists still passes deep=False,
+        # since the cheap listing-path check is existence-only by design.
+        bogus = tmp_path / "bogus.wav"
+        bogus.write_bytes(b"not audio")
+        sample = replace(next(iter(catalog_corpus)), audio_path=bogus)
+        assert catalog_corpus.check_integrity(sample, deep=False).ok is True
+        assert catalog_corpus.check_integrity(sample, deep=True).ok is False
+
+    def test_undecodable_file_is_rejected_deep(self, catalog_corpus, tmp_path: Path):
+        bogus = tmp_path / "bogus.wav"
+        bogus.write_bytes(b"not audio")
+        sample = replace(next(iter(catalog_corpus)), audio_path=bogus)
+        report = catalog_corpus.check_integrity(sample, deep=True)
+        assert report.ok is False
+        assert report.reason == "undecodable"
+
+    def test_silent_clip_is_rejected_deep(self, catalog_corpus, tmp_path: Path):
+        silent = tmp_path / "silent.wav"
+        sf.write(str(silent), np.zeros(16_000, dtype=np.float32), 16_000)
+        sample = replace(next(iter(catalog_corpus)), audio_path=silent)
+        report = catalog_corpus.check_integrity(sample, deep=True)
+        assert report.ok is False
+        assert report.reason == "silent"
+
+    def test_validated_stream_excludes_rejects_and_reports_them(self, catalog_corpus, tmp_path: Path):
+        # Monkeypatch one sample's path to a missing file by wrapping iter_metadata.
+        original_iter = catalog_corpus.iter_metadata
+
+        def _iter_with_one_missing():
+            for i, meta in enumerate(original_iter()):
+                if i == 2:
+                    yield replace(meta, audio_path=tmp_path / "ghost.wav")
+                else:
+                    yield meta
+
+        catalog_corpus.iter_metadata = _iter_with_one_missing
+        rejects = []
+        kept = list(catalog_corpus.validated_stream(deep=False, on_reject=rejects.append))
+        assert len(kept) == 4
+        assert len(rejects) == 1
+        assert rejects[0].reason == "missing"
+
+    def test_validated_stream_limit_counts_accepted_not_examined(self, catalog_corpus, tmp_path: Path):
+        original_iter = catalog_corpus.iter_metadata
+
+        def _iter_with_first_missing():
+            for i, meta in enumerate(original_iter()):
+                if i == 0:
+                    yield replace(meta, audio_path=tmp_path / "ghost.wav")
+                else:
+                    yield meta
+
+        catalog_corpus.iter_metadata = _iter_with_first_missing
+        kept = list(catalog_corpus.validated_stream(limit=2, deep=False))
+        assert len(kept) == 2
+        assert all(s.audio_path.exists() for s in kept)
+
+
+class TestLicenseNotice:
+    """FR2.3 / SAD C5 — licence notice on load for non-commercial corpora."""
+
+    def test_non_commercial_corpora_matches_fr23(self):
+        assert dataset_ingestion.NON_COMMERCIAL_CORPORA == {
+            "ravdess", "l2-arctic", "esd", "asvspoof-2021",
+        }
+
+    def test_notice_logged_once_for_non_commercial_corpus(self, catalog_corpus, caplog):
+        catalog_corpus.name = "ravdess"  # pretend this fixture is a non-commercial corpus
+        with caplog.at_level("WARNING"):
+            list(catalog_corpus.iter_metadata())
+            list(catalog_corpus.iter_metadata())
+        assert caplog.text.count("non-commercial") == 1
+
+    def test_no_notice_for_commercial_corpus(self, catalog_corpus, caplog):
+        assert catalog_corpus.name == "fixture-asr"
+        with caplog.at_level("WARNING"):
+            list(catalog_corpus.iter_metadata())
+        assert "non-commercial" not in caplog.text
+
+
+class TestFootprintAndAvailability:
+    """FR2.2 footprint measurement + the corpus-availability probe (LIT-237)."""
+
+    def test_measure_footprint_sums_bytes_per_subdirectory(self, tmp_path: Path):
+        (tmp_path / "corpus-a").mkdir()
+        (tmp_path / "corpus-a" / "f1.wav").write_bytes(b"x" * 100)
+        (tmp_path / "corpus-a" / "f2.wav").write_bytes(b"x" * 50)
+        (tmp_path / "corpus-b").mkdir()
+        (tmp_path / "corpus-b" / "f1.wav").write_bytes(b"x" * 10)
+        (tmp_path / "not-a-dir.txt").write_bytes(b"ignored")
+
+        usage = dataset_ingestion.measure_footprint(tmp_path)
+        assert usage == {"corpus-a": 150, "corpus-b": 10}
+
+    def test_measure_footprint_missing_dir_returns_empty(self, tmp_path: Path):
+        assert dataset_ingestion.measure_footprint(tmp_path / "nope") == {}
+
+    def test_is_corpus_available_true_when_data_present(self, catalog_corpus, monkeypatch):
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: catalog_corpus)
+        assert dataset_ingestion.is_corpus_available("fixture-asr") is True
+
+    def test_is_corpus_available_false_when_data_missing(self, tmp_path: Path, monkeypatch):
+        empty_loader = CsvCatalogLoader(
+            name="empty",
+            task_family=TaskFamily.ASR,
+            catalog_path=tmp_path / "missing.csv",
+            audio_base_dir=tmp_path,
+            column_map=ColumnMap(),
+        )
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: empty_loader)
+        assert dataset_ingestion.is_corpus_available("empty") is False
+
+    def test_is_corpus_available_false_for_unknown_corpus(self):
+        assert dataset_ingestion.is_corpus_available("not-a-real-corpus") is False
+
+    def test_is_corpus_available_false_for_unwired_corpus(self, monkeypatch):
+        def _raise(name, **kw):
+            raise NotImplementedError(f"No loader registered for corpus '{name}' yet")
+
+        monkeypatch.setattr(dataset_ingestion, "get_loader", _raise)
+        assert dataset_ingestion.is_corpus_available("esd") is False
 
 
 class TestCorpusRegistry:
