@@ -11,6 +11,7 @@ import { PredictionPanel, UnifiedTaskResult } from "../panels/PredictionPanel";
 import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
+import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
 
 interface UploadedFile {
   file_id: string;
@@ -624,6 +625,17 @@ export const MainLayout = () => {
           onCancelWarmup={handleCancelWarmup}
           onMinimize={() => setIsWarmupMinimized(true)}
           onClearCache={handleClearCache}
+        />
+
+        {/* Floating Bottom-Right Status Banner when Warmup Modal is Minimized or Running in Background */}
+        <WarmupStatusBanner
+          warmupJobId={warmupJobId}
+          warmupProgress={warmupProgress}
+          dataset={effectiveDataset || dataset}
+          isMinimized={isWarmupMinimized || !isWarmupModalOpen}
+          onExpand={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
+          onCancel={handleCancelWarmup}
+          onDismiss={() => { setWarmupJobId(null); setWarmupProgress(null); }}
         />
         <div className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">
