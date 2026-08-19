@@ -11,7 +11,9 @@ export interface XAIResult {
 
 export interface F0Point {
   time_ms: number;
-  freq_hz: number;
+  // null on unvoiced frames. pYIN reports no pitch for silence and noise, and
+  // drawing through those gaps would invent a pitch track the model never saw.
+  freq_hz: number | null;
 }
 
 interface XAIOverlayCanvasProps {
@@ -21,6 +23,9 @@ interface XAIOverlayCanvasProps {
   xaiResults?: XAIResult[];
   f0Data?: F0Point[];
   activeMethod?: XAIMethod;
+  // Upper bound of the spectrogram's mel axis. librosa defaults fmax to sr/2,
+  // so a fixed 8000 puts the F0 line at the wrong height on any other rate.
+  maxFreqHz?: number;
   width?: number;
   height?: number;
 }
@@ -40,6 +45,7 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
   xaiResults = [],
   f0Data = [],
   activeMethod = 'gradcam',
+  maxFreqHz = 8000,
   width = 800,
   height = 400,
 }) => {
@@ -54,7 +60,7 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
   });
 
   const mapTimeToX = (timeMs: number) => (timeMs / 1000 / audioDuration) * width;
-  const mapHzToY = (hz: number, maxFreq = 8000) => {
+  const mapHzToY = (hz: number, maxFreq = maxFreqHz) => {
     const mel = 2595 * Math.log10(1 + hz / 500);
     const maxMel = 2595 * Math.log10(1 + maxFreq / 500);
     return height - (mel / maxMel) * height;
@@ -176,14 +182,25 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
     ctx.shadowBlur = 4;
     ctx.beginPath();
 
-    f0Data.forEach((point, idx) => {
+    // Pen up on every unvoiced frame, so the contour shows where pitch was
+    // actually measured rather than a continuous line across silence.
+    let penDown = false;
+    f0Data.forEach((point) => {
+      if (point.freq_hz === null || point.freq_hz === undefined || !isFinite(point.freq_hz)) {
+        penDown = false;
+        return;
+      }
       const x = mapTimeToX(point.time_ms);
       const y = mapHzToY(point.freq_hz);
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+      if (!penDown) {
+        ctx.moveTo(x, y);
+        penDown = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
     });
     ctx.stroke();
-  }, [f0Data, width, height, audioDuration]);
+  }, [f0Data, width, height, audioDuration, maxFreqHz]);
 
   return (
     <div className="relative bg-black rounded-lg overflow-hidden border border-border" style={{ width, height }}>

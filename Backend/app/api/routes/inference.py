@@ -182,4 +182,116 @@ async def clear_ml_cache():
     return {"status": "ok", "message": "Cache cleared successfully", "cleared_keys": cleared_count}
 
 
+class CachedResultsRequest(BaseModel):
+    audio_ref: str | None = None
+    dataset: str | None = None
+    dataset_file: str | None = None
+    model: str = "whisper-base"
+
+
+@router.post("/inference/cached-results")
+async def get_cached_task_results(req: CachedResultsRequest):
+    """Retrieve all cached task results (ASR, SER, ADD, acoustic) for a file reference."""
+    import hashlib
+    from app.infrastructure.dataset_service import resolve_audio_reference, load_metadata
+    from app.infrastructure.redis import get_result
+    from app.infrastructure import cache_keys as ck
+    from app.orchestration.inference_service import ADD_MODEL_KEYS
+
+    resolved_path = None
+    if req.dataset and req.dataset_file:
+        try:
+            # Keyword arguments: the signature is
+            # (file_path, dataset, dataset_file, session_id), so passing
+            # (dataset, dataset_file, audio_ref) positionally resolved the
+            # dataset NAME as a file path, every lookup missed, and the panel
+            # silently fell back to ground-truth metadata.
+            resolved_path = resolve_audio_reference(
+                file_path=req.audio_ref,
+                dataset=req.dataset,
+                dataset_file=req.dataset_file,
+            )
+        except Exception:
+            resolved_path = None
+
+    file_ref = req.audio_ref or req.dataset_file or ""
+    path_str = str(resolved_path) if resolved_path else file_ref
+    file_path_hash = hashlib.md5(path_str.encode()).hexdigest()
+    filename_hash = hashlib.md5(file_ref.split("/")[-1].split("\\")[-1].encode()).hexdigest() if file_ref else ""
+
+    hash_candidates = [h for h in [file_path_hash, filename_hash] if h]
+    # The content hash is what the saliency and acoustic families key on.
+    if resolved_path is not None:
+        try:
+            hash_candidates.append(ck.content_hash(resolved_path))
+        except OSError:
+            pass
+
+    async def first_hit(keys):
+        for ns, key in keys:
+            hit = await get_result(ns, key)
+            if hit:
+                return hit
+        return None
+
+    tasks: dict[str, Any] = {}
+    hashes = tuple(hash_candidates)
+
+    # ASR. The transcript family stores {"prediction": "<string>"}; handing the
+    # wrapper straight to the UI left `asr.transcript` undefined, so the card
+    # rendered blank while the data sat right there.
+    asr = await first_hit(ck.transcript_keys(req.model, hashes))
+    if asr is None:
+        for h in hashes:
+            asr = await get_result("predictions", h)
+            if asr:
+                break
+    if asr:
+        transcript = ck.as_transcript(ck.unwrap_prediction(asr))
+        if transcript:
+            tasks["asr"] = {"transcript": transcript, "tokens": []}
+
+    # SER, ADD and acoustic all go through cache_keys. Hand-rolled spellings
+    # here read `ser_{h}`, `add_{h}` and an unversioned `acoustic_profile_{h}`,
+    # none of which any writer produces - so the Emotion Analytics and Deepfake
+    # cards were starved even when the data was sitting in Redis under its real
+    # key. One definition of a key family, or the readers drift from the writers.
+    ser = await first_hit(ck.ser_keys(hashes))
+    if ser:
+        tasks["ser"] = ck.unwrap_prediction(ser)
+
+    for add_model in ADD_MODEL_KEYS:
+        add = await first_hit(ck.deepfake_keys(add_model, hashes))
+        if add:
+            tasks["add"] = ck.unwrap_prediction(add)
+            break
+
+    acoustic = await first_hit(ck.acoustic_keys(hashes))
+    if acoustic:
+        tasks["acoustic"] = acoustic
+
+    # Fallback to dataset metadata if ASR transcript is still missing
+    if "asr" not in tasks and req.dataset and req.dataset_file:
+        try:
+            meta = load_metadata(req.dataset)
+            clean_target = req.dataset_file.split("/")[-1].split("\\")[-1]
+            for row in meta:
+                path_val = str(row.get("path") or row.get("filepath") or row.get("file") or row.get("filename") or "")
+                row_file = path_val.split("/")[-1].split("\\")[-1]
+                if row_file == clean_target:
+                    transcript = row.get("label") or row.get("transcript") or row.get("text") or row.get("sentence") or row.get("prediction")
+                    if transcript:
+                        tasks["asr"] = {"transcript": str(transcript), "tokens": []}
+                    break
+        except Exception:
+            pass
+
+    return {
+        "audio_ref": file_ref,
+        "tasks": tasks,
+        "cached": len(tasks) > 0,
+    }
+
+
+
 

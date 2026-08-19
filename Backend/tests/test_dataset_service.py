@@ -196,3 +196,16 @@ class TestRegistryMetadataRowsFR2Fixes:
         rows = dataset_service.load_metadata("some-new-corpus")
 
         assert rows[0]["duration"] == "1.0"
+
+
+class TestResolveAudioReference:
+    def test_resolves_dataset_file_with_relative_directory_prefix(self):
+        resolved = dataset_service.resolve_audio_reference(file_path="cv-valid-dev/sample-000775.mp3")
+        assert resolved.exists()
+        assert resolved.name == "sample-000775.mp3"
+
+    def test_resolves_dataset_and_dataset_file(self):
+        resolved = dataset_service.resolve_audio_reference(dataset="cv-valid-dev", dataset_file="sample-000775.mp3")
+        assert resolved.exists()
+        assert resolved.name == "sample-000775.mp3"
+
