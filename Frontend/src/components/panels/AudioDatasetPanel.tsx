@@ -224,6 +224,45 @@ export const AudioDatasetPanel = ({
     setInferenceStatus({});
   }, [model, dataset, originalDataset]);
 
+  // Auto-check cached predictions on metadata load or model change
+  useEffect(() => {
+    if (!model || datasetMetadata.length === 0) return;
+    const ac = new AbortController();
+
+    const filenames = datasetMetadata.map(row => {
+      const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
+      return pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : String(row["id"] || "unknown");
+    });
+
+    fetch(`${API_BASE}/inferences/batch-check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ model, dataset: originalDataset || dataset, files: filenames }),
+      signal: ac.signal,
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (!data || !data.cached_results) return;
+        const newStatus: Record<string, 'idle' | 'loading' | 'done' | 'error'> = {};
+
+        datasetMetadata.forEach((row, index) => {
+          const fileId = String(row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"] || index);
+          const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
+          const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : fileId;
+
+          if (data.cached_results[filename]) {
+            newStatus[fileId] = 'done';
+            if (onPredictionUpdate) onPredictionUpdate(fileId, data.cached_results[filename]);
+          }
+        });
+        setInferenceStatus(prev => ({ ...prev, ...newStatus }));
+      })
+      .catch(() => {});
+
+    return () => ac.abort();
+  }, [model, dataset, originalDataset, datasetMetadata, onPredictionUpdate]);
+
   // Explicit handler triggered ONLY when user clicks "Get Inferences"
   const handleStartBatchInference = useCallback(async () => {
     if (!model || datasetMetadata.length === 0) return;

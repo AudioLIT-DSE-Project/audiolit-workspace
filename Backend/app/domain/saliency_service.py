@@ -65,6 +65,8 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
             # Keep only chunks inside the window
             chunks = [c for c in chunks if c.get("timestamp", [0, 0])[0] < max_seconds]
     
+    total_duration = float(len(audio)) / 16000.0 if hasattr(audio, "__len__") and len(audio) > 0 else 0.0
+
     # Attribute over the checkpoint the user selected, not whisper-base -
     # a heatmap from a different model than the prediction it explains is
     # worse than no heatmap (FR1, FR8).
@@ -83,24 +85,36 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
     shap_fallback_reason = None
     if method == "gradcam":
         try:
-            target_layer = find_last_conv_layer(model)
-            cam_np = compute_grad_cam(model, input_features, target_layer=target_layer)
-            attributions = torch.from_numpy(cam_np).to(device=input_features.device, dtype=input_features.dtype)
-            if attributions.dim() < input_features.dim():
-                attributions = attributions.unsqueeze(0)
-            if attributions.shape != input_features.shape:
-                attributions = torch.nn.functional.interpolate(
-                    attributions.unsqueeze(0).unsqueeze(0) if attributions.dim() == 2 else attributions.unsqueeze(0),
-                    size=input_features.shape[-2:],
-                    mode="bilinear" if input_features.dim() == 4 else "linear",
-                    align_corners=False,
-                ).squeeze(0)
+            target_layer = find_last_conv_layer(model.encoder)
+            
+            class WhisperEncoderGradCamWrapper(torch.nn.Module):
+                def __init__(self, encoder):
+                    super().__init__()
+                    self.encoder = encoder
+                def forward(self, x):
+                    hidden = self.encoder(x).last_hidden_state
+                    return hidden.pow(2).mean(dim=(1, 2), keepdim=True)
+
+            wrapper = WhisperEncoderGradCamWrapper(model.encoder)
+            cam_np = compute_grad_cam(wrapper, input_features, target_layer=target_layer)
+            cam_tensor = torch.from_numpy(cam_np).to(device=input_features.device, dtype=input_features.dtype)
+            if cam_tensor.dim() == 1:
+                cam_tensor = cam_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, T_conv]
+                interp = torch.nn.functional.interpolate(
+                    cam_tensor,
+                    size=input_features.shape[-1],
+                    mode="linear",
+                    align_corners=False
+                ).squeeze(0)  # [1, T_input]
+                attributions = interp.repeat(input_features.shape[-2], 1)  # [80, T_input]
+            else:
+                attributions = cam_tensor
         except ValueError as e:
             return {
                 "model": "whisper",
                 "method": "gradcam",
                 "segments": [],
-                "total_duration": segment_duration,
+                "total_duration": total_duration,
                 "series": [],
                 "base_spectrogram": [],
                 "saliency_matrix": [],
@@ -334,6 +348,23 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
         for segment in segments:
             segment["intensity"] = max(0.1, segment["intensity"])  # Minimum 10% intensity
     
+    # Generate the base log-mel spectrogram for visual reference
+    mel_spect = librosa.feature.melspectrogram(y=audio, sr=16000, n_fft=2048, hop_length=512, n_mels=128)
+    log_mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
+    log_mel_spect_norm = (log_mel_spect - log_mel_spect.min()) / (log_mel_spect.max() - log_mel_spect.min() + 1e-9)
+    
+    # Map 1D attributions to 2D time-frequency matrix
+    n_frames = log_mel_spect_norm.shape[1]
+    if series.size > 0:
+        attr_resampled = np.interp(
+            np.linspace(0, len(series) - 1, n_frames),
+            np.arange(len(series)),
+            np.abs(series)
+        )
+        mel_saliency = np.tile(attr_resampled, (128, 1))
+    else:
+        mel_saliency = np.zeros_like(log_mel_spect_norm)
+
     prov = Provenance.FALLBACK if (use_energy_fallback or shap_fallback_reason is not None) else Provenance.MEASURED
     res_reason = fallback_reason if prov == Provenance.FALLBACK else None
     return {
@@ -342,6 +373,8 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
         "segments": segments,
         "total_duration": total_duration,
         "series": series.tolist(),
+        "base_spectrogram": log_mel_spect_norm.tolist(),
+        "saliency_matrix": mel_saliency.tolist(),
         **provenance_fields(prov, reason=res_reason)
     }
 

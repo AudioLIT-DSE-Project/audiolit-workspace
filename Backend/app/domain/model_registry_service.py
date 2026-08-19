@@ -196,9 +196,15 @@ def download_and_load(
         _, model_class = _SUPPORTED_MODEL_TYPES[
             next(k for k, v in _SUPPORTED_MODEL_TYPES.items() if v[0] == resolved.family)
         ]
-    model = model_class.from_pretrained(local_dir, attn_implementation=attn_implementation)
+    model = model_class.from_pretrained(local_dir, low_cpu_mem_usage=False, attn_implementation=attn_implementation)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
+    try:
+        model = model.to(device)
+    except Exception as e:
+        if "meta tensor" in str(e):
+            model = model.to_empty(device=device)
+        else:
+            raise
     model.eval()
 
     try:

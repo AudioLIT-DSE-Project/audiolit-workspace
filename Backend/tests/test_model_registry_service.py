@@ -246,7 +246,10 @@ class _FakeWhisperModel(nn.Module):
         return x
 
     @classmethod
-    def from_pretrained(cls, path, attn_implementation="eager"):
+    def from_pretrained(cls, path, attn_implementation="eager", **kwargs):
+        # **kwargs so a loader-side flag (low_cpu_mem_usage, device_map, ...)
+        # does not break the double. The double exists to stand in for the
+        # transformers API, which accepts arbitrary keywords.
         return cls()
 
 
@@ -256,7 +259,10 @@ class _FakeUnresolvableModel(nn.Module):
     doesn't actually match (download_and_load must degrade, not crash)."""
 
     @classmethod
-    def from_pretrained(cls, path, attn_implementation="eager"):
+    def from_pretrained(cls, path, attn_implementation="eager", **kwargs):
+        # **kwargs so a loader-side flag (low_cpu_mem_usage, device_map, ...)
+        # does not break the double. The double exists to stand in for the
+        # transformers API, which accepts arbitrary keywords.
         return cls()
 
 

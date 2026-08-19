@@ -212,6 +212,66 @@ def resolve_file(dataset: str, file_path: str, session_id: Optional[str] = None)
     return audio_path
 
 
+def resolve_audio_reference(
+    file_path: Optional[str] = None,
+    dataset: Optional[str] = None,
+    dataset_file: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> Path:
+    """Resolve an audio reference into an absolute Path on disk.
+
+    Supports:
+    1. explicit dataset + dataset_file
+    2. relative file_path with embedded dataset directory (e.g. 'cv-valid-dev/sample-000775.mp3')
+    3. direct file_path (absolute or relative to CWD)
+    """
+    if dataset and dataset_file:
+        try:
+            return resolve_file(dataset, dataset_file, session_id)
+        except (FileNotFoundError, ValueError):
+            pass
+
+    if file_path:
+        p = Path(file_path)
+        if p.is_absolute() and p.exists():
+            return p
+
+        # Check relative to DATA_DIR
+        data_resolved = DATA_DIR / p
+        if data_resolved.exists():
+            return data_resolved.resolve()
+
+        # If file_path contains dataset folder prefix (e.g. cv-valid-dev/sample-000775.mp3)
+        parts = p.parts
+        if len(parts) > 1:
+            try:
+                return resolve_file(parts[0], parts[-1], session_id)
+            except Exception:
+                pass
+
+        if p.exists():
+            return p.resolve()
+
+        # Check directly under DATA_DIR (e.g. DATA_DIR / p.name)
+        data_name_resolved = DATA_DIR / p.name
+        if data_name_resolved.exists():
+            return data_name_resolved.resolve()
+
+        # Fallback try resolve_file with dataset if dataset was provided
+        if dataset:
+            try:
+                return resolve_file(dataset, p.name, session_id)
+            except Exception:
+                pass
+
+        raise FileNotFoundError(f"Audio file not found: {file_path}")
+
+    if dataset and dataset_file:
+        return resolve_file(dataset, dataset_file, session_id)
+
+    raise ValueError("Missing audio reference. Provide either 'file_path' or 'dataset' + 'dataset_file'.")
+
+
 def media_type_for(audio_path: Path) -> str:
     ext = audio_path.suffix.lower()
     media_type_map = {

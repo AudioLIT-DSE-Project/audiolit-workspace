@@ -101,6 +101,12 @@ def extract_acoustic_profile(
     )
     rms = estimate_rms_contour(audio, frame_length=frame_length, hop_length=hop_length)
 
+    # Compute STFT log-mel spectrogram (FR10.1)
+    S = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=128, n_fft=frame_length, hop_length=hop_length)
+    S_db = librosa.power_to_db(S, ref=np.max)
+    s_min, s_max = float(S_db.min()), float(S_db.max())
+    S_norm = (S_db - s_min) / (s_max - s_min + 1e-8) if s_max > s_min else np.zeros_like(S_db)
+
     step_s = hop_length / sr
     timeline = [
         {
@@ -116,4 +122,5 @@ def extract_acoustic_profile(
         "hop_length": hop_length,
         "duration_s": float(len(audio) / sr),
         "timeline": timeline,
+        "spectrogram": S_norm.astype(np.float32).tolist(),
     }

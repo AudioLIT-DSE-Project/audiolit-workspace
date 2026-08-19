@@ -673,6 +673,9 @@ export const MainLayout = () => {
                         onPredictionUpdate={handlePredictionUpdate}
                         unifiedResult={state === 'SUCCESS' ? (typeof result === 'string' ? JSON.parse(result) : result) as UnifiedTaskResult : null}
                         audioDuration={selectedFile?.duration || 10.0}
+                        whisperPrediction={whisperPrediction}
+                        wav2vecPrediction={wav2vecPrediction}
+                        addPrediction={addPrediction}
                       />
                     </div>
                   </div>
