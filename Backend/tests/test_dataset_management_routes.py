@@ -237,3 +237,201 @@ class TestDeleteAndCleanup:
         # Session's datasets are actually gone after cleanup.
         listing = await client.get("/upload/dataset/list", cookies=cookies)
         assert listing.json()["total_datasets"] == 0
+
+
+def _csv_upload(text: str, filename: str = "gt.csv") -> list:
+    return [("file", (filename, text.encode("utf-8"), "text/csv"))]
+
+
+class TestGroundTruthUpload:
+    """LIT-247: order-independent ground-truth CSV upload + filename matching."""
+
+    @pytest.mark.asyncio
+    async def test_csv_after_audio_matches_and_shows_in_metadata(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-set"}, cookies=cookies)
+        await client.post(
+            "/upload/dataset/gt-set/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+
+        csv_text = "filename,ground_truth\nclip.wav,hello world\n"
+        r = await client.post(
+            "/upload/dataset/gt-set/ground-truth", files=_csv_upload(csv_text), cookies=cookies
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["matched_files"] == 1
+        assert body["total_files"] == 1
+        assert body["unmatched_csv_rows"] == []
+
+        meta = await client.get("/upload/dataset/gt-set/metadata", cookies=cookies)
+        assert meta.json()["files"][0]["ground_truth"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_csv_before_audio_matches_new_files_on_upload(self, client):
+        # Order independence: CSV uploaded first, matching audio arrives after.
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-early"}, cookies=cookies)
+
+        csv_text = "filename,ground_truth\nclip.wav,came first\n"
+        r = await client.post(
+            "/upload/dataset/gt-early/ground-truth", files=_csv_upload(csv_text), cookies=cookies
+        )
+        assert r.status_code == 200
+        assert r.json() == {
+            "message": "Matched 0 of 0 files.",
+            "dataset_name": r.json()["dataset_name"],
+            "matched_files": 0,
+            "total_files": 0,
+            "unmatched_csv_rows": ["clip"],
+        }
+
+        upload = await client.post(
+            "/upload/dataset/gt-early/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+        assert upload.json()["uploaded_files"][0]["ground_truth"] == "came first"
+
+    @pytest.mark.asyncio
+    async def test_reupload_replaces_rather_than_merges(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-replace"}, cookies=cookies)
+        await client.post(
+            "/upload/dataset/gt-replace/files",
+            files=[
+                ("files", ("a.wav", _wav_bytes(), "audio/wav")),
+                ("files", ("b.wav", _wav_bytes(), "audio/wav")),
+            ],
+            cookies=cookies,
+        )
+
+        first_csv = "filename,ground_truth\na.wav,first a\nb.wav,first b\n"
+        await client.post(
+            "/upload/dataset/gt-replace/ground-truth", files=_csv_upload(first_csv), cookies=cookies
+        )
+
+        # Second CSV only covers "a" - "b" must lose its ground truth, not
+        # keep the stale value from the first upload.
+        second_csv = "filename,ground_truth\na.wav,second a\n"
+        r = await client.post(
+            "/upload/dataset/gt-replace/ground-truth", files=_csv_upload(second_csv), cookies=cookies
+        )
+        assert r.json()["matched_files"] == 1
+
+        meta = await client.get("/upload/dataset/gt-replace/metadata", cookies=cookies)
+        files_by_name = {f["filename"]: f for f in meta.json()["files"]}
+        assert files_by_name["a.wav"]["ground_truth"] == "second a"
+        assert "ground_truth" not in files_by_name["b.wav"]
+
+    @pytest.mark.asyncio
+    async def test_flexible_column_names_are_accepted(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-flex"}, cookies=cookies)
+        await client.post(
+            "/upload/dataset/gt-flex/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+
+        csv_text = "file,label\nclip.wav,flexible match\n"
+        r = await client.post(
+            "/upload/dataset/gt-flex/ground-truth", files=_csv_upload(csv_text), cookies=cookies
+        )
+        assert r.status_code == 200
+        assert r.json()["matched_files"] == 1
+
+    @pytest.mark.asyncio
+    async def test_match_is_case_and_extension_insensitive(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-case"}, cookies=cookies)
+        await client.post(
+            "/upload/dataset/gt-case/files",
+            files=[("files", ("Clip.WAV", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+
+        csv_text = "filename,ground_truth\nclip,case insensitive\n"
+        r = await client.post(
+            "/upload/dataset/gt-case/ground-truth", files=_csv_upload(csv_text), cookies=cookies
+        )
+        assert r.json()["matched_files"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unmatched_csv_row_is_reported(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-unmatched"}, cookies=cookies)
+        await client.post(
+            "/upload/dataset/gt-unmatched/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+
+        csv_text = "filename,ground_truth\ntypo-name.wav,orphaned row\n"
+        r = await client.post(
+            "/upload/dataset/gt-unmatched/ground-truth", files=_csv_upload(csv_text), cookies=cookies
+        )
+        assert r.json()["matched_files"] == 0
+        assert r.json()["unmatched_csv_rows"] == ["typo-name"]
+
+    @pytest.mark.asyncio
+    async def test_non_csv_extension_returns_400(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-badext"}, cookies=cookies)
+
+        r = await client.post(
+            "/upload/dataset/gt-badext/ground-truth",
+            files=[("file", ("gt.txt", b"filename,ground_truth\na.wav,x\n", "text/plain"))],
+            cookies=cookies,
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_missing_required_columns_returns_400(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-badcols"}, cookies=cookies)
+
+        r = await client.post(
+            "/upload/dataset/gt-badcols/ground-truth",
+            files=_csv_upload("foo,bar\n1,2\n"),
+            cookies=cookies,
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_empty_csv_returns_400(self, client):
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-empty"}, cookies=cookies)
+
+        r = await client.post(
+            "/upload/dataset/gt-empty/ground-truth",
+            files=_csv_upload("filename,ground_truth\n"),
+            cookies=cookies,
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_dataset_returns_404(self, client):
+        cookies = await _session_cookies(client)
+        r = await client.post(
+            "/upload/dataset/ghost/ground-truth",
+            files=_csv_upload("filename,ground_truth\na.wav,x\n"),
+            cookies=cookies,
+        )
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_ground_truth_absent_when_never_uploaded(self, client):
+        # No regression for the common case: a dataset with no ground-truth
+        # CSV at all must not carry a "ground_truth" key on its files.
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "gt-none"}, cookies=cookies)
+        await client.post(
+            "/upload/dataset/gt-none/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+        meta = await client.get("/upload/dataset/gt-none/metadata", cookies=cookies)
+        assert "ground_truth" not in meta.json()["files"][0]
