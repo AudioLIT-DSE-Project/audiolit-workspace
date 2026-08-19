@@ -140,25 +140,46 @@ def calculate_group_wer(cohort_results: List[Dict[str, str]]) -> Dict[str, Any]:
 
 def evaluate_batch_faithfulness_scores(
     eval_items: List[Dict[str, Any]],
-    top_k_percentages: Optional[List[float]] = None
+    top_k_percentages: Optional[List[float]] = None,
+    model_type: str = "ser",
 ) -> Dict[str, Any]:
+    """Deletion-score faithfulness by masking and RE-RUNNING INFERENCE (FR16.1).
+
+    FR16.1 requires the top-K salient regions be zero-masked, inference re-run,
+    and the resulting confidence drop reported. An earlier version computed
+
+        degraded_conf = orig_conf * (1.0 - k_pct * (0.5 + saliency_weight))
+
+    which never called a model. That expression is monotone in ``k_pct`` by
+    construction, so it produced a plausible degradation curve for *any*
+    attribution - including a random one - and the auditor could not tell a
+    faithful explanation from noise. It measured the saliency values, not the
+    model. Deleted, not kept as a fallback: a fabricated metric is worse than a
+    missing one, and this is the requirement whose whole purpose is to catch
+    exactly that (A2).
+
+    Real masking and inference live in ``perturbation_service.compute_deletion_score``.
+
+    Each item needs ``file_path``, ``saliency_scores`` and, where the attribution
+    came from a fallback, its ``provenance`` - fallbacks are refused rather than
+    scored.
     """
-    Runs batch quantitative faithfulness checks by masking high-saliency regions (FR16 deletion score & AUC).
-    Expects eval_items with dicts containing: 'file_path', 'saliency_scores', 'original_confidence'.
-    Returns mean deletion score, deletion AUC, degradation curve, and per-item scores.
-    """
+    from .perturbation_service import compute_deletion_score as measure_deletion
+
     if top_k_percentages is None:
         top_k_percentages = [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
-        
+
     item_results: List[Dict[str, Any]] = []
     overall_deletion_scores: List[float] = []
     overall_deletion_aucs: List[float] = []
-    
+    refused = 0
+
     for item in eval_items:
         file_path = item.get("file_path", "")
         prov = str(item.get("provenance", "measured")).lower()
         if prov != "measured":
             reason = item.get("provenance_reason", "attribution is not measured")
+            refused += 1
             item_results.append({
                 "file_path": file_path,
                 "error": f"cannot audit a fallback attribution: {reason}",
@@ -166,49 +187,71 @@ def evaluate_batch_faithfulness_scores(
                 "provenance_reason": reason,
             })
             continue
-            
+
         saliency_scores = item.get("saliency_scores", [])
-        orig_conf = float(item.get("original_confidence", 0.85))
-        
-        # Calculate degradation for top-k levels
+        if not saliency_scores:
+            refused += 1
+            item_results.append({
+                "file_path": file_path,
+                "error": "cannot audit an empty attribution",
+            })
+            continue
+
         degradation_curve: Dict[str, float] = {"top_0pct": 0.0}
         top_k_scores: List[float] = []
-        
+        orig_conf = None
+        failure = None
+
         for k_pct in top_k_percentages:
-            num_top = max(1, int(len(saliency_scores) * k_pct)) if saliency_scores else 1
-            saliency_weight = float(np.mean(sorted(saliency_scores, reverse=True)[:num_top])) if saliency_scores else 0.5
-            
-            # Confidence drops as top salient features are masked
-            degraded_conf = max(0.0, orig_conf * (1.0 - k_pct * (0.5 + saliency_weight)))
-            del_score = compute_deletion_score(orig_conf, degraded_conf)
-            
-            pct_key = f"top_{int(k_pct * 100)}pct"
-            degradation_curve[pct_key] = round(del_score, 4)
+            measured = measure_deletion(
+                audio_path=file_path,
+                attributions=saliency_scores,
+                model_type=item.get("model_type", model_type),
+                model_id=item.get("model_id", "default"),
+                k_percent=k_pct * 100.0,
+            )
+            if not measured.get("success"):
+                failure = measured.get("error", "deletion measurement failed")
+                break
+            orig_conf = measured["initial_confidence"]
+            del_score = measured["deletion_score"]
+            degradation_curve[f"top_{int(k_pct * 100)}pct"] = round(del_score, 4)
             top_k_scores.append(del_score)
-            
-        mean_item_del = float(np.mean(top_k_scores)) if top_k_scores else 0.0
+
+        if failure is not None or not top_k_scores:
+            refused += 1
+            item_results.append({
+                "file_path": file_path,
+                "error": failure or "no deletion measurements succeeded",
+            })
+            continue
+
+        mean_item_del = float(np.mean(top_k_scores))
         item_auc = compute_deletion_auc(degradation_curve)
-        
         overall_deletion_scores.append(mean_item_del)
         overall_deletion_aucs.append(item_auc)
-        
+
         item_results.append({
             "file_path": file_path,
-            "original_confidence": round(orig_conf, 4),
+            "original_confidence": round(float(orig_conf), 4),
             "mean_deletion_score": round(mean_item_del, 4),
             "deletion_auc": item_auc,
-            "degradation_curve": degradation_curve
+            "degradation_curve": degradation_curve,
+            "provenance": "measured",
         })
-        
-    mean_batch_deletion_score = float(np.mean(overall_deletion_scores)) if overall_deletion_scores else 0.0
-    mean_batch_deletion_auc = float(np.mean(overall_deletion_aucs)) if overall_deletion_aucs else 0.0
-    
+
+    scored = len(overall_deletion_scores)
+    # null, never 0.0. A zero deletion score reads as "the attribution is
+    # completely unfaithful"; the opposite of "nothing could be measured".
     return {
-        "mean_deletion_score": round(mean_batch_deletion_score, 4),
-        "mean_deletion_auc": round(mean_batch_deletion_auc, 4),
-        "total_audio_evaluated": len(eval_items),
-        "item_results": item_results
+        "mean_deletion_score": round(float(np.mean(overall_deletion_scores)), 4) if scored else None,
+        "mean_deletion_auc": round(float(np.mean(overall_deletion_aucs)), 4) if scored else None,
+        "audio_scored": scored,
+        "audio_refused": refused,
+        "total_audio_evaluated": scored,
+        "item_results": item_results,
     }
+
 
 def compute_multi_task_performance_summary(
     group_wer_result: Dict[str, Any],
@@ -227,9 +270,13 @@ def compute_multi_task_performance_summary(
                 "bias_discrepancy_index": group_wer_result.get("bias_discrepancy_index", 0.0),
                 "cohort_breakdown": group_wer_result.get("cohort_breakdown", {})
             },
+            # Defaults are None, not 0.0: an unmeasurable audit must not be
+            # summarised as a perfectly unfaithful one.
             "faithfulness_deletion_audit": {
-                "mean_deletion_score": faithfulness_result.get("mean_deletion_score", 0.0),
-                "mean_deletion_auc": faithfulness_result.get("mean_deletion_auc", 0.0),
+                "mean_deletion_score": faithfulness_result.get("mean_deletion_score"),
+                "mean_deletion_auc": faithfulness_result.get("mean_deletion_auc"),
+                "audio_scored": faithfulness_result.get("audio_scored", 0),
+                "audio_refused": faithfulness_result.get("audio_refused", 0),
                 "total_audio_evaluated": faithfulness_result.get("total_audio_evaluated", 0)
             }
         }

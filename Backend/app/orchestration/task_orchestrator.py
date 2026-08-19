@@ -847,8 +847,11 @@ def run_batch_dataset_warmup_task(
             target_file = filename or row.get("path", "")
             resolved_path = resolve_file(dataset, target_file)
             if resolved_path and resolved_path.exists():
-                path_h, content_h = ck.both_hashes(resolved_path)
-                hashes = (path_h, content_h)
+                # Every hash variant, content-addressed first (FR4.1). Do not
+                # destructure: the tuple grew from two to three and the
+                # unpacking error was swallowed by the per-file except below,
+                # so warmup silently wrote nothing at all.
+                hashes = ck.both_hashes(resolved_path)
                 from app.infrastructure.redis import cache_result_sync
 
                 def write(keys, payload):
@@ -942,6 +945,14 @@ def run_batch_dataset_warmup_task(
                             # shape, so keying on Whisper overwrites the
                             # transcript this same run just cached.
                             write(ck.deepfake_keys(add_model, hashes), {"prediction": add})
+                            # FR7.2: the forensic timeline, warmed alongside the
+                            # clip-level verdict so the panel opens instantly.
+                            try:
+                                from app.domain.model_loader_service import predict_deepfake_timeline
+                                tl = predict_deepfake_timeline(str(resolved_path), model_key=add_model)
+                                write(ck.add_timeline_keys(add_model, hashes), {"timeline": tl})
+                            except Exception as err:
+                                logger.warning(f"ADD timeline warmup failed for {filename}: {err}")
                             warmed.add("add")
                     except Exception as err:
                         failures.append(f"add:{filename}")

@@ -295,3 +295,67 @@ class TestDownloadAndLoadHookWiring:
         with loaded.attach_hooks() as hooks:
             loaded.model(torch.randn(1, 4, 8))
             assert set(hooks.captured) == set(loaded.available_layers)
+
+
+class TestVramFallback:
+    """FR1.4 — VRAM overflow degrades to CPU with a user-visible warning."""
+
+    def _resolved(self, monkeypatch, mrs):
+        monkeypatch.setattr(mrs, "resolve_model_id",
+                            lambda mid, revision="main", api=None: mrs.ResolvedModel(
+                                model_id=mid, revision="deadbeef", family="whisper"))
+        monkeypatch.setattr(mrs, "snapshot_download", lambda **kw: "/tmp/fake")
+        monkeypatch.setattr(mrs, "_sha256_of_safetensors", lambda d: "abc123")
+
+    def test_oom_falls_back_to_cpu_and_says_so(self, monkeypatch):
+        import app.domain.model_registry_service as mrs
+
+        class _Model:
+            def __init__(self):
+                self.moved = []
+
+            @classmethod
+            def from_pretrained(cls, path, **kwargs):
+                return cls()
+
+            def to(self, device):
+                self.moved.append(device)
+                if device != "cpu":
+                    raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+                return self
+
+            def eval(self):
+                return self
+
+        self._resolved(monkeypatch, mrs)
+        monkeypatch.setattr(mrs.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(mrs, "HookManager", lambda model, family: type(
+            "H", (), {"available_layers": lambda self: []})())
+
+        loaded = mrs.download_and_load(
+            mrs.ResolvedModel(model_id="openai/whisper-base", revision="d", family="whisper"),
+            model_class=_Model,
+        )
+
+        assert loaded.device == "cpu"
+        assert loaded.device_fallback is True
+        assert "CPU" in (loaded.device_fallback_reason or "")
+
+    def test_a_non_oom_error_is_not_swallowed(self, monkeypatch):
+        import app.domain.model_registry_service as mrs
+
+        class _Model:
+            @classmethod
+            def from_pretrained(cls, path, **kwargs):
+                return cls()
+
+            def to(self, device):
+                raise RuntimeError("some unrelated failure")
+
+        self._resolved(monkeypatch, mrs)
+        monkeypatch.setattr(mrs.torch.cuda, "is_available", lambda: True)
+        with pytest.raises(RuntimeError, match="unrelated"):
+            mrs.download_and_load(
+                mrs.ResolvedModel(model_id="openai/whisper-base", revision="d", family="whisper"),
+                model_class=_Model,
+            )

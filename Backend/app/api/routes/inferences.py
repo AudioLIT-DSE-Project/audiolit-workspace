@@ -21,7 +21,7 @@ from app.domain.model_loader_service import (
     extract_wav2vec2_embeddings,
     extract_add_embeddings,
 )
-from app.infrastructure.dataset_service import resolve_file
+from app.infrastructure.dataset_service import resolve_file, load_metadata
 from app.orchestration.inference_service import run_inference, extract_single_embedding, ADD_MODEL_KEYS
 from app.infrastructure.redis import get_result, cache_result
 from app.infrastructure import cache_keys as ck
@@ -874,15 +874,93 @@ async def extract_embeddings_endpoint(
     }
     
     if reduced_embeddings is not None:
+        # FR11.3: colour-code by emotion (SER), bona-fide/synthetic (ADD) and
+        # accent/speaker. Labels come from cached model output and corpus
+        # metadata only - `null` where genuinely unknown. The frontend used to
+        # guess emotion from RAVDESS filename conventions and otherwise colour
+        # by scatter quartile, which made every projection look clustered
+        # because the colours WERE the geometry.
+        labels_by_file = await _point_labels(
+            [embeddings_data[i]["filename"] for i in range(len(reduced_embeddings))],
+            dataset, session_id,
+        )
         response["reduced_embeddings"] = [
             {
                 "filename": embeddings_data[i]["filename"],
-                "coordinates": reduced_embeddings[i].tolist()
+                "coordinates": reduced_embeddings[i].tolist(),
+                "labels": labels_by_file.get(embeddings_data[i]["filename"], _EMPTY_LABELS.copy()),
             }
             for i in range(len(reduced_embeddings))
         ]
     
     return response
+
+
+_EMPTY_LABELS = {"emotion": None, "deepfake": None, "accent": None, "speaker": None}
+
+
+async def _point_labels(filenames, dataset, session_id):
+    """Per-file labels for the latent projection, or None. Never a guess."""
+    from app.infrastructure import cache_keys as ck
+    from app.infrastructure.redis import get_result
+    from app.orchestration.inference_service import ADD_MODEL_KEYS
+
+    out = {}
+    meta_by_name = {}
+    if dataset:
+        try:
+            for row in load_metadata(dataset):
+                name = str(row.get("filename") or "").split("/")[-1].split("\\")[-1]
+                if name:
+                    meta_by_name[name] = row
+        except (FileNotFoundError, ValueError, KeyError) as exc:
+            # Narrow on purpose: a bare `except Exception` here swallowed a
+            # NameError for an unimported load_metadata, and the labels came
+            # back empty with no error anywhere.
+            logger.debug("point labels: no metadata for %s (%s)", dataset, exc)
+
+    for fn in filenames:
+        labels = _EMPTY_LABELS.copy()
+        short = str(fn).split("/")[-1].split("\\")[-1]
+
+        row = meta_by_name.get(short) or {}
+        for key, field in (("accent", "accent"), ("speaker", "speaker"),
+                           ("emotion", "emotion")):
+            val = row.get(field)
+            if val not in (None, "", "unknown"):
+                labels[key] = str(val)
+
+        try:
+            resolved = resolve_file(dataset, fn, session_id) if dataset else Path(fn)
+            hashes = ck.both_hashes(resolved)
+        except Exception:
+            out[fn] = labels
+            continue
+
+        # SER: prefer the model's own prediction over a corpus label.
+        for ns, key in ck.ser_keys(hashes):
+            hit = await get_result(ns, key)
+            if hit:
+                pred = ck.unwrap_prediction(hit)
+                if isinstance(pred, dict) and pred.get("predicted_emotion"):
+                    labels["emotion"] = pred["predicted_emotion"]
+                break
+
+        for add_model in ADD_MODEL_KEYS:
+            found = False
+            for ns, key in ck.deepfake_keys(add_model, hashes):
+                hit = await get_result(ns, key)
+                if hit:
+                    pred = ck.unwrap_prediction(hit)
+                    if isinstance(pred, dict) and pred.get("predicted_label"):
+                        labels["deepfake"] = pred["predicted_label"]
+                        found = True
+                    break
+            if found:
+                break
+
+        out[fn] = labels
+    return out
 
 
 @router.post("/inferences/embeddings/single")
@@ -1302,3 +1380,64 @@ async def extract_attention_pairs_endpoint(
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Attention extraction failed: {str(e)}")
+
+
+@router.post("/inferences/deepfake-timeline")
+async def deepfake_timeline_endpoint(request: Request):
+    """Windowed deepfake confidence across a clip (FR7.2).
+
+    FR7.1 (clip-level bona-fide/synthetic) has worked for a while. This is the
+    forensic half: *where* in the clip the detector suspects synthesis. The
+    `timeline` field existed on the results schema and was never populated.
+    """
+    from app.infrastructure import cache_keys as ck
+    from app.infrastructure.dataset_service import resolve_audio_reference
+    from app.domain.model_loader_service import predict_deepfake_timeline
+    from app.orchestration.inference_service import ADD_MODEL_KEYS
+
+    body = await request.json()
+    session_id = get_session_id(request)
+    model = body.get("model") or "melody-machine"
+    if model not in ADD_MODEL_KEYS:
+        model = "melody-machine"
+
+    try:
+        resolved_path = resolve_audio_reference(
+            file_path=body.get("file_path"),
+            dataset=body.get("dataset"),
+            dataset_file=body.get("dataset_file"),
+            session_id=session_id,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    window_s = float(body.get("window_s", 1.0))
+    overlap = float(body.get("overlap", 0.5))
+    keys = ck.add_timeline_keys(model, ck.both_hashes(resolved_path))
+
+    if not body.get("no_cache"):
+        for ns, key in keys:
+            hit = await get_result(ns, key)
+            if hit and hit.get("timeline"):
+                return {"model": model, "timeline": hit["timeline"], "cached": True}
+
+    # A windowed scan is ~one model call per window. The panel opens on every
+    # file selection, so its automatic request asks for cache only and a scan is
+    # started explicitly; otherwise browsing a dataset would silently queue ten
+    # forward passes per click.
+    if body.get("cache_only"):
+        return {"model": model, "timeline": None, "cached": False, "needs_scan": True}
+
+    try:
+        timeline = await asyncio.to_thread(
+            predict_deepfake_timeline, str(resolved_path), model, window_s, overlap
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Deepfake timeline failed for %s: %s", resolved_path, e)
+        raise HTTPException(status_code=500, detail=f"Deepfake timeline failed: {e}")
+
+    for ns, key in keys:
+        await cache_result(ns, key, {"timeline": timeline}, ttl=24 * 60 * 60)
+    return {"model": model, "timeline": timeline, "cached": False}

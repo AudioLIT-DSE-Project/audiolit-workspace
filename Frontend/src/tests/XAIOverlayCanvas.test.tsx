@@ -107,3 +107,42 @@ describe('PredictionPanel XAI Fetch Error Handling', () => {
     });
   });
 });
+
+// FR8.4: the property jet fails and viridis satisfies. A ramp whose luminance
+// is not monotonic invents banding that is not in the data and loses ordering
+// in greyscale, which is why the SRS names "perceptually uniform" explicitly.
+import { heatmapLuminance } from '../components/visualization/XAIOverlayCanvas';
+
+describe('FR8.4 heatmap colour scale', () => {
+  it('increases monotonically in relative luminance', () => {
+    const steps = Array.from({ length: 64 }, (_, i) => i / 63);
+    const lum = steps.map(heatmapLuminance);
+    for (let i = 1; i < lum.length; i++) {
+      expect(lum[i]).toBeGreaterThanOrEqual(lum[i - 1] - 1e-6);
+    }
+    expect(lum[lum.length - 1]).toBeGreaterThan(lum[0]);
+  });
+});
+
+// FR17.1: a fabricated map must be visibly distinguishable on screen.
+import { ProvenanceBadge, provenanceOverlayStyle } from '../components/ui/ProvenanceBadge';
+
+describe('FR17.1 provenance is rendered, not just transmitted', () => {
+  it('marks a fallback map and carries its reason', () => {
+    render(<ProvenanceBadge provenance="fallback" reason="showing encoder energy" />);
+    const badge = screen.getByRole('status');
+    expect(badge).toHaveAttribute('data-provenance', 'fallback');
+    expect(badge).toHaveAttribute('title', 'showing encoder energy');
+    expect(badge.textContent).toContain('Not model output');
+  });
+
+  it('shows nothing for a measured map', () => {
+    const { container } = render(<ProvenanceBadge provenance="measured" />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('desaturates a fabricated overlay, so a screenshot cannot pass it off as real', () => {
+    expect(provenanceOverlayStyle('fallback')).toBeDefined();
+    expect(provenanceOverlayStyle('measured')).toBeUndefined();
+  });
+});
