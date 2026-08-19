@@ -20,6 +20,7 @@ from sklearn.manifold import TSNE
 import umap
 
 from app.domain.model_registry_service import registry as _model_registry
+from app.domain.provenance import Provenance, provenance_fields
 
 transformers.logging.set_verbosity_error()
 logger = logging.getLogger(__name__)
@@ -372,11 +373,18 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                         logger.error(f"Pattern generation failed: {pattern_error}")
                         attention_data = None
             
-            # Final check
-            if not attention_data:
-                logger.error("All attention extraction methods failed")
-                attention_data = None
-            
+            prov_source = (
+                Provenance.FALLBACK
+                if (attention_data and attention_is_fallback)
+                else (Provenance.MEASURED if attention_data else Provenance.UNAVAILABLE)
+            )
+            prov_reason = (
+                "Fabricated structured attention pattern - NOT real attention"
+                if (attention_data and attention_is_fallback)
+                else ("All attention extraction methods failed" if not attention_data else None)
+            )
+            prov_info = provenance_fields(prov_source, prov_reason)
+
             result_dict = {
                 "text": transcript,
                 "attention": attention_data if attention_data else None,
@@ -384,6 +392,8 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                 # from the synthesised stand-in below, which has the same
                 # shape and would otherwise be indistinguishable.
                 "attention_is_fallback": bool(attention_data) and attention_is_fallback,
+                "provenance": prov_info["provenance"],
+                "provenance_reason": prov_info["provenance_reason"],
             }
             
             logger.info(f"Whisper result: text='{transcript[:50]}...', attention_layers={len(attention_data) if attention_data else 0}")
