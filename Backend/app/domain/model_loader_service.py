@@ -451,22 +451,39 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
     audio, sample_rate = librosa.load(audio_file, sr=16000)
     audio = audio.astype(np.float32)
 
-    if return_timestamps:
-        
-        result = pipe(
-            audio,
-            return_timestamps="word",  # Get word-level timestamps instead of chunk-level
-            chunk_length_s=5,  # Use smaller chunks (5 seconds instead of 30)
-            batch_size=batch_size,
-        )
-    else:
+    def _run_pipe(**generate_kwargs):
+        if return_timestamps:
+            return pipe(
+                audio,
+                return_timestamps="word",  # Get word-level timestamps instead of chunk-level
+                chunk_length_s=5,  # Use smaller chunks (5 seconds instead of 30)
+                batch_size=batch_size,
+                **generate_kwargs,
+            )
         # For regular transcription, use original parameters
-        result = pipe(
+        return pipe(
             audio,
             return_timestamps=return_timestamps,
             chunk_length_s=chunk_length_s,
             batch_size=batch_size,
+            **generate_kwargs,
         )
+
+    # Force English transcription instead of leaving a multilingual checkpoint
+    # to auto-detect the language. Auto-detection runs its own short forward
+    # pass per call and is unreliable on short/quiet clips or on custom
+    # checkpoints whose generation_config.json is missing/incomplete -- when
+    # it picks the wrong language, decoding drifts into hallucinated
+    # multilingual gibberish instead of English text. The attention-extraction
+    # branch above already forces this via get_decoder_prompt_ids; this path
+    # didn't, which is exactly why it (not the attention path) produced
+    # garbage output for a custom Whisper model. English-only checkpoints
+    # (e.g. an "*.en" repo) reject the language/task kwargs, so fall back to
+    # unforced generation for those.
+    try:
+        result = _run_pipe(generate_kwargs={"language": "english", "task": "transcribe"})
+    except ValueError:
+        result = _run_pipe()
     
     if return_timestamps:
         return {
