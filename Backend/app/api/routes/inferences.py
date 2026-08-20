@@ -368,7 +368,17 @@ async def get_whisper_accuracy(request: Request):
         # Get ground truth from dataset metadata
         ground_truth = ""
         if dataset and dataset_file:
-            # Load dataset metadata
+            # Common Voice and RAVDESS keep their own CSV lookup below -
+            # RAVDESS's spoken "statement" ground truth lives in a column a
+            # generic registry row doesn't carry (see RavdessLoader, which
+            # puts it under `extra`, not `label`). Every other built-in ASR
+            # corpus (l2-arctic, librispeech) is wired into
+            # dataset_ingestion.CORPUS_REGISTRY (LIT-235) but this endpoint
+            # never looked there, so selecting Whisper against them 400'd as
+            # "Unknown dataset" even though /datasets/list and
+            # /{dataset}/metadata both already serve them fine - the same
+            # "code existing vs. code being reachable" gap LIT-235 fixed for
+            # the dataset dropdown, just in a different caller.
             if dataset == "common-voice":
                 metadata_path = DATA_DIR / "common_voice_valid_dev" / "common_voice_valid_data_metadata.csv"
             elif dataset == "ravdess":
@@ -378,9 +388,16 @@ async def get_whisper_accuracy(request: Request):
                 ground_truth = ""
                 metadata_path = None
             else:
-                raise HTTPException(status_code=400, detail=f"Unknown dataset: {dataset}")
-            
-            if metadata_path.exists():
+                metadata_path = None
+                try:
+                    for row in load_metadata(dataset, session_id):
+                        if row.get("filename") == dataset_file:
+                            ground_truth = row.get("label") or ""
+                            break
+                except (ValueError, FileNotFoundError) as e:
+                    raise HTTPException(status_code=400, detail=f"Unknown dataset: {dataset}") from e
+
+            if metadata_path and metadata_path.exists():
                 df = pd.read_csv(metadata_path)
                 # Find the row for this file
                 # Try both with and without path prefix
