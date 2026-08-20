@@ -256,7 +256,10 @@ async def get_cached_task_results(req: CachedResultsRequest):
     # none of which any writer produces - so the Emotion Analytics and Deepfake
     # cards were starved even when the data was sitting in Redis under its real
     # key. One definition of a key family, or the readers drift from the writers.
-    ser = await first_hit(ck.ser_keys(hashes))
+    # Try the requested SER checkpoint first, then the default: a custom model's
+    # prediction lives under its own key now and must not be answered by the
+    # default model's entry.
+    ser = await first_hit(ck.ser_keys(hashes, req.model)) or await first_hit(ck.ser_keys(hashes))
     if ser:
         tasks["ser"] = ck.unwrap_prediction(ser)
 
