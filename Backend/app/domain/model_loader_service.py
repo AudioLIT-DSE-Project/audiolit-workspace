@@ -493,10 +493,10 @@ def transcribe_whisper_with_attention(audio_file_path, model_size="base"):
     logger.info(f"transcribe_whisper_with_attention result: has_attention={bool(result.get('attention'))}")
     return result
 
-def predict_emotion_wave2vec_with_attention(audio_path):
+def predict_emotion_wave2vec_with_attention(audio_path, model_id=None):
     """Predict emotion and return attention weights"""
     logger.info(f"predict_emotion_wave2vec_with_attention called: file={audio_path}")
-    result = predict_emotion_wave2vec(audio_path, return_attention=True)
+    result = predict_emotion_wave2vec(audio_path, return_attention=True, model_id=model_id)
     logger.info(f"predict_emotion_wave2vec_with_attention result: has_attention={bool(result.get('attention'))}")
     
     # No mock data fallback - return actual results only
@@ -559,7 +559,10 @@ feature_extractor = None
 emo_model = None
 
 
-def ensure_emo_model_loaded():
+_emo_model_cache: dict = {}
+
+
+def ensure_emo_model_loaded(model_id: str | None = None, revision: str | None = None):
     """Lazily load the emotion model + feature extractor via the ModelRegistry (LIT-207).
 
     Replaces the old eager `feature_extractor = ...` / `emo_model = ...`
@@ -574,21 +577,44 @@ def ensure_emo_model_loaded():
     reassigned here.
     """
     global feature_extractor, emo_model
-    if emo_model is None:
-        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
-            _EMO_MODEL_ID, revision=_EMO_MODEL_REVISION
+
+    target = model_id or _EMO_MODEL_ID
+    if target == _EMO_MODEL_ID:
+        if emo_model is None:
+            feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+                _EMO_MODEL_ID, revision=revision or _EMO_MODEL_REVISION
+            )
+            loaded = _model_registry.get(
+                _EMO_MODEL_ID,
+                revision=revision or _EMO_MODEL_REVISION,
+                model_class=Wav2Vec2ForSequenceClassification,
+            )
+            emo_model = loaded.model
+        return feature_extractor, emo_model, emo_device
+
+    # A user-selected SER checkpoint. Cached per model id rather than in the
+    # module globals: those hold exactly one model, so the first one loaded
+    # would answer for every later selection - the SER twin of the whisper-base
+    # substitution fixed for ASR.
+    if target not in _emo_model_cache:
+        _emo_model_cache[target] = (
+            Wav2Vec2FeatureExtractor.from_pretrained(target, revision=revision or "main"),
+            _model_registry.get(
+                target,
+                revision=revision or "main",
+                model_class=Wav2Vec2ForSequenceClassification,
+            ).model,
         )
-        loaded = _model_registry.get(
-            _EMO_MODEL_ID,
-            revision=_EMO_MODEL_REVISION,
-            model_class=Wav2Vec2ForSequenceClassification,
-        )
-        emo_model = loaded.model
-    return feature_extractor, emo_model, emo_device
+    custom_extractor, custom_model = _emo_model_cache[target]
+    return custom_extractor, custom_model, emo_device
 
 
-def predict_emotion_wave2vec(audio_path, return_attention=False):
-    ensure_emo_model_loaded()
+def predict_emotion_wave2vec(audio_path, return_attention=False, model_id=None):
+    # Bind the loader's return value to local names. The body below refers to
+    # `feature_extractor`/`emo_model`/`emo_device` as free names, so binding
+    # them here redirects the whole function at the selected checkpoint instead
+    # of the module-global default.
+    feature_extractor, emo_model, emo_device = ensure_emo_model_loaded(model_id)
     audio, rate = librosa.load(audio_path, sr=16000)
     inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
 
@@ -978,7 +1004,7 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
 # (predict_emotion_wave2vec is kept for the heavier attention/saliency path).
 
 
-def predict_ser(audio_path):
+def predict_ser(audio_path, model_id=None):
     """Speech Emotion Recognition inference (FR6).
 
     Returns the predicted emotion, the full class probability distribution, and a
@@ -989,8 +1015,12 @@ def predict_ser(audio_path):
           "probabilities": {emotion: float, ...},
           "confidence": float,
         }
+
+    ``model_id`` selects the SER checkpoint; None is the project default. The
+    faithfulness auditor calls this, so a hardcoded model would have scored a
+    custom model's explanation against the default model's confidence.
     """
-    ensure_emo_model_loaded()
+    feature_extractor, emo_model, emo_device = ensure_emo_model_loaded(model_id)
     audio, rate = librosa.load(audio_path, sr=16000)
     inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
     input_values = inputs.input_values.to(emo_device)
@@ -1225,7 +1255,7 @@ def extract_add_embeddings(audio_file_path: str, model_key: str = _DEFAULT_ADD_M
     return embeddings
 
 
-def wave2vec(audio_file_path: str, return_probabilities: bool = False):
+def wave2vec(audio_file_path: str, return_probabilities: bool = False, model_id=None):
     """
     Predict emotion using wav2vec2 model.
     
@@ -1237,7 +1267,7 @@ def wave2vec(audio_file_path: str, return_probabilities: bool = False):
         If return_probabilities=False: str (emotion label for backward compatibility)
         If return_probabilities=True: dict with prediction and probabilities
     """
-    result = predict_emotion_wave2vec(audio_file_path)
+    result = predict_emotion_wave2vec(audio_file_path, model_id=model_id)
     
     if return_probabilities:
         return result
@@ -1298,7 +1328,7 @@ def extract_whisper_embeddings(audio_file_path: str, model_size_or_id: str = "ba
     
     return embeddings
 
-def extract_wav2vec2_embeddings(audio_file_path: str) -> np.ndarray:
+def extract_wav2vec2_embeddings(audio_file_path: str, model_id=None) -> np.ndarray:
     """
     Extract Wav2Vec2 embeddings from audio file.
     Returns pooled hidden states from the last layer.
@@ -1309,7 +1339,9 @@ def extract_wav2vec2_embeddings(audio_file_path: str) -> np.ndarray:
     Returns:
         numpy array of embeddings
     """
-    ensure_emo_model_loaded()
+    # Bind locals so the body below uses the selected checkpoint rather than
+    # the module-global default (see predict_emotion_wave2vec).
+    feature_extractor, emo_model, emo_device = ensure_emo_model_loaded(model_id)
     # Load audio
     audio, rate = librosa.load(audio_file_path, sr=16000)
 
