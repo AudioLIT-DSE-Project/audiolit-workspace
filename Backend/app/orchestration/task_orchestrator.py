@@ -918,9 +918,14 @@ def run_batch_dataset_warmup_task(
                         from app.domain.model_loader_service import (
                             predict_emotion_wave2vec_with_attention,
                         )
-                        ser = predict_emotion_wave2vec_with_attention(str(resolved_path))
+                        # A wav2vec2 selection means the user picked a SER
+                        # checkpoint; anything else warms the default.
+                        ser_model = model if is_wav2vec else None
+                        ser = predict_emotion_wave2vec_with_attention(
+                            str(resolved_path), model_id=ser_model
+                        )
                         if ser is not None:
-                            write(ck.ser_keys(hashes), {"prediction": ser})
+                            write(ck.ser_keys(hashes, ser_model), {"prediction": ser})
                             warmed.add("ser")
                     except Exception as err:
                         failures.append(f"ser:{filename}")

@@ -536,7 +536,9 @@ async def batch_wav2vec2_prediction(request: Request):
         body = await request.json()
         filenames = body.get("filenames", [])
         dataset = body.get("dataset")
-        
+        # Selected SER checkpoint; None means the project default.
+        batch_ser_model = body.get("model") or body.get("ser_model")
+
         if not filenames:
             raise HTTPException(status_code=400, detail="No filenames provided")
         
@@ -563,7 +565,8 @@ async def batch_wav2vec2_prediction(request: Request):
                 
                 # Create cache key
                 file_content_hash = hashlib.md5(str(file_path).encode()).hexdigest()
-                cache_key = f"wav2vec2_detailed_{file_content_hash}"
+                _suffix = "" if not batch_ser_model or batch_ser_model == ck.DEFAULT_SER_MODEL else f"_{batch_ser_model}"
+                cache_key = f"wav2vec2_detailed{_suffix}_{file_content_hash}"
                 
                 # Check cache first
                 cached_result = await get_result("wav2vec2", cache_key)
@@ -574,7 +577,9 @@ async def batch_wav2vec2_prediction(request: Request):
                     logger.debug(f"Using cached wav2vec2 result for {filename}")
                 else:
                     # Run model and cache result
-                    result = await asyncio.to_thread(predict_emotion_wave2vec, str(file_path))
+                    result = await asyncio.to_thread(
+                        predict_emotion_wave2vec, str(file_path), False, batch_ser_model
+                    )
                     await cache_result("wav2vec2", cache_key, {"prediction": result}, ttl=6*60*60)
                     cache_stats["misses"] += 1
                     logger.debug(f"Generated and cached wav2vec2 result for {filename}")
@@ -648,7 +653,11 @@ async def get_wav2vec2_detailed_prediction(
     dataset = request.get("dataset")
     dataset_file = request.get("dataset_file")
     include_attention = request.get("include_attention", True)  # Default to True for attention extraction
-    
+    # The selected SER checkpoint. Without it this route always ran the default
+    # model and cached under a model-less key, so picking a custom emotion model
+    # returned the default model's prediction.
+    ser_model = request.get("model") or request.get("ser_model")
+
     session_id = get_session_id(http_request)
     
     # Resolve file path
@@ -671,7 +680,8 @@ async def get_wav2vec2_detailed_prediction(
     
     # Create cache key for detailed predictions (v3 after fixing attention extraction)
     file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-    cache_key = f"wav2vec2_detailed_attention_v3_{file_content_hash}"
+    _suffix = "" if not ser_model or ser_model == ck.DEFAULT_SER_MODEL else f"_{ser_model}"
+    cache_key = f"wav2vec2_detailed_attention_v3{_suffix}_{file_content_hash}"
     
     # Check if result is cached
     cached_result = await get_result("wav2vec2", cache_key)
@@ -695,10 +705,14 @@ async def get_wav2vec2_detailed_prediction(
     try:
         if include_attention:
             # Use the more expensive attention-enabled function
-            detailed_result = await asyncio.to_thread(predict_emotion_wave2vec_with_attention, str(resolved_path))
+            detailed_result = await asyncio.to_thread(
+                predict_emotion_wave2vec_with_attention, str(resolved_path), ser_model
+            )
         else:
             # Use the regular prediction function which is faster
-            detailed_result = await asyncio.to_thread(predict_emotion_wave2vec, str(resolved_path))
+            detailed_result = await asyncio.to_thread(
+                predict_emotion_wave2vec, str(resolved_path), False, ser_model
+            )
             # Ensure the result has the expected structure
             if "attention" not in detailed_result:
                 detailed_result["attention"] = None
@@ -899,7 +913,7 @@ async def extract_embeddings_endpoint(
 _EMPTY_LABELS = {"emotion": None, "deepfake": None, "accent": None, "speaker": None}
 
 
-async def _point_labels(filenames, dataset, session_id):
+async def _point_labels(filenames, dataset, session_id, ser_model=None):
     """Per-file labels for the latent projection, or None. Never a guess."""
     from app.infrastructure import cache_keys as ck
     from app.infrastructure.redis import get_result
@@ -938,7 +952,11 @@ async def _point_labels(filenames, dataset, session_id):
             continue
 
         # SER: prefer the model's own prediction over a corpus label.
-        for ns, key in ck.ser_keys(hashes):
+        # The selected SER checkpoint if the caller knows it, else the default.
+        # `model` on an embeddings request is the *embedding* model, so it must
+        # not be passed here - that would look for SER results under a Whisper
+        # id and find nothing.
+        for ns, key in ck.ser_keys(hashes, ser_model):
             hit = await get_result(ns, key)
             if hit:
                 pred = ck.unwrap_prediction(hit)
