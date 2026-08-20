@@ -48,9 +48,14 @@ def clip(tmp_path: Path):
 
 @pytest.fixture(autouse=True)
 def _no_real_model(monkeypatch):
-    # A non-None emo_model makes ensure_emo_model_loaded a no-op; patch it too for safety.
+    # The loader now takes a model id and returns the triple its callers bind
+    # locally, so the double has to do the same. It previously returned None
+    # from a zero-arg lambda, which only worked while the model was a global.
     monkeypatch.setattr(ml, "feature_extractor", _fake_feature_extractor)
-    monkeypatch.setattr(ml, "ensure_emo_model_loaded", lambda: None)
+    monkeypatch.setattr(
+        ml, "ensure_emo_model_loaded",
+        lambda model_id=None, revision=None: (_fake_feature_extractor, ml.emo_model, "cpu"),
+    )
 
 
 class TestPredictSer:
