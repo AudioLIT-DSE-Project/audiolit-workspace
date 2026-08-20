@@ -204,3 +204,78 @@ class TestFabricatedAttentionIsFlagged:
         result = ml.transcribe_whisper_with_attention("a.wav", CUSTOM)
         assert "attention_is_fallback" in result
         assert result["attention_is_fallback"] is False
+
+
+class TestCustomSerModelIsNotSubstituted:
+    """A selected SER checkpoint must run, and must not share another's cache.
+
+    Both halves were broken. `predict_emotion_wave2vec` took no model at all and
+    `ensure_emo_model_loaded` cached one model in a module global, so the first
+    checkpoint loaded answered for every later selection. And `ser_keys` carried
+    no model, so even a correct prediction was written where a different model
+    would read it. Selecting a custom emotion model returned the default
+    model's answer, which is what "custom models give wrong predictions" looks
+    like from the UI.
+    """
+
+    CUSTOM = "myorg/custom-ser"
+
+    def test_ser_cache_keys_differ_per_model(self):
+        from app.infrastructure import cache_keys as ck
+        h = ("0" * 32,)
+        default = set(ck.ser_keys(h))
+        custom = set(ck.ser_keys(h, self.CUSTOM))
+        assert not (default & custom), (
+            "a custom SER model shares cache keys with the default; "
+            "one model's prediction would be served for the other"
+        )
+
+    def test_default_keeps_its_historical_spelling(self):
+        from app.infrastructure import cache_keys as ck
+        h = ("0" * 32,)
+        assert ck.ser_keys(h) == ck.ser_keys(h, None)
+        assert ck.ser_keys(h) == ck.ser_keys(h, ck.DEFAULT_SER_MODEL)
+        assert ("wav2vec2", f"wav2vec2_detailed_{h[0]}") in ck.ser_keys(h)
+
+    def test_selected_checkpoint_reaches_the_loader(self, monkeypatch):
+        import app.domain.model_loader_service as ml
+
+        asked = []
+
+        def fake_loader(model_id=None, revision=None):
+            asked.append(model_id)
+            raise RuntimeError("stop here — the model id is what we are asserting")
+
+        monkeypatch.setattr(ml, "ensure_emo_model_loaded", fake_loader)
+        for call in (
+            lambda: ml.predict_emotion_wave2vec("a.wav", model_id=self.CUSTOM),
+            lambda: ml.predict_emotion_wave2vec_with_attention("a.wav", model_id=self.CUSTOM),
+        ):
+            with pytest.raises(RuntimeError):
+                call()
+        assert asked == [self.CUSTOM, self.CUSTOM]
+
+    def test_a_second_model_is_not_answered_by_the_first(self, monkeypatch):
+        """The module-global cache held exactly one model."""
+        import app.domain.model_loader_service as ml
+
+        built = []
+
+        class _FE:
+            @classmethod
+            def from_pretrained(cls, mid, **kw):
+                built.append(("fe", mid))
+                return cls()
+
+        class _Loaded:
+            model = object()
+
+        monkeypatch.setattr(ml, "Wav2Vec2FeatureExtractor", _FE)
+        monkeypatch.setattr(ml._model_registry, "get",
+                            lambda mid, **kw: built.append(("model", mid)) or _Loaded())
+        ml._emo_model_cache.clear()
+
+        a = ml.ensure_emo_model_loaded("org/first")
+        b = ml.ensure_emo_model_loaded("org/second")
+        assert ("model", "org/first") in built and ("model", "org/second") in built
+        assert a[1] is not None and b[1] is not None
