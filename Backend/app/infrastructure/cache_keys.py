@@ -122,16 +122,26 @@ def attention_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]
     ]
 
 
-def ser_keys(hashes: tuple[str, ...]) -> list[tuple[str, str]]:
+DEFAULT_SER_MODEL = "firdhokk/speech-emotion-recognition-with-facebook-wav2vec2-large-xlsr-53"
+
+
+def ser_keys(hashes: tuple[str, ...], model: str | None = None) -> list[tuple[str, str]]:
     """SER. Payload: ``{"prediction": <ser dict>}``.
 
     ``wav2vec2_detailed_``          -> ``/inferences/wav2vec2-batch``
     ``wav2vec2_detailed_attention_v3_`` -> ``/inferences/wav2vec2-detailed``
+
+    Keyed on the SER checkpoint. These keys carried no model at all, so a
+    custom emotion model read back whatever model had populated the entry
+    first - a wrong prediction served from cache, with nothing to distinguish
+    it. The default model keeps the unqualified spelling so entries written
+    before this change stay readable.
     """
     keys: list[tuple[str, str]] = []
+    suffix = "" if model in (None, DEFAULT_SER_MODEL) else f"_{model}"
     for h in hashes:
-        keys.append(("wav2vec2", f"wav2vec2_detailed_{h}"))
-        keys.append(("wav2vec2", f"wav2vec2_detailed_attention_v3_{h}"))
+        keys.append(("wav2vec2", f"wav2vec2_detailed{suffix}_{h}"))
+        keys.append(("wav2vec2", f"wav2vec2_detailed_attention_v3{suffix}_{h}"))
     return keys
 
 
