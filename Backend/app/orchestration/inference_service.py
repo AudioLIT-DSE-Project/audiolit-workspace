@@ -106,7 +106,11 @@ async def run_inference(
             if loaded_model.family == "whisper":
                 func = functools.partial(transcribe_whisper_base, model=model)
             elif loaded_model.family == "wav2vec2":
-                func = wave2vec
+                # Bind the selection, exactly as the whisper branch does. Left
+                # unbound, a custom SER checkpoint ran the project default and
+                # cached the result under the custom model's own key - a wrong
+                # prediction wearing the right name.
+                func = functools.partial(wave2vec, model_id=model)
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported model family: {loaded_model.family}")
         except Exception as e:
