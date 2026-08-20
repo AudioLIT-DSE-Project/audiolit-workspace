@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import torch
 import numpy as np
 import librosa
@@ -17,6 +18,34 @@ from app.domain.model_loader_service import (
 import app.domain.model_loader_service as model_loader_service
 
 logger = logging.getLogger(__name__)
+
+# generate_saliency() runs on FastAPI's default thread pool (asyncio.to_thread),
+# so concurrent /saliency/generate calls for the same model (e.g. the four XAI
+# method tabs firing together, or a live selection racing a background dataset
+# scan) execute on real, simultaneous OS threads. Every model_type here reuses
+# one process-wide cached nn.Module (ModelRegistry for Whisper,
+# model_loader_service.emo_model for wav2vec2, the ADD registry for
+# melody-machine/wav2vec2-add) and Grad-CAM/Captum mutate that shared module in
+# place - register_forward_hook/register_full_backward_hook on the same target
+# layer, then model.zero_grad()/.backward(). Two threads doing that at once on
+# the same module race each other's hooks and gradient buffers, which is
+# exactly what produced the intermittent "size of tensor a (2) must match ...
+# dimension 1" 500s: one thread's hook captured activations/gradients that
+# belonged to a different thread's forward/backward pass. Serializing per
+# model identity (not one global lock) keeps unrelated models running in
+# parallel while making concurrent requests against the *same* shared model
+# safe.
+_model_locks: Dict[str, threading.Lock] = {}
+_model_locks_guard = threading.Lock()
+
+
+def _lock_for_model(model_key: str) -> threading.Lock:
+    with _model_locks_guard:
+        lock = _model_locks.get(model_key)
+        if lock is None:
+            lock = threading.Lock()
+            _model_locks[model_key] = lock
+        return lock
 MAX_SALIENCY_SECONDS = int(os.getenv("MAX_SALIENCY_SECONDS", "12"))  # cap analysis window
 MAX_SALIENCY_SECONDS_SHAP = int(os.getenv("MAX_SALIENCY_SECONDS_SHAP", "6"))  # stricter for SHAP
 SALIENCY_SHAP_SAMPLES = int(os.getenv("SALIENCY_SHAP_SAMPLES", "8"))
@@ -740,23 +769,33 @@ def generate_add_gradcam_saliency(audio_file_path: str, model_name: str = "melod
 def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
     model_type = detect_model_type(model)
 
-    if method == "gradcam":
-        if model_type == "add":
+    # Lock keyed by the actual shared nn.Module identity each branch below
+    # will mutate (see _lock_for_model's docstring comment above), not by the
+    # raw `model` string - whisper aliases ("whisper-base" / "openai/whisper-
+    # base") must serialize against each other since they resolve to the same
+    # cached instance, and every wav2vec2/SER call shares the one emo_model
+    # singleton regardless of `model`.
+    if model_type == "whisper":
+        lock_key = f"whisper:{resolve_whisper_model_id(model)}"
+    elif model_type == "wav2vec2":
+        lock_key = "wav2vec2:ser-emotion"
+    elif model_type == "add":
+        lock_key = f"add:{model}"
+    else:
+        raise ValueError(f"Unsupported model: {model}")
+
+    with _lock_for_model(lock_key):
+        if method == "gradcam" and model_type == "add":
             return generate_add_gradcam_saliency(audio_file_path, model)
 
-    if model_type == "whisper":
-        return generate_whisper_saliency(audio_file_path, model, method, existing_prediction)
-    elif model_type == "wav2vec2":
-        return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
-    elif model_type == "add":
-        if method == "gradcam":
-            return generate_add_gradcam_saliency(audio_file_path, model)
-        else:
+        if model_type == "whisper":
+            return generate_whisper_saliency(audio_file_path, model, method, existing_prediction)
+        elif model_type == "wav2vec2":
+            return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
+        else:  # model_type == "add", method != "gradcam"
             raise ValueError(
                 f"Saliency method '{method}' is not supported for deepfake-detection models ({model})."
             )
-    else:
-        raise ValueError(f"Unsupported model: {model}")
 
 
 # --- Grad-CAM (LIT-148, FR8) --------------------------------------------------
