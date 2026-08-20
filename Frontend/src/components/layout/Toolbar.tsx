@@ -136,7 +136,7 @@ export const Toolbar = ({
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
   // Built-in corpora (LIT-235) - was a hardcoded 2-entry list disconnected
   // from the backend's actual dataset registry; now fetched for real.
-  const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess", "l2-arctic", "librispeech", "crema-d", "esd"]);
+  const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess", "l2-arctic", "librispeech", "crema-d", "esd", "asvspoof-2021"]);
   // FR2 §5.1 — which built-in corpora actually have data provisioned under
   // Backend/data/ (as opposed to just having a loader wired). A corpus can
   // be code-complete but unprovisioned on a given machine (LibriSpeech,
