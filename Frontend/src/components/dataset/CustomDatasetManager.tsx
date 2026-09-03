@@ -15,16 +15,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { 
-  Upload, 
-  Plus, 
-  Trash2, 
-  FolderPlus, 
-  File, 
+import {
+  Upload,
+  Plus,
+  Trash2,
+  FolderPlus,
+  File as FileIcon,
   Database,
   AlertCircle,
   CheckCircle,
-  X
+  X,
+  ClipboardList,
+  Info,
 } from "lucide-react";
 import { API_BASE } from '@/lib/api';
 
@@ -40,8 +42,15 @@ interface CustomDataset {
     sample_rate: number;
     size: number;
     uploaded_at: string;
+    ground_truth?: string;
   }>;
   total_files: number;
+}
+
+interface GroundTruthResult {
+  matched_files: number;
+  total_files: number;
+  unmatched_csv_rows: string[];
 }
 
 interface CustomDatasetManagerProps {
@@ -69,6 +78,13 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadLoading, setUploadLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<Array<{file: string, status: 'pending' | 'uploading' | 'success' | 'error', error?: string}>>([]);
+
+  // Ground truth CSV form (LIT-247)
+  const [groundTruthDataset, setGroundTruthDataset] = useState<string>("");
+  const [groundTruthFile, setGroundTruthFile] = useState<File | null>(null);
+  const [groundTruthLoading, setGroundTruthLoading] = useState(false);
+  const [groundTruthResult, setGroundTruthResult] = useState<GroundTruthResult | null>(null);
+  const [groundTruthError, setGroundTruthError] = useState<string | null>(null);
 
   const fetchDatasets = async () => {
     setLoading(true);
@@ -205,6 +221,50 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
     }
   };
 
+  const uploadGroundTruth = async () => {
+    if (!groundTruthDataset || !groundTruthFile) {
+      setGroundTruthError("Please select a dataset and a CSV file");
+      return;
+    }
+
+    setGroundTruthLoading(true);
+    setGroundTruthError(null);
+    setGroundTruthResult(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', groundTruthFile);
+
+      const response = await fetch(`${API_BASE}/upload/dataset/${groundTruthDataset}/ground-truth`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || `Failed to upload ground truth: ${response.status}`);
+      }
+
+      setGroundTruthResult({
+        matched_files: data.matched_files,
+        total_files: data.total_files,
+        unmatched_csv_rows: data.unmatched_csv_rows || [],
+      });
+      setGroundTruthFile(null);
+      if (document.querySelector('input#ground-truth-file') as HTMLInputElement) {
+        (document.querySelector('input#ground-truth-file') as HTMLInputElement).value = '';
+      }
+
+      await fetchDatasets(); // Refresh so the coverage badge and any open table reflect the match
+    } catch (err) {
+      setGroundTruthError(err instanceof Error ? err.message : 'Failed to upload ground truth');
+      console.error('Error uploading ground truth:', err);
+    } finally {
+      setGroundTruthLoading(false);
+    }
+  };
+
   const deleteDataset = async (datasetName: string) => {
     if (!confirm(`Are you sure you want to delete the dataset "${datasetName}"? This action cannot be undone.`)) {
       return;
@@ -265,7 +325,7 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
         </DialogHeader>
         
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="list" className="flex items-center gap-2">
               <Database className="h-4 w-4" />
               My Datasets
@@ -277,6 +337,10 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
             <TabsTrigger value="upload" className="flex items-center gap-2">
               <Upload className="h-4 w-4" />
               Upload Files
+            </TabsTrigger>
+            <TabsTrigger value="ground-truth" className="flex items-center gap-2">
+              <ClipboardList className="h-4 w-4" />
+              Ground Truth CSV
             </TabsTrigger>
           </TabsList>
           
@@ -306,6 +370,19 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                         <Badge variant="secondary">
                           {dataset.total_files} files
                         </Badge>
+                        {(() => {
+                          const withGroundTruth = dataset.files.filter((f) => f.ground_truth).length;
+                          if (withGroundTruth === 0) return null;
+                          const complete = withGroundTruth === dataset.total_files;
+                          return (
+                            <Badge
+                              variant="outline"
+                              className={complete ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" : "bg-amber-500/10 text-amber-600 border-amber-500/20"}
+                            >
+                              Ground truth: {withGroundTruth}/{dataset.total_files}
+                            </Badge>
+                          );
+                        })()}
                         <Button
                           variant="outline"
                           size="sm"
@@ -345,7 +422,7 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                         <div className="space-y-1">
                           {dataset.files.slice(0, 3).map((file) => (
                             <div key={file.filename} className="flex items-center gap-2 text-xs text-muted-foreground">
-                              <File className="h-3 w-3" />
+                              <FileIcon className="h-3 w-3" />
                               <span className="truncate">{file.original_filename}</span>
                               <span>({file.duration.toFixed(1)}s)</span>
                             </div>
@@ -468,6 +545,121 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                     <>
                       <Upload className="h-4 w-4 mr-2" />
                       Upload Files
+                    </>
+                  )}
+                </Button>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="ground-truth" className="space-y-4">
+              <div className="space-y-4">
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-md flex gap-2">
+                  <Info className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
+                  <div className="text-xs text-blue-900 space-y-1.5">
+                    <p className="font-medium">How ground truth matching works</p>
+                    <ul className="list-disc list-inside space-y-1">
+                      <li>
+                        Upload a CSV with one column for the audio filename and one for the
+                        ground truth text/label — e.g. <code className="bg-blue-100 px-1 rounded">filename,ground_truth</code>.
+                        Column names are flexible: <code className="bg-blue-100 px-1 rounded">file</code>/<code className="bg-blue-100 px-1 rounded">audio_file</code> also
+                        work for the filename column, and <code className="bg-blue-100 px-1 rounded">transcript</code>/<code className="bg-blue-100 px-1 rounded">label</code>/<code className="bg-blue-100 px-1 rounded">text</code> also work for the ground-truth column.
+                      </li>
+                      <li>
+                        Matching is by filename only (extension and case don't matter — <code className="bg-blue-100 px-1 rounded">harvard.wav</code>,{" "}
+                        <code className="bg-blue-100 px-1 rounded">Harvard</code>, and <code className="bg-blue-100 px-1 rounded">HARVARD.WAV</code> all match the same file).
+                      </li>
+                      <li>
+                        <span className="font-medium">Order doesn't matter</span> — upload the CSV before or after the audio
+                        files. Matching runs immediately for files already in the dataset, and automatically for any
+                        audio file you add afterwards.
+                      </li>
+                      <li>
+                        <span className="font-medium">Uploading a new CSV replaces the old one</span> for this dataset —
+                        it does not merge. A file matched by an earlier CSV but missing from the new one loses its
+                        ground truth.
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div>
+                  <Label htmlFor="ground-truth-dataset-select">Select Dataset</Label>
+                  <select
+                    id="ground-truth-dataset-select"
+                    value={groundTruthDataset}
+                    onChange={(e) => {
+                      setGroundTruthDataset(e.target.value);
+                      setGroundTruthResult(null);
+                      setGroundTruthError(null);
+                    }}
+                    className="w-full mt-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">Choose a dataset...</option>
+                    {datasets.map((dataset) => (
+                      <option key={dataset.dataset_name} value={dataset.dataset_name}>
+                        {dataset.dataset_name} ({dataset.total_files} files)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <Label htmlFor="ground-truth-file">Ground Truth CSV</Label>
+                  <Input
+                    id="ground-truth-file"
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e) => setGroundTruthFile(e.target.files?.[0] || null)}
+                    className="mt-1"
+                  />
+                  {groundTruthFile && (
+                    <p className="text-sm text-muted-foreground mt-1">{groundTruthFile.name} selected</p>
+                  )}
+                </div>
+
+                {groundTruthResult && (
+                  <div
+                    className={`p-3 rounded-md border text-xs space-y-1 ${
+                      groundTruthResult.matched_files === groundTruthResult.total_files && groundTruthResult.total_files > 0
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                        : "bg-amber-50 border-amber-200 text-amber-800"
+                    }`}
+                  >
+                    <p className="font-medium flex items-center gap-1.5">
+                      <CheckCircle className="h-3.5 w-3.5" />
+                      Matched {groundTruthResult.matched_files} of {groundTruthResult.total_files} file(s) in the dataset.
+                    </p>
+                    {groundTruthResult.unmatched_csv_rows.length > 0 && (
+                      <p>
+                        {groundTruthResult.unmatched_csv_rows.length} row(s) in the CSV didn't match any file
+                        (yet — they'll match automatically if you upload that audio file later):{" "}
+                        <span className="font-mono">{groundTruthResult.unmatched_csv_rows.join(", ")}</span>
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {groundTruthError && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-md flex items-center gap-2 text-xs text-red-700">
+                    <AlertCircle className="h-4 w-4 text-red-500 shrink-0" />
+                    {groundTruthError}
+                  </div>
+                )}
+
+                <Button
+                  onClick={uploadGroundTruth}
+                  disabled={groundTruthLoading || !groundTruthDataset || !groundTruthFile}
+                  className="w-full"
+                >
+                  {groundTruthLoading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                      Matching...
+                    </>
+                  ) : (
+                    <>
+                      <ClipboardList className="h-4 w-4 mr-2" />
+                      Upload Ground Truth CSV
                     </>
                   )}
                 </Button>

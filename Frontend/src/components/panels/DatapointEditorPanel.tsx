@@ -41,6 +41,13 @@ interface WhisperPrediction {
   word_count_truth: number;
 }
 
+interface AddPrediction {
+  predicted_label: string; // "bona-fide" | "spoof"
+  synthetic_probability: number;
+  confidence: number;
+  probabilities: Record<string, number>;
+}
+
 interface PerturbationResult {
   perturbed_file: string;
   filename: string;
@@ -56,6 +63,13 @@ interface PerturbationResult {
   error?: string;
 }
 
+// Mirrors Backend/app/infrastructure/dataset_ingestion.py's TARGET_SAMPLE_RATE.
+// Every corpus is resampled to this before it reaches a model, so it's the
+// rate that actually matters for inference — not a given source file's native
+// encoding (which wavesurfer would otherwise surface and which varies per clip,
+// e.g. some Common Voice samples are natively 8kHz).
+const PROCESSING_SAMPLE_RATE_HZ = 16_000;
+
 interface DatapointEditorPanelProps {
   selectedFile?: UploadedFile | null;
   selectedEmbeddingFile?: string | null;
@@ -66,22 +80,24 @@ interface DatapointEditorPanelProps {
   model?: string;
   wav2vecPrediction?: Wav2Vec2Prediction | null;
   whisperPrediction?: WhisperPrediction | null;
+  addPrediction?: AddPrediction | null;
   perturbedPredictions?: Wav2Vec2Prediction | WhisperPrediction | null;
   isLoadingPredictions?: boolean;
   isLoadingPerturbed?: boolean;
   predictionError?: string | null;
 }
 
-export const DatapointEditorPanel = ({ 
-  selectedFile, 
+export const DatapointEditorPanel = ({
+  selectedFile,
   selectedEmbeddingFile,
-  dataset = "custom", 
+  dataset = "custom",
   originalDataset,
-  perturbationResult, 
+  perturbationResult,
   predictionMap,
   model,
   wav2vecPrediction,
   whisperPrediction,
+  addPrediction,
   perturbedPredictions,
   isLoadingPredictions,
   isLoadingPerturbed,
@@ -168,7 +184,6 @@ export const DatapointEditorPanel = ({
   // Add a state to track audio metadata from wavesurfer
   const [audioMetadata, setAudioMetadata] = useState<{
     duration?: number;
-    sampleRate?: number;
   }>({});
 
   // Debug logging for selectedFile and audioUrl
@@ -286,11 +301,7 @@ export const DatapointEditorPanel = ({
             <div className="text-xs-tight">
               <span className="text-gray-500">Sample Rate:</span>
               <span className="ml-2 text-gray-700">
-                {currentFileInfo?.sample_rate 
-                  ? `${(currentFileInfo.sample_rate / 1000).toFixed(1)}kHz` 
-                  : audioMetadata.sampleRate 
-                  ? `${(audioMetadata.sampleRate / 1000).toFixed(1)}kHz` 
-                  : "Loading..."}
+                {(PROCESSING_SAMPLE_RATE_HZ / 1000).toFixed(1)}kHz
               </span>
             </div>
             {currentFileInfo?.size && (
@@ -331,6 +342,7 @@ export const DatapointEditorPanel = ({
           model={model}
           wav2vecPrediction={wav2vecPrediction}
           whisperPrediction={whisperPrediction}
+          addPrediction={addPrediction}
           perturbedPredictions={perturbedPredictions}
           isLoading={isLoadingPredictions}
           isLoadingPerturbed={isLoadingPerturbed}
@@ -365,8 +377,7 @@ export const DatapointEditorPanel = ({
                 
                 // Update metadata state for file info display
                 setAudioMetadata({
-                  duration: duration,
-                  sampleRate: wavesurfer.getDecodedData()?.sampleRate || undefined
+                  duration: duration
                 });
               }}
               onProgress={(time, dur) => {

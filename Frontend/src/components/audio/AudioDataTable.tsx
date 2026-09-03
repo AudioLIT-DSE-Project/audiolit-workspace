@@ -10,7 +10,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, ChevronLeft, ChevronRight } from "lucide-react";
+import { Play, ChevronLeft, ChevronRight, RotateCw } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
 
 interface UploadedFile {
@@ -48,9 +48,21 @@ interface AudioDataTableProps {
   predictionMap?: Record<string, string>;
   inferenceStatus?: Record<string, 'idle' | 'loading' | 'done' | 'error'>;
   onVisibleRowIdsChange?: (rowIds: string[]) => void;
+  /** LIT-248: re-run inference for exactly this row, bypassing the cache. */
+  onRegenerateRow?: (rowId: string) => void;
 }
 
-export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange }: AudioDataTableProps) => {
+const ADD_MODEL_KEYS = ["melody-machine", "wav2vec2-add"];
+
+// "Predicted"/"Ground Truth" column headers: Transcript for whisper, Label for
+// the deepfake (ADD) models, Emotion for everything else (wav2vec2/custom SER).
+const predictionColumnNoun = (model: string): string => {
+  if (model.startsWith("whisper")) return "Transcript";
+  if (ADD_MODEL_KEYS.includes(model)) return "Label";
+  return "Emotion";
+};
+
+export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange, onRegenerateRow }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads
   const hasDatasetMetadata = (datasetMetadata?.length || 0) > 0;
   const hasUploadedFiles = uploadedFiles && uploadedFiles.length > 0;
@@ -66,6 +78,29 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     }
     return fallback;
   }, []);
+
+  // LIT-248: one "Regenerate" button cell, shared by all three column sets
+  // below so they don't each re-implement the same loading/disabled logic.
+  const regenerateCell = useCallback((rowId: string) => {
+    const isLoading = inferenceStatus?.[rowId] === 'loading';
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="h-6 w-6 p-0"
+        title="Regenerate: re-run the selected model on just this file"
+        disabled={isLoading || !model || !onRegenerateRow}
+        onClick={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          onRegenerateRow?.(rowId);
+        }}
+      >
+        <RotateCw className={`h-3 w-3 ${isLoading ? "animate-spin" : ""}`} />
+      </Button>
+    );
+  }, [inferenceStatus, model, onRegenerateRow]);
 
   // Custom uploads data and columns
   const customTableData: AudioData[] = useMemo(() => (
@@ -120,7 +155,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     },
     {
       id: "prediction",
-      header: model.startsWith("whisper") ? "Predicted Transcript" : "Predicted Label",
+      header: `Predicted ${predictionColumnNoun(model)}`,
       cell: ({ row }) => {
         const rowId = row.id as string;
         const status = inferenceStatus?.[rowId];
@@ -138,7 +173,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
           
           return <Badge variant="outline" className="text-xs">{predictionText}</Badge>;
@@ -149,7 +184,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
           return <span className="text-xs">{predictionText}</span>;
@@ -209,24 +244,25 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         }
       },
     },
-  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom]);
+    {
+      id: "actions",
+      header: "Actions",
+      cell: ({ row }) => {
+        // Regenerate only applies to dataset rows - uploaded files run
+        // through the separate async multitask job, not /inferences/run.
+        if ('file_id' in (row.original as any)) return null;
+        return regenerateCell(row.id as string);
+      },
+    },
+  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
-    const v = row["id"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["filename"];
+    const v = row["filename"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["id"];
     return v !== undefined && v !== null && String(v).length > 0 ? String(v) : fallback;
   }, []);
 
-  // Helper function to determine if ground truth should be shown
-  const shouldShowGroundTruth = useMemo(() => {
-    if (model.startsWith("whisper")) {
-      // Whisper models can show ground truth only for common-voice (has transcript)
-      return dataset === "common-voice";
-    } else if (model === "wav2vec2") {
-      // Wav2Vec2 models can show ground truth only for RAVDESS (has emotion labels)
-      return dataset === "ravdess";
-    }
-    return false;
-  }, [model, dataset]);
+  // Show ground truth for all datasets that contain ground truth metadata
+  const shouldShowGroundTruth = true;
 
   const datasetColumnsCommonVoice: ColumnDef<unknown, unknown>[] = useMemo(() => {
     const baseColumns = [
@@ -242,28 +278,32 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
       {
         id: "prediction",
-        header: model.startsWith("whisper") ? "Predicted Transcript" : "Predicted Emotion",
+        header: `Predicted ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const rowId = row.id as string;
-          const status = inferenceStatus?.[rowId];
+          const data = row.original as DatasetRow;
+          const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
+          const filename = path.split("/").pop() || path;
+          const fileId = String(data.id || path || filename);
+          const status = inferenceStatus?.[rowId] || inferenceStatus?.[fileId] || inferenceStatus?.[filename];
           
           if (status === 'loading') {
             return <span className="text-xs text-blue-600">Loading...</span>;
           }
           
-          if (status !== 'done') {
+          const pred = predictionMap?.[rowId] ?? predictionMap?.[fileId] ?? predictionMap?.[filename] ?? (data.prediction as string) ?? "";
+          
+          if (!pred && status !== 'done') {
             return <span className="text-xs text-gray-400">-</span>;
           }
-          
-          const pred = predictionMap?.[rowId] ?? "";
           
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
-          return <span className="text-xs">{predictionText || <span className="text-gray-400">No prediction</span>}</span>;
+          return <span className="text-xs">{predictionText || <span className="text-gray-400">-</span>}</span>;
         },
       },
     ];
@@ -272,12 +312,10 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     if (shouldShowGroundTruth) {
       baseColumns.push({
         id: "ground_truth",
-        header: model.startsWith("whisper") ? "Ground Truth Transcript" : "Ground Truth Emotion",
+        header: `Ground Truth ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
-          const groundTruthValue = model.startsWith("whisper") 
-            ? getFrom(data, ["sentence", "transcript", "text"], "")
-            : getFrom(data, ["emotion", "label"], "");
+          const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
           return <span className="text-xs">{groundTruthValue}</span>;
         },
       });
@@ -293,8 +331,14 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
     });
 
+    baseColumns.push({
+      id: "actions",
+      header: "Actions",
+      cell: ({ row }) => regenerateCell(row.id as string),
+    });
+
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
 
   const datasetColumnsRavdess: ColumnDef<unknown, unknown>[] = useMemo(() => {
     const baseColumns = [
@@ -310,7 +354,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
       {
         id: "prediction",
-        header: model.startsWith("whisper") ? "Predicted Transcript" : "Predicted Emotion",
+        header: `Predicted ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const rowId = row.id as string;
           const status = inferenceStatus?.[rowId];
@@ -328,7 +372,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
-              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
+              (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
           return <span className="text-xs">{predictionText || <span className="text-gray-400">No prediction</span>}</span>;
@@ -340,12 +384,10 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     if (shouldShowGroundTruth) {
       baseColumns.push({
         id: "ground_truth",
-        header: model.startsWith("whisper") ? "Ground Truth Transcript" : "Ground Truth Emotion",
+        header: `Ground Truth ${predictionColumnNoun(model)}`,
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
-          const groundTruthValue = model.startsWith("whisper") 
-            ? getFrom(data, ["statement", "text", "transcript", "sentence"], "")
-            : getFrom(data, ["emotion", "label"], "");
+          const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
           return <span className="text-xs">{groundTruthValue}</span>;
         },
       });
@@ -365,8 +407,14 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
     });
 
+    baseColumns.push({
+      id: "actions",
+      header: "Actions",
+      cell: ({ row }) => regenerateCell(row.id as string),
+    });
+
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
 
   // Build table config based on mode
   const data: unknown[] = useMemo(() => {

@@ -1,20 +1,43 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { usePlayback } from '@/contexts/PlaybackContext';
 import { Card } from "@/components/ui/card";
 import WaveSurfer from "wavesurfer.js";
+
+// LIT-176: minimum pixel travel before a mousedown/mouseup pair counts as a
+// drag selection rather than a click (which WaveSurfer's own seek handler
+// already owns).
+const DRAG_THRESHOLD_PX = 4;
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+export interface WaveformSelection {
+  startX: number;
+  endX: number;
+  containerWidth: number;
+}
 
 interface WaveformViewerProps {
   audioUrl?: string;
   isPlaying?: boolean;
   onReady?: (wavesurfer: WaveSurfer) => void;
   onProgress?: (currentTime: number, duration: number) => void;
+  onSelectionChange?: (selection: WaveformSelection | null) => void;
 }
 
-export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress }: WaveformViewerProps) => {
+export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSelectionChange }: WaveformViewerProps) => {
+  // FR10.2: this component owns the wavesurfer instance, so it is the single
+  // source of playback time for every other time-aligned view.
+  const { publish, registerSeek } = usePlayback();
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const currentBlobUrlRef = useRef<string | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const dragStateRef = useRef<{ startX: number; currentX: number; dragging: boolean } | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  onSelectionChangeRef.current = onSelectionChange;
 
   // Initialize WaveSurfer instance
   useEffect(() => {
@@ -47,6 +70,10 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress }: Wav
     });
 
     wavesurferRef.current = wavesurfer;
+    registerSeek((seconds: number) => {
+      const total = wavesurfer.getDuration();
+      if (total > 0) wavesurfer.seekTo(Math.min(1, Math.max(0, seconds / total)));
+    });
 
     // Set up event listeners
     wavesurfer.on('ready', () => {
@@ -58,15 +85,17 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress }: Wav
     });
 
     wavesurfer.on('audioprocess', (currentTime) => {
+      publish(currentTime, wavesurfer.getDuration());
       if (onProgress) {
         onProgress(currentTime, wavesurfer.getDuration());
       }
     });
 
     wavesurfer.on('interaction' as any, () => {
+      const currentTime = wavesurfer.getCurrentTime();
+      const duration = wavesurfer.getDuration();
+      publish(currentTime, duration || 0);
       if (onProgress) {
-        const currentTime = wavesurfer.getCurrentTime();
-        const duration = wavesurfer.getDuration();
         onProgress(currentTime, duration || 0);
       }
     });
@@ -101,6 +130,125 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress }: Wav
       }
     };
   }, []); // Only run once when component mounts
+
+  // Draw (or clear) the semi-transparent selection box on the overlay canvas.
+  // Pure ref reads/writes so it can be driven from a rAF loop without
+  // triggering React re-renders on every animation frame.
+  const drawSelection = useCallback(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const drag = dragStateRef.current;
+    if (!drag) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const x1 = Math.min(drag.startX, drag.currentX) * dpr;
+    const x2 = Math.max(drag.startX, drag.currentX) * dpr;
+
+    ctx.fillStyle = 'rgba(59, 130, 246, 0.25)'; // blue-500 @ 25% — semi-transparent fill
+    ctx.fillRect(x1, 0, x2 - x1, canvas.height);
+    ctx.strokeStyle = 'rgba(29, 78, 216, 0.9)'; // blue-700 — high-contrast border
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeRect(x1, 0, x2 - x1, canvas.height);
+  }, []);
+
+  const renderSelectionFrame = useCallback(() => {
+    drawSelection();
+    if (dragStateRef.current?.dragging) {
+      rafIdRef.current = requestAnimationFrame(renderSelectionFrame);
+    }
+  }, [drawSelection]);
+
+  const handleWindowMouseMove = useCallback((event: MouseEvent) => {
+    const container = waveformRef.current;
+    const drag = dragStateRef.current;
+    if (!container || !drag) return;
+
+    const rect = container.getBoundingClientRect();
+    drag.currentX = clamp(event.clientX - rect.left, 0, rect.width);
+  }, []);
+
+  const handleWindowMouseUp = useCallback(() => {
+    window.removeEventListener('mousemove', handleWindowMouseMove);
+    window.removeEventListener('mouseup', handleWindowMouseUp);
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+
+    const drag = dragStateRef.current;
+    if (drag) {
+      drag.dragging = false;
+      const startX = Math.min(drag.startX, drag.currentX);
+      const endX = Math.max(drag.startX, drag.currentX);
+
+      if (endX - startX >= DRAG_THRESHOLD_PX) {
+        const containerWidth = waveformRef.current?.clientWidth ?? 0;
+        onSelectionChangeRef.current?.({ startX, endX, containerWidth });
+      } else {
+        // Too small to be a real drag — treat as a click-through and clear.
+        dragStateRef.current = null;
+        onSelectionChangeRef.current?.(null);
+      }
+    }
+
+    drawSelection();
+  }, [drawSelection, handleWindowMouseMove]);
+
+  const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    // Left button only, and only once a waveform is actually loaded —
+    // dragging over a loading/error/empty state has nothing to select.
+    if (event.button !== 0 || isLoading || !!error || !audioUrl) return;
+
+    const container = waveformRef.current;
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+    const x = clamp(event.clientX - rect.left, 0, rect.width);
+    dragStateRef.current = { startX: x, currentX: x, dragging: true };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    rafIdRef.current = requestAnimationFrame(renderSelectionFrame);
+  }, [isLoading, error, audioUrl, handleWindowMouseMove, handleWindowMouseUp, renderSelectionFrame]);
+
+  // Unmount safety net in case a drag is still in progress.
+  useEffect(() => {
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+    };
+  }, [handleWindowMouseMove, handleWindowMouseUp]);
+
+  // Keep the overlay canvas's backing store sized (and DPR-scaled) to match
+  // the waveform container, independent of WaveSurfer's own canvas.
+  useEffect(() => {
+    const container = waveformRef.current;
+    const canvas = overlayCanvasRef.current;
+    if (!container || !canvas) return;
+
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const { clientWidth, clientHeight } = container;
+      canvas.width = Math.max(1, Math.round(clientWidth * dpr));
+      canvas.height = Math.max(1, Math.round(clientHeight * dpr));
+      canvas.style.width = `${clientWidth}px`;
+      canvas.style.height = `${clientHeight}px`;
+      drawSelection();
+    };
+
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [drawSelection]);
 
   // Handle audio URL changes
   useEffect(() => {
@@ -234,10 +382,15 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress }: Wav
 
   return (
     <Card className="p-3 border-gray-200 bg-white shadow-sm">
-      <div 
+      <div
         ref={waveformRef}
-        className="h-20 bg-white rounded relative min-h-[80px] border border-gray-200"
+        className="h-20 bg-white rounded relative min-h-[80px] border border-gray-200 select-none"
+        onMouseDown={handleMouseDown}
       >
+        <canvas
+          ref={overlayCanvasRef}
+          className="absolute inset-0 z-[5] pointer-events-none"
+        />
         {isLoading && (
           <div className="absolute inset-0 flex items-center justify-center z-10 bg-white/90">
             <div className="text-xs text-blue-600 flex items-center gap-2">
