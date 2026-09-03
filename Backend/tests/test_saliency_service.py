@@ -122,10 +122,26 @@ class MockEmoModel(torch.nn.Module):
 
 @pytest.fixture
 def mock_model_loader(monkeypatch):
-    monkeypatch.setattr(model_loader_service, "feature_extractor", MockFeatureExtractor())
-    monkeypatch.setattr(model_loader_service, "emo_model", MockEmoModel())
     monkeypatch.setattr(model_loader_service, "emo_device", torch.device("cpu"))
-    monkeypatch.setattr(model_loader_service, "ensure_emo_model_loaded", lambda: None)
+    # Returns the (feature_extractor, model, device) triple the callers now bind
+    # locally. The old stub took no arguments and returned None, which only
+    # worked while every caller read the module globals instead of the return
+    # value - the same shape of test double that hid the custom-model
+    # substitution it was standing in for.
+    # Seeded. MockEmoModel's conv/linear weights are randomly initialised, and
+    # Grad-CAM's ReLU zeroes the whole map whenever the weighted feature-map sum
+    # happens to come out negative everywhere - so on some draws Grad-CAM
+    # degrades to the shared energy fallback and matches IG exactly. Unseeded,
+    # that depended on whatever consumed the global RNG earlier in the session,
+    # which is why these passed alone and failed in a full run.
+    torch.manual_seed(0)
+    _fe, _model, _dev = MockFeatureExtractor(), MockEmoModel(), torch.device("cpu")
+    monkeypatch.setattr(model_loader_service, "feature_extractor", _fe)
+    monkeypatch.setattr(model_loader_service, "emo_model", _model)
+    monkeypatch.setattr(
+        model_loader_service, "ensure_emo_model_loaded",
+        lambda model_id=None, revision=None: (_fe, _model, _dev),
+    )
 
 @pytest.fixture
 def dummy_audio_file(tmp_path: Path) -> Path:
@@ -350,10 +366,23 @@ class TestAddAndGradCamSaliency:
         assert "no Conv1d/Conv2d layer" in res["provenance_reason"]
 
     def test_gradcam_not_equal_to_ig_for_wav2vec2(self, mock_model_loader, dummy_audio_file):
+        """Two different methods must give two different maps.
+
+        They come out identical whenever *both* degrade to the shared encoder-
+        energy fallback, so check provenance first - otherwise the only symptom
+        is an equality failure that says nothing about the cause.
+        """
         from app.domain.saliency_service import generate_saliency
 
         res_gradcam = generate_saliency(str(dummy_audio_file), model="wav2vec2", method="gradcam")
         res_ig = generate_saliency(str(dummy_audio_file), model="wav2vec2", method="ig")
+
+        for name, res in (("gradcam", res_gradcam), ("ig", res_ig)):
+            assert res["provenance"] == "measured", (
+                f"{name} fell back to the energy map "
+                f"({res.get('provenance_reason')}); both methods then return the "
+                "same series and the comparison below is vacuous"
+            )
 
         cam_arr = np.array(res_gradcam["series"])
         ig_arr = np.array(res_ig["series"])
