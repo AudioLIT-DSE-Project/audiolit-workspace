@@ -20,6 +20,37 @@ logger = logging.getLogger(__name__)
 MAX_SALIENCY_SECONDS = int(os.getenv("MAX_SALIENCY_SECONDS", "12"))  # cap analysis window
 MAX_SALIENCY_SECONDS_SHAP = int(os.getenv("MAX_SALIENCY_SECONDS_SHAP", "6"))  # stricter for SHAP
 SALIENCY_SHAP_SAMPLES = int(os.getenv("SALIENCY_SHAP_SAMPLES", "8"))
+# Interpretable-feature count for LIME: contiguous time bands over the mel
+# frames. Small enough that the surrogate is determined by the sample budget,
+# large enough to localise a word.
+LIME_TIME_BANDS = int(os.getenv("LIME_TIME_BANDS", "32"))
+
+
+def _lime_surrogate():
+    """The linear model LIME fits over the perturbation samples.
+
+    Captum defaults to Lasso(alpha=0.01). Against a target whose scale is ~2
+    (encoder energy), that penalty shrinks *every* coefficient to exactly zero,
+    so `Lime.attribute` returned an all-zero map and the energy fallback fired
+    on every request. Ridge with a token penalty keeps the fit well-posed
+    without erasing it; 4x as many samples as bands leaves it over-determined.
+    """
+    from captum._utils.models.linear_model import SkLearnRidge
+    return SkLearnRidge(alpha=0.01)
+
+
+def _time_band_feature_mask(input_features: "torch.Tensor", n_bands: int = 32) -> "torch.Tensor":
+    """Group a ``[B, n_mels, T]`` input into ``n_bands`` contiguous time bands.
+
+    Every mel bin at the same time band shares a group id, so LIME perturbs a
+    slice of *time* - the unit a listener can actually interpret - instead of
+    one mel cell at a time.
+    """
+    t = input_features.shape[-1]
+    n_bands = max(1, min(n_bands, t))
+    band_of_frame = (torch.arange(t, device=input_features.device) * n_bands) // t
+    shape = [1] * (input_features.dim() - 1) + [t]
+    return band_of_frame.view(shape).expand_as(input_features).long()
 
 # ADD model keys (model_loader_service._ADD_MODEL_REGISTRY) checked before the
 # generic "wav2vec" substring below -- "wav2vec2-add" would otherwise match the
@@ -36,6 +67,71 @@ def detect_model_type(model: str) -> str:
     elif "wav2vec" in model.lower():
         return "wav2vec2"
     return "unknown"
+
+
+class _WhisperTranscriptScore(torch.nn.Module):
+    """Scores ``input_features`` by the log-probability Whisper assigns its own transcript.
+
+    Grad-CAM needs a *class-discriminative* scalar. Whisper has no classifier
+    head, so the score used here is the summed log-probability of the token
+    sequence the model itself generated: raising it means "more evidence for
+    exactly what the model said", which is the question a saliency map over an
+    ASR prediction is supposed to answer.
+    """
+
+    def __init__(self, model, decoder_input_ids, target_ids):
+        super().__init__()
+        self.model = model
+        self.register_buffer("decoder_input_ids", decoder_input_ids, persistent=False)
+        self.register_buffer("target_ids", target_ids, persistent=False)
+
+    def forward(self, x):
+        n = x.shape[0]
+        dec = self.decoder_input_ids.expand(n, -1)
+        tgt = self.target_ids.expand(n, -1)
+        logits = self.model(input_features=x, decoder_input_ids=dec).logits  # [B, L, V]
+        logp = torch.log_softmax(logits, dim=-1)
+        picked = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)              # [B, L]
+        return picked.sum(dim=1, keepdim=True)                               # [B, 1]
+
+
+class _WhisperEncoderEnergy(torch.nn.Module):
+    """Encoder-energy scalar - the pre-existing target, kept only as a fallback."""
+
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+
+    def forward(self, x):
+        return self.encoder(x).last_hidden_state.pow(2).mean(dim=(1, 2), keepdim=True)
+
+
+def _build_whisper_gradcam_target(model_id: str, base_model, input_features):
+    """``(wrapper, target_layer)`` for Grad-CAM over Whisper.
+
+    Scoring the transcript needs the LM head, so this loads the
+    ``WhisperForConditionalGeneration`` variant - ``get_whisper_base_models``
+    returns a bare ``WhisperModel``, which has no ``generate`` at all. The
+    Grad-CAM hooks must sit on whichever encoder actually runs the forward
+    pass, so the target layer comes from that same instance.
+
+    Degrades to the encoder-energy target only if generation fails.
+    """
+    try:
+        _, cond_model = model_loader_service._get_whisper_cond_gen(model_id)
+        feats = input_features.to(next(cond_model.parameters()).device)
+        with torch.no_grad():
+            generated = cond_model.generate(feats, max_new_tokens=128)
+        seq = generated[0] if generated.dim() > 1 else generated
+        if seq.numel() < 2:
+            raise ValueError("generated sequence too short to score")
+        wrapper = _WhisperTranscriptScore(
+            cond_model, seq[:-1].unsqueeze(0), seq[1:].unsqueeze(0)
+        )
+        return wrapper, find_last_conv_layer(cond_model.model.encoder)
+    except Exception:
+        logger.exception("Whisper transcript-score target unavailable; using encoder energy")
+        return _WhisperEncoderEnergy(base_model.encoder), find_last_conv_layer(base_model.encoder)
 
 
 #################################################################################################################
@@ -85,17 +181,19 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
     shap_fallback_reason = None
     if method == "gradcam":
         try:
-            target_layer = find_last_conv_layer(model.encoder)
-            
-            class WhisperEncoderGradCamWrapper(torch.nn.Module):
-                def __init__(self, encoder):
-                    super().__init__()
-                    self.encoder = encoder
-                def forward(self, x):
-                    hidden = self.encoder(x).last_hidden_state
-                    return hidden.pow(2).mean(dim=(1, 2), keepdim=True)
-
-            wrapper = WhisperEncoderGradCamWrapper(model.encoder)
+            # Attribute the model's score for *its own transcript*, not encoder
+            # energy. Grad-CAM's ReLU keeps only channels that push the target
+            # score up, which is meaningful for a class score and meaningless
+            # for `hidden.pow(2).mean()`: measured on whisper-base, the
+            # pre-ReLU map came out uniformly negative (max -9.7e-6, 0/1500
+            # positions positive), so ReLU zeroed the whole map, the
+            # "empty or constant" guard below fired on every clip, and every
+            # Whisper heatmap ever rendered was the energy fallback wearing a
+            # Grad-CAM label. Scoring the decoder's own output restores the
+            # class-discriminative target Grad-CAM assumes.
+            wrapper, target_layer = _build_whisper_gradcam_target(
+                resolve_whisper_model_id(model_size), model, input_features
+            )
             cam_np = compute_grad_cam(wrapper, input_features, target_layer=target_layer)
             cam_tensor = torch.from_numpy(cam_np).to(device=input_features.device, dtype=input_features.dtype)
             if cam_tensor.dim() == 1:
@@ -165,8 +263,19 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
             else:
                 raise
     elif method == "lime":
-        lime = Lime(model_forward)
-        attributions = lime.attribute(input_features)
+        # LIME fits a linear surrogate over *interpretable* features. Left
+        # unmasked, Captum treats every one of the 80x3000 mel cells as its own
+        # feature and draws Captum's default 50 samples - 240,000 unknowns from
+        # 50 equations. The surrogate came back all-zero, so the "empty or
+        # constant" guard fired and Whisper LIME was silently the energy
+        # fallback on every clip, exactly like Grad-CAM was.
+        lime = Lime(model_forward, interpretable_model=_lime_surrogate())
+        feature_mask = _time_band_feature_mask(input_features, n_bands=LIME_TIME_BANDS)
+        attributions = lime.attribute(
+            input_features,
+            feature_mask=feature_mask,
+            n_samples=max(LIME_TIME_BANDS * 4, 64),
+        )
     elif method == "shap":
         # Use Captum GradientShap on the model's current device with small n_samples
         gs = GradientShap(model_forward)
@@ -380,8 +489,19 @@ def generate_whisper_saliency(audio_file_path: str, model_size: str = "base", me
 
 ################################################################################################################
 
-def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
-    model_loader_service.ensure_emo_model_loaded()
+def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", existing_prediction: Dict = None, model_id: Optional[str] = None) -> Dict:
+    """Saliency over the SER model the user selected (FR1, FR8).
+
+    ``model_id`` used to be absent entirely: this called
+    ``ensure_emo_model_loaded()`` with no argument and then read the module
+    globals, so a custom emotion checkpoint was explained by the *default*
+    checkpoint's gradients - a heatmap for a model the user never chose.
+    The loader returns the selected model's triple, so bind that rather than
+    the globals, which only ever hold the default.
+    """
+    feature_extractor, emo_model, emo_device = (
+        model_loader_service.ensure_emo_model_loaded(model_id)
+    )
     audio, rate = librosa.load(audio_file_path, sr=16000)
     segment_duration = len(audio) / rate if rate > 0 else 0.0
     # Crop to safe max duration to bound memory
@@ -390,22 +510,22 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
     if len(audio) > max_len:
         audio = audio[:max_len]
         segment_duration = len(audio) / rate
-    inputs = model_loader_service.feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
     
-    input_values = inputs.input_values.to(model_loader_service.emo_device)
-    attention_mask = inputs.attention_mask.to(model_loader_service.emo_device) if "attention_mask" in inputs else None
+    input_values = inputs.input_values.to(emo_device)
+    attention_mask = inputs.attention_mask.to(emo_device) if "attention_mask" in inputs else None
     
     input_values.requires_grad_(True)
     
     # Determine class to attribute (predicted emotion)
     with torch.no_grad():
-        tmp_out = model_loader_service.emo_model(input_values=input_values, attention_mask=attention_mask)
+        tmp_out = emo_model(input_values=input_values, attention_mask=attention_mask)
         tmp_probs = torch.nn.functional.softmax(tmp_out.logits, dim=-1)
         target_idx = int(torch.argmax(tmp_probs, dim=-1).item())
-        id2label = getattr(model_loader_service.emo_model.config, "id2label", {})
+        id2label = getattr(emo_model.config, "id2label", {})
         emotion = id2label.get(target_idx, f"emotion_{target_idx}")
 
-    id2label = getattr(model_loader_service.emo_model.config, "id2label", {0: "neutral", 1: "happy", 2: "sad"})
+    id2label = getattr(emo_model.config, "id2label", {0: "neutral", 1: "happy", 2: "sad"})
     if isinstance(id2label, dict):
         emotion = id2label.get(target_idx, id2label.get(str(target_idx), f"emotion_{target_idx}"))
     else:
@@ -413,15 +533,15 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
     segment_duration = float(len(audio) / rate)
 
     def model_forward(inputs, mask=None, cls_idx: int = 0):
-        outputs = model_loader_service.emo_model(input_values=inputs, attention_mask=mask)
+        outputs = emo_model(input_values=inputs, attention_mask=mask)
         return outputs.logits[:, cls_idx]
     
     shap_fallback_reason = None
     if method == "gradcam":
         try:
-            target_layer = find_last_conv_layer(model_loader_service.emo_model)
+            target_layer = find_last_conv_layer(emo_model)
             cam_np = compute_grad_cam(
-                model_loader_service.emo_model,
+                emo_model,
                 input_values,
                 target_layer=target_layer,
                 target_index=target_idx,
@@ -466,8 +586,8 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     cpu_device = torch.device("cpu")
-                    if hasattr(model_loader_service.emo_model, 'to'):
-                        model_loader_service.emo_model.to(cpu_device)
+                    if hasattr(emo_model, 'to'):
+                        emo_model.to(cpu_device)
                     input_values_cpu = input_values.detach().to(cpu_device)
                     input_values_cpu.requires_grad_(True)
                     attention_mask_cpu = attention_mask.detach().to(cpu_device) if attention_mask is not None else None
@@ -482,8 +602,17 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
             else:
                 raise
     elif method == "lime":
-        lime = Lime(model_forward)
-        attributions = lime.attribute(input_values, additional_forward_args=(attention_mask, target_idx))
+        # Same treatment as the Whisper path: group the waveform into time
+        # bands and fit an unpenalised surrogate. Unmasked, this asked Captum
+        # to explain ~60,000 individual samples from its default 50 draws, and
+        # Lasso then shrank the coefficients to near-nothing.
+        lime = Lime(model_forward, interpretable_model=_lime_surrogate())
+        attributions = lime.attribute(
+            input_values,
+            feature_mask=_time_band_feature_mask(input_values, n_bands=LIME_TIME_BANDS),
+            n_samples=max(LIME_TIME_BANDS * 4, 64),
+            additional_forward_args=(attention_mask, target_idx),
+        )
     elif method == "shap":
         # Use Captum GradientShap on model's current device with small n_samples
         gs = GradientShap(model_forward)
@@ -541,7 +670,7 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
             fallback_reason = "attribution was empty or constant; showing encoder energy, not attribution"
         logger.info(f"Using Wav2Vec2 energy-map fallback for saliency ({fallback_reason})")
         with torch.no_grad():
-            hs = model_loader_service.emo_model.wav2vec2(input_values=input_values, attention_mask=attention_mask).last_hidden_state  # [B,T,H]
+            hs = emo_model.wav2vec2(input_values=input_values, attention_mask=attention_mask).last_hidden_state  # [B,T,H]
             energy = hs.abs().mean(dim=2).squeeze(0).detach().cpu().numpy()
         if energy.size > 0:
             e_min, e_ptp = float(np.min(energy)), float(np.ptp(energy))
@@ -564,13 +693,13 @@ def generate_wav2vec2_saliency(audio_file_path: str, method: str = "gradcam", ex
         series = (series - smin) / (smax - smin + 1e-9)
     
     with torch.no_grad():
-        model_device = next(model_loader_service.emo_model.parameters()).device
+        model_device = next(emo_model.parameters()).device
         iv = input_values.to(model_device)
         am = attention_mask.to(model_device) if attention_mask is not None else None
-        outputs = model_loader_service.emo_model(input_values=iv, attention_mask=am)
+        outputs = emo_model(input_values=iv, attention_mask=am)
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
         predicted_emotion = torch.argmax(probs, dim=-1).item()
-        id2label = model_loader_service.emo_model.config.id2label
+        id2label = emo_model.config.id2label
         emotion = id2label.get(predicted_emotion, str(predicted_emotion))
     
     segment_duration = len(audio) / 16000
@@ -683,13 +812,18 @@ def generate_add_gradcam_saliency(audio_file_path: str, model_name: str = "melod
     
     try:
         target_layer = find_last_conv_layer(add_model)
-        if isinstance(target_layer, torch.nn.Conv1d):
-            if target_layer.in_channels == 1:
-                inputs = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
-            else:
-                inputs = torch.from_numpy(spect_norm).unsqueeze(0).to(device)
-        else:
-            inputs = torch.from_numpy(spect_norm).unsqueeze(0).unsqueeze(0).to(device)
+        # Feed the model what it was trained on. The shape was previously chosen
+        # from the *last* conv layer's in_channels, but the input convention is
+        # set by the *first* layer: for Wav2Vec2-based detectors the last conv is
+        # Conv1d(512, 512), so the check took the spectrogram branch and passed a
+        # [1, 257, T] STFT into a model expecting [B, samples] of waveform -
+        # every ADD Grad-CAM request died with "Expected 2D (unbatched) or 3D
+        # (batched) input to conv1d". Route the audio through the checkpoint's
+        # own feature extractor, exactly as predict_deepfake does.
+        prepared = feature_extractor(
+            audio, sampling_rate=sr, return_tensors="pt", padding=True
+        )
+        inputs = prepared.input_values.to(device)
         cam = compute_grad_cam(add_model, inputs, target_layer=target_layer)
         
         timeline = cam.mean(axis=0) if cam.ndim == 2 else cam
@@ -747,7 +881,11 @@ def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam",
     if model_type == "whisper":
         return generate_whisper_saliency(audio_file_path, model, method, existing_prediction)
     elif model_type == "wav2vec2":
-        return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
+        # "wav2vec2" names the family, not a checkpoint.
+        ser_model_id = None if model == "wav2vec2" else model
+        return generate_wav2vec2_saliency(
+            audio_file_path, method, existing_prediction, model_id=ser_model_id
+        )
     elif model_type == "add":
         if method == "gradcam":
             return generate_add_gradcam_saliency(audio_file_path, model)
