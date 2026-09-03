@@ -4,11 +4,18 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { Upload, Search, Play, Pause, RefreshCw, HelpCircle } from "lucide-react";
+import { Upload, Search, Play, Pause, Square, RefreshCw, HelpCircle } from "lucide-react";
 import { AudioUploader } from "../audio/AudioUploader";
 import { AudioDataTable } from "../audio/AudioDataTable";
+import { DatasetLicenseNotice } from "../dataset/DatasetLicenseNotice";
 import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
+
+interface DatasetLicenseInfo {
+  license: string | null;
+  task_family: string | null;
+  non_commercial: boolean;
+}
 
 interface UploadedFile {
   file_id: string;
@@ -19,7 +26,32 @@ interface UploadedFile {
   duration?: number;
   sample_rate?: number;
   prediction?:string
+  ground_truth?: string;
 }
+
+// Same generic key list AudioDataTable.tsx's "Ground Truth" column reads,
+// so a row selected here carries the same ground truth the table displays
+// for it (LIT-247 follow-up: custom datasets' Original Transcription
+// Metrics panel was hardcoding "" instead of reading this).
+const GROUND_TRUTH_KEYS = ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"];
+
+// LIT-249: /inferences/run returns a bare string for Whisper (ASR) but a
+// structured object for everything else - deepfake (ADD) predictions come
+// back as {predicted_label, confidence, probabilities, ...}. The dataset
+// table only ever needs a short display value per cell (the full object,
+// with its probability breakdown, is fetched separately for the sidebar's
+// "Deepfake Detection Results" card by MainLayout's fetchAddPrediction
+// effect) - stringifying the whole object here used to dump raw JSON into
+// the table cell instead of just the label.
+const extractPredictionDisplayText = (prediction: unknown): string => {
+  if (typeof prediction === 'string') return prediction;
+  if (prediction && typeof prediction === 'object') {
+    const p = prediction as Record<string, unknown>;
+    const candidate = p.text ?? p.predicted_transcript ?? p.predicted_emotion ?? p.predicted_label ?? p.prediction;
+    if (typeof candidate === 'string') return candidate;
+  }
+  return JSON.stringify(prediction);
+};
 
 interface AudioDatasetPanelProps {
   apiData?: unknown;
@@ -68,6 +100,27 @@ export const AudioDatasetPanel = ({
   const [isInferenceComplete, setIsInferenceComplete] = useState(false);
   const [currentModelDataset, setCurrentModelDataset] = useState<string>("");
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // FR2.3 / SAD C5 — licence metadata for the built-in benchmark corpora, so a
+  // non-commercial dataset (RAVDESS, L2-ARCTIC, ESD, ASVspoof 2021 DF) can show
+  // a notice on load instead of the licence info being retained server-side
+  // but never surfaced to the user.
+  const [datasetLicenses, setDatasetLicenses] = useState<Record<string, DatasetLicenseInfo>>({});
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/datasets/list`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.licenses) setDatasetLicenses(data.licenses);
+      })
+      .catch(() => {
+        // Non-fatal: the dataset table still works without licence info.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const currentLicenseInfo = datasetLicenses[dataset];
 
   // Sync selectedRow when selectedFile changes from external selection (e.g., embeddings)
   useEffect(() => {
@@ -129,12 +182,14 @@ export const AudioDatasetPanel = ({
 
     const pathVal = (match["path"] || match["filepath"] || match["file"] || match["filename"]) as string | undefined;
     const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || String(id)) : String(id);
+    const groundTruth = GROUND_TRUTH_KEYS.map((k) => match[k]).find((v) => typeof v === "string" && v.trim() !== "") as string | undefined;
 
     const fileLike: UploadedFile = {
       file_id: String(id),
       filename,
       file_path: pathVal || filename,
       message: dataset.startsWith('custom:') ? "Selected from custom dataset" : "Selected from dataset", // This indicates it's a dataset file
+      ground_truth: groundTruth,
     };
 
     // Just select the file for UI purposes, no inference
@@ -149,115 +204,123 @@ export const AudioDatasetPanel = ({
 
   // No need for local prediction update handling since we use external predictionMap
 
+  const [isInferencingActive, setIsInferencingActive] = useState(false);
+
   const handleVisibleRowIdsChange = useCallback((ids: string[]) => {
     // This is now just for pagination, no inference triggering
   }, []);
 
-  // Batch inference for entire dataset when model/dataset changes
+  // Abort ongoing requests and reset inference state whenever model or dataset changes
   useEffect(() => {
-    console.log('DEBUG: Batch inference useEffect triggered', {
-      dataset,
-      model,
-      datasetMetadataLength: datasetMetadata.length,
-      isCustom: dataset === "custom",
-      hasModel: !!model
-    });
-    
-    // Skip batch inference for legacy "custom" (uploaded files) but allow for custom datasets
-    if (dataset === "custom" || !model) return;
-    if (datasetMetadata.length === 0) return;
-    
-    const datasetToUse = originalDataset || dataset;
-    const modelDatasetKey = `${model}-${datasetToUse}`;
-    
-    // If we've already completed inference for this model+dataset combination, don't restart
-    if (isInferenceComplete && currentModelDataset === modelDatasetKey) {
-      console.log(`Inference already completed for ${modelDatasetKey}, skipping`);
-      return;
-    }
-    
-    console.log(`Starting batch inference check for ${model} on ${datasetMetadata.length} files in ${dataset} dataset`);
-    
-    // Abort any ongoing inference
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
     abortControllerRef.current = new AbortController();
-    
-    // Reset state for new model/dataset combination
-    setCurrentModelDataset(modelDatasetKey);
+
+    setIsInferencingActive(false);
     setIsInferenceComplete(false);
     setCurrentInferenceIndex(0);
     setBatchInferenceQueue([]);
-    setInferenceStatus({}); // Clear inference status for new dataset
-    
-    // First, check what's already cached
-    const checkCachedResults = async () => {
-      try {
-        const filenames = datasetMetadata.map(row => {
-          const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
-          return pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : String(row["id"] || "unknown");
-        });
+    setInferenceStatus({});
+  }, [model, dataset, originalDataset]);
 
-        const response = await fetch(`${API_BASE}/inferences/batch-check`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            model,
-            dataset,
-            files: filenames
-          }),
-          signal: abortControllerRef.current?.signal,
-        });
+  // Auto-check cached predictions on metadata load or model change
+  useEffect(() => {
+    if (!model || datasetMetadata.length === 0) return;
+    const ac = new AbortController();
 
-        if (!response.ok) {
-          throw new Error(`Batch check failed: ${response.status}`);
-        }
+    const filenames = datasetMetadata.map(row => {
+      const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
+      return pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : String(row["id"] || "unknown");
+    });
 
-        const { cached_results, missing_files, cache_hit_rate } = await response.json();
-        
-        console.log(`Cache hit rate: ${(cache_hit_rate * 100).toFixed(1)}% (${Object.keys(cached_results).length}/${filenames.length})`);
-        
-        // Load cached results
-        const newPredictionMap: Record<string, string> = {};
-        const newInferenceStatus: Record<string, 'idle' | 'loading' | 'done' | 'error'> = {};
-        
-        // Map cached results to file IDs
+    fetch(`${API_BASE}/inferences/batch-check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ model, dataset: originalDataset || dataset, files: filenames }),
+      signal: ac.signal,
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (!data || !data.cached_results) return;
+        const newStatus: Record<string, 'idle' | 'loading' | 'done' | 'error'> = {};
+
         datasetMetadata.forEach((row, index) => {
           const fileId = String(row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"] || index);
           const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
           const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : fileId;
-          
+
+          if (data.cached_results[filename]) {
+            newStatus[fileId] = 'done';
+            if (onPredictionUpdate) onPredictionUpdate(fileId, data.cached_results[filename]);
+          }
+        });
+        setInferenceStatus(prev => ({ ...prev, ...newStatus }));
+      })
+      .catch(() => {});
+
+    return () => ac.abort();
+  }, [model, dataset, originalDataset, datasetMetadata, onPredictionUpdate]);
+
+  // Explicit handler triggered ONLY when user clicks "Get Inferences"
+  const handleStartBatchInference = useCallback(async () => {
+    if (!model || datasetMetadata.length === 0) return;
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+
+    setIsInferencingActive(true);
+    setIsInferenceComplete(false);
+    setCurrentInferenceIndex(0);
+    
+    if (onBatchInferenceStart) onBatchInferenceStart();
+
+    try {
+      const filenames = datasetMetadata.map(row => {
+        const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
+        return pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : String(row["id"] || "unknown");
+      });
+
+      const response = await fetch(`${API_BASE}/inferences/batch-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ model, dataset, files: filenames }),
+        signal: abortControllerRef.current?.signal,
+      });
+
+      if (response.ok) {
+        const { cached_results, missing_files } = await response.json();
+        const newPredictionMap: Record<string, string> = {};
+        const newInferenceStatus: Record<string, 'idle' | 'loading' | 'done' | 'error'> = {};
+
+        datasetMetadata.forEach((row, index) => {
+          const fileId = String(row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"] || index);
+          const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
+          const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : fileId;
+
           if (cached_results[filename]) {
             newPredictionMap[fileId] = cached_results[filename];
             newInferenceStatus[fileId] = 'done';
+            if (onPredictionUpdate) onPredictionUpdate(fileId, cached_results[filename]);
           } else {
             newInferenceStatus[fileId] = 'idle';
           }
         });
-        
-        // Update external predictionMap via callback
-        Object.entries(newPredictionMap).forEach(([fileId, prediction]) => {
-          if (onPredictionUpdate) {
-            onPredictionUpdate(fileId, prediction);
-          }
-        });
+
         setInferenceStatus(newInferenceStatus);
-        
+
         if (missing_files.length === 0) {
-          // All files are cached, we're done!
-          console.log('All files are cached, inference complete');
           setIsInferenceComplete(true);
-          if (onBatchInferenceComplete) {
-            onBatchInferenceComplete();
-          }
+          setIsInferencingActive(false);
+          if (onBatchInferenceComplete) onBatchInferenceComplete();
+          toast.success("All predictions loaded!");
           return;
         }
-        
-        // Queue only missing files for inference
+
         const fileIds = datasetMetadata
           .filter((row, index) => {
             const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
@@ -265,46 +328,80 @@ export const AudioDatasetPanel = ({
             return missing_files.includes(filename);
           })
           .map((row, index) => String(row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"] || index));
-        
-        setBatchInferenceQueue(fileIds);
-        console.log(`Queuing ${fileIds.length} files for inference:`, fileIds);
-        
-        if (onBatchInferenceStart) {
-          onBatchInferenceStart();
-        }
-        
-      } catch (error: any) {
-        if (error.name === 'AbortError') return;
-        console.error('Failed to check cached results:', error);
-        
-        // Fallback: run inference on all files
-        const fileIds = datasetMetadata.map((row, index) => {
-          const id = row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"] || String(index);
-          return String(id);
-        });
-        
-        setBatchInferenceQueue(fileIds);
-        setInferenceStatus({});
-        
-        if (onBatchInferenceStart) {
-          onBatchInferenceStart();
-        }
-      }
-    };
-    
-    checkCachedResults();
-  }, [model, dataset, originalDataset, datasetMetadata, onBatchInferenceStart, onBatchInferenceComplete]);
 
-  // Process batch inference queue
+        setBatchInferenceQueue(fileIds);
+      }
+    } catch (err: any) {
+      if (err.name === 'AbortError') return;
+      console.error("Batch check failed:", err);
+      const fileIds = datasetMetadata.map((row, index) => String(row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"] || index));
+      setBatchInferenceQueue(fileIds);
+    }
+  }, [model, dataset, datasetMetadata, onBatchInferenceStart, onBatchInferenceComplete, onPredictionUpdate]);
+
+  const handleStopBatchInference = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    setIsInferencingActive(false);
+    setBatchInferenceQueue([]);
+    toast.info("Inference stopped by user.");
+  }, []);
+
+  // LIT-248: re-run inference for exactly one row on demand, independent of
+  // (and safe to call alongside) the batch queue above. force_refresh: true
+  // bypasses /inferences/run's cache - without it, a deterministic model on
+  // an unchanged file would just hand back the same cached prediction and
+  // the button would appear to do nothing.
+  const handleRegenerateRow = useCallback(async (fileId: string) => {
+    if (!model) return;
+    const currentRow = datasetMetadata.find(row => {
+      const id = row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"];
+      return String(id) === fileId;
+    });
+    if (!currentRow) return;
+
+    const pathVal = (currentRow["path"] || currentRow["filepath"] || currentRow["file"] || currentRow["filename"]) as string;
+    const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || fileId) : fileId;
+
+    setInferenceStatus(prev => ({ ...prev, [fileId]: 'loading' }));
+
+    try {
+      const response = await fetch(`${API_BASE}/inferences/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ model, dataset, dataset_file: filename, force_refresh: true }),
+        signal: abortControllerRef.current?.signal,
+      });
+
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+
+      const prediction = await response.json();
+      const predictionText = extractPredictionDisplayText(prediction);
+
+      if (onPredictionUpdate) onPredictionUpdate(fileId, predictionText);
+      setInferenceStatus(prev => ({ ...prev, [fileId]: 'done' }));
+      toast.success(`Regenerated prediction for ${filename}`);
+    } catch (error: any) {
+      if (error.name === 'AbortError') return;
+      console.error(`Regenerate failed for ${fileId}:`, error);
+      setInferenceStatus(prev => ({ ...prev, [fileId]: 'error' }));
+      toast.error(`Failed to regenerate prediction for ${filename}`);
+    }
+  }, [model, dataset, datasetMetadata, onPredictionUpdate]);
+
+  // Process batch inference queue when active
   useEffect(() => {
-    if (batchInferenceQueue.length === 0) return;
+    if (!isInferencingActive || batchInferenceQueue.length === 0) return;
     if (currentInferenceIndex >= batchInferenceQueue.length) {
-      // Batch inference complete
       console.log('Batch inference completed');
       setIsInferenceComplete(true);
+      setIsInferencingActive(false);
       if (onBatchInferenceComplete) {
         onBatchInferenceComplete();
       }
+      toast.success("Batch inference complete!");
       return;
     }
 
@@ -315,7 +412,6 @@ export const AudioDatasetPanel = ({
     });
 
     if (!currentRow) {
-      // Skip this file and continue
       setCurrentInferenceIndex(prev => prev + 1);
       return;
     }
@@ -335,9 +431,7 @@ export const AudioDatasetPanel = ({
 
         const response = await fetch(`${API_BASE}/inferences/run`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify(requestBody),
           signal: abortControllerRef.current?.signal,
@@ -348,15 +442,12 @@ export const AudioDatasetPanel = ({
         }
 
         const prediction = await response.json();
-        const predictionText = typeof prediction === 'string' ? prediction : prediction?.text || JSON.stringify(prediction);
+        const predictionText = extractPredictionDisplayText(prediction);
 
-        // Update external predictionMap via callback
         if (onPredictionUpdate) {
           onPredictionUpdate(currentFileId, predictionText);
         }
         setInferenceStatus(prev => ({ ...prev, [currentFileId]: 'done' }));
-        
-        console.log(`Inference complete for ${filename}: ${predictionText}`);
         
       } catch (error: any) {
         if (error.name === 'AbortError') return;
@@ -364,28 +455,24 @@ export const AudioDatasetPanel = ({
         setInferenceStatus(prev => ({ ...prev, [currentFileId]: 'error' }));
       }
       
-      // Move to next file
       setCurrentInferenceIndex(prev => prev + 1);
     };
 
-    // Add small delay to prevent overwhelming the server
     const timeoutId = setTimeout(runInference, 100);
-    
     return () => clearTimeout(timeoutId);
-  }, [batchInferenceQueue, currentInferenceIndex, datasetMetadata, model, dataset, originalDataset, onBatchInferenceComplete]);
+  }, [isInferencingActive, batchInferenceQueue, currentInferenceIndex, datasetMetadata, model, dataset, onBatchInferenceComplete, onPredictionUpdate]);
 
   // Cleanup on unmount or when dataset changes
   // Reload function to refresh dataset metadata
   const handleReloadDataset = useCallback(async () => {
-    const allowed = ["common-voice", "ravdess"];
     const datasetToUse = originalDataset || dataset;
-    if (!allowed.includes(datasetToUse)) {
+    if (!datasetToUse || datasetToUse === "custom") {
       setDatasetMetadata([]);
       return;
     }
     
     try {
-      const res = await fetch(`${API_BASE}/${dataset}/metadata`, { credentials: 'include' });
+      const res = await fetch(`${API_BASE}/${datasetToUse}/metadata`, { credentials: 'include' });
       if (!res.ok) throw new Error(`Failed to fetch metadata: ${res.status}`);
       const data = await res.json();
       if (Array.isArray(data)) {
@@ -424,18 +511,17 @@ export const AudioDatasetPanel = ({
   // Fetch dataset metadata when originalDataset changes 
   useEffect(() => {
     const datasetToUse = originalDataset || dataset;
+    setDatasetMetadata([]);
+    onAvailableFilesChange?.([]);
     
     // Skip legacy "custom" (individual uploaded files)
     if (datasetToUse === "custom") {
-      setDatasetMetadata([]);
       return;
     }
     
     // Handle both global datasets and custom datasets
-    const allowed = ["common-voice", "ravdess"];
     const isCustomDataset = datasetToUse.startsWith('custom:');
-    
-    if (!allowed.includes(datasetToUse) && !isCustomDataset) {
+    if (!datasetToUse) {
       setDatasetMetadata([]);
       return;
     }
@@ -558,16 +644,51 @@ export const AudioDatasetPanel = ({
               <Badge variant="outline" className="text-[10px] bg-muted">
                 {uploadedFiles ? `${uploadedFiles.length} uploaded` : "0 files"}
               </Badge>
-              {batchInferenceStatus === 'running' && batchInferenceQueue.length > 0 && (
-                <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
-                  Inferencing... {currentInferenceIndex}/{batchInferenceQueue.length}
+              {isInferencingActive && (
+                <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20 animate-pulse">
+                  Inferencing... {currentInferenceIndex + 1}/{batchInferenceQueue.length || datasetMetadata.length}
                 </Badge>
               )}
-              {(batchInferenceStatus === 'done' || isInferenceComplete) && (
-                <Badge variant="outline" className="text-[10px] bg-primary text-primary-foreground border-primary">
+              {isInferenceComplete && !isInferencingActive && (
+                <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
                   ✓ Inference Complete
                 </Badge>
               )}
+              
+              {dataset !== "custom" && (
+                isInferencingActive ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button size="sm" variant="destructive" className="h-7 text-xs font-medium gap-1" onClick={handleStopBatchInference}>
+                        <Square className="h-3 w-3 fill-current" />
+                        Stop
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Stop running batch inference</p>
+                    </TooltipContent>
+                  </Tooltip>
+                ) : (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="h-7 text-xs font-medium gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
+                        onClick={handleStartBatchInference}
+                        disabled={datasetMetadata.length === 0 || !model}
+                      >
+                        <Play className="h-3 w-3 fill-current" />
+                        Get Inferences
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Run model inference on all files in this dataset</p>
+                    </TooltipContent>
+                  </Tooltip>
+                )
+              )}
+
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button size="sm" variant="secondary" className="h-7 text-xs" onClick={handleUploadClick}>
@@ -599,7 +720,27 @@ export const AudioDatasetPanel = ({
             />
           </div>
         </div>
-        
+
+        {/* Live Batch Inference Progress Bar Banner */}
+        {isInferencingActive && batchInferenceQueue.length > 0 && (
+          <div className="bg-primary/10 border-b border-primary/20 px-3 py-1.5 flex items-center justify-between text-xs text-primary font-medium animate-in fade-in duration-200">
+            <div className="flex items-center gap-2 truncate">
+              <RefreshCw className="h-3.5 w-3.5 animate-spin shrink-0" />
+              <span className="truncate">
+                Inferencing sample {currentInferenceIndex + 1} of {batchInferenceQueue.length}...
+              </span>
+            </div>
+            <span className="font-mono text-[11px] font-semibold shrink-0 ml-2">
+              {Math.round(((currentInferenceIndex + 1) / batchInferenceQueue.length) * 100)}%
+            </span>
+          </div>
+        )}
+
+        {/* FR2.3 / SAD C5 — licence notice for non-commercial corpora */}
+        {currentLicenseInfo?.non_commercial && currentLicenseInfo.license && (
+          <DatasetLicenseNotice datasetName={dataset} license={currentLicenseInfo.license} />
+        )}
+
         {/* Search bar */}
         <div className="px-3 pt-2.5 pb-1">
           <div className="relative border border-gray-200 rounded-lg px-2 py-1">
@@ -637,6 +778,7 @@ export const AudioDatasetPanel = ({
               predictionMap={predictionMap}
               inferenceStatus={inferenceStatus}
               onVisibleRowIdsChange={handleVisibleRowIdsChange}
+              onRegenerateRow={handleRegenerateRow}
             />
           </CardContent>
         </Card>

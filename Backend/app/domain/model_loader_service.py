@@ -1,5 +1,6 @@
 import logging
 import torch
+import transformers
 from transformers import (
     pipeline,
     Wav2Vec2FeatureExtractor,
@@ -19,9 +20,94 @@ from sklearn.manifold import TSNE
 import umap
 
 from app.domain.model_registry_service import registry as _model_registry
+from app.domain.provenance import Provenance, provenance_fields
 
+transformers.logging.set_verbosity_error()
 logger = logging.getLogger(__name__)
 
+
+# Whisper model resolution (FR1).
+#
+# Every entry point below takes whatever the user selected - a short alias
+# from the built-in list, or an arbitrary Hugging Face repo id added at
+# runtime - and resolves it here. Nothing downstream may substitute a
+# different checkpoint: doing so silently returns another model's output
+# under the requested model's cache key, which breaks both FR1 (the selected
+# model is the one that runs) and FR4 (a key identifies exactly one result).
+DEFAULT_WHISPER_MODEL_ID = "openai/whisper-base"
+
+_WHISPER_ALIASES = {
+    "tiny": "openai/whisper-tiny",
+    "base": "openai/whisper-base",
+    "small": "openai/whisper-small",
+    "medium": "openai/whisper-medium",
+    "large": "openai/whisper-large-v3",
+}
+
+
+def resolve_whisper_model_id(model: str | None) -> str:
+    """Map a selection to a concrete Hugging Face id.
+
+    A bare size alias expands to the matching OpenAI checkpoint; anything
+    else - including any custom `org/name` repo - passes through untouched.
+    """
+    if not model:
+        return DEFAULT_WHISPER_MODEL_ID
+    name = str(model).strip()
+    if "/" in name:
+        return name
+    key = name.lower()
+    if key.startswith("whisper-"):
+        key = key[len("whisper-"):]
+    return _WHISPER_ALIASES.get(key, name)
+
+
+_whisper_cond_gen_cache = {}
+
+def _get_whisper_cond_gen(model_id: str):
+    if model_id not in _whisper_cond_gen_cache:
+        processor = WhisperProcessor.from_pretrained(model_id)
+        model = WhisperForConditionalGeneration.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        try:
+            model = model.to(device)
+        except Exception as e:
+            if "meta tensor" in str(e):
+                model = model.to_empty(device=device)
+            else:
+                raise
+        model.eval()
+        _whisper_cond_gen_cache[model_id] = (processor, model)
+    return _whisper_cond_gen_cache[model_id]
+
+_pipeline_cache = {}
+
+def _get_whisper_pipeline(model_id: str, device: int, torch_dtype: torch.dtype):
+    if model_id not in _pipeline_cache:
+        try:
+            pipe = pipeline(
+                "automatic-speech-recognition",
+                model=model_id,
+                torch_dtype=torch_dtype,
+                device=device,
+            )
+        except NotImplementedError as e:
+            if "meta tensor" in str(e):
+                pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model=model_id,
+                    torch_dtype=torch_dtype,
+                    device=-1,
+                )
+                if torch.cuda.is_available():
+                    try:
+                        pipe.model = pipe.model.to("cuda:0")
+                    except Exception:
+                        pass
+            else:
+                raise
+        _pipeline_cache[model_id] = pipe
+    return _pipeline_cache[model_id]
 
 def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, return_timestamps=False, return_attention=False):
     device = 0 if torch.cuda.is_available() else -1
@@ -32,11 +118,7 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
 
     # For attention extraction, we need to use the raw model, not the pipeline
     if return_attention:
-        
-        processor = WhisperProcessor.from_pretrained(model_id)
-        # CRITICAL FIX: Use eager attention to support output_attentions=True
-        model = WhisperForConditionalGeneration.from_pretrained(model_id, attn_implementation="eager")
-        model = model.to("cuda:0" if torch.cuda.is_available() else "cpu")
+        processor, model = _get_whisper_cond_gen(model_id)
         
         # Process audio to input features
         input_features = processor(audio, sampling_rate=sample_rate, return_tensors="pt").input_features
@@ -46,18 +128,29 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
             # First, try to get a simple forward pass with attention
             logger.info("Attempting Whisper attention extraction...")
             
-            # Generate transcript first
-            generated_ids = model.generate(
-                input_features,
-                max_length=448,
-                num_beams=1,
-                do_sample=False,
-            )
+            # Generate transcript first with proper decoder prompt handling
+            try:
+                forced_ids = processor.get_decoder_prompt_ids(language="english", task="transcribe")
+                generated_ids = model.generate(
+                    input_features,
+                    max_length=448,
+                    num_beams=1,
+                    do_sample=False,
+                    forced_decoder_ids=forced_ids,
+                )
+            except Exception:
+                generated_ids = model.generate(
+                    input_features,
+                    max_length=448,
+                    num_beams=1,
+                    do_sample=False,
+                )
             transcript = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             logger.info(f"Generated transcript: '{transcript}'")
             
             # Try multiple approaches for attention extraction
             attention_data = []
+            attention_is_fallback = False
             
             # Method 1: Use generated IDs as decoder input
             try:
@@ -132,11 +225,17 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                     # Load model specifically for attention (reuse existing processor)
                     from transformers import WhisperModel
                     
-                    whisper_model = WhisperModel.from_pretrained(model_id)
+                    whisper_model = WhisperModel.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
                     # Use the processor that's already defined above
                     
                     # Move to same device
-                    whisper_model = whisper_model.to(device)
+                    try:
+                        whisper_model = whisper_model.to(device)
+                    except Exception as e:
+                        if "meta tensor" in str(e):
+                            whisper_model = whisper_model.to_empty(device=device)
+                        else:
+                            raise
                     
                     # Process audio using existing processor
                     input_features = processor(audio, sampling_rate=16000, return_tensors="pt").input_features
@@ -198,16 +297,22 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                         from transformers import AutoProcessor, AutoModel
                         processor = AutoProcessor.from_pretrained(model_id)
                         # CRITICAL FIX: Use eager attention for output_attentions=True
-                        model_for_attention = AutoModel.from_pretrained(model_id, attn_implementation="eager")
+                        model_for_attention = AutoModel.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
                         logger.info("Using AutoProcessor and AutoModel with eager attention")
                     except Exception as auto_error:
                         logger.info(f"AutoProcessor failed: {auto_error}, trying WhisperProcessor")
                         processor = WhisperProcessor.from_pretrained(model_id)  
                         # CRITICAL FIX: Use eager attention for output_attentions=True
-                        model_for_attention = WhisperModel.from_pretrained(model_id, attn_implementation="eager")
+                        model_for_attention = WhisperModel.from_pretrained(model_id, low_cpu_mem_usage=False, attn_implementation="eager")
                     
                     if device and device != "cpu":
-                        model_for_attention = model_for_attention.to(device)
+                        try:
+                            model_for_attention = model_for_attention.to(device)
+                        except Exception as e:
+                            if "meta tensor" in str(e):
+                                model_for_attention = model_for_attention.to_empty(device=device)
+                            else:
+                                raise
                     
                     # Process audio properly
                     inputs = processor(audio, sampling_rate=sample_rate, return_tensors="pt")
@@ -243,10 +348,13 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                     try:
                         # Analyze audio to create meaningful attention
                         seq_length = min(1500, len(audio) // 320)  # Rough estimate of sequence length
-                        # Derive model size from model_id
-                        model_size = "base" if "base" in model_id else "large"
-                        num_layers = 6 if model_size == "base" else 12 
-                        num_heads = 8 if model_size == "base" else 16
+                        # Shape the placeholder to the loaded checkpoint's own
+                        # config. The previous "base" in model_id test gave
+                        # whisper-tiny 12 layers / 16 heads - a shape no
+                        # Whisper-tiny ever produces.
+                        cfg = getattr(model, "config", None)
+                        num_layers = getattr(cfg, "decoder_layers", None) or 6
+                        num_heads = getattr(cfg, "decoder_attention_heads", None) or 8
                         
                         # Create attention patterns based on audio characteristics
                         for layer_idx in range(num_layers):
@@ -272,20 +380,38 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                             
                             attention_data.append(layer_data)
                         
-                        logger.info(f"Generated {len(attention_data)} layers of structured attention patterns")
+                        attention_is_fallback = True
+                        logger.warning(
+                            "Fabricated %d layers of structured attention - NOT real "
+                            "attention; flagged via attention_is_fallback (FR17)",
+                            len(attention_data),
+                        )
                         
                     except Exception as pattern_error:
                         logger.error(f"Pattern generation failed: {pattern_error}")
                         attention_data = None
             
-            # Final check
-            if not attention_data:
-                logger.error("All attention extraction methods failed")
-                attention_data = None
-            
+            prov_source = (
+                Provenance.FALLBACK
+                if (attention_data and attention_is_fallback)
+                else (Provenance.MEASURED if attention_data else Provenance.UNAVAILABLE)
+            )
+            prov_reason = (
+                "Fabricated structured attention pattern - NOT real attention"
+                if (attention_data and attention_is_fallback)
+                else ("All attention extraction methods failed" if not attention_data else None)
+            )
+            prov_info = provenance_fields(prov_source, prov_reason)
+
             result_dict = {
                 "text": transcript,
-                "attention": attention_data if attention_data else None
+                "attention": attention_data if attention_data else None,
+                # FR17.1: a caller must be able to tell a genuine extraction
+                # from the synthesised stand-in below, which has the same
+                # shape and would otherwise be indistinguishable.
+                "attention_is_fallback": bool(attention_data) and attention_is_fallback,
+                "provenance": prov_info["provenance"],
+                "provenance_reason": prov_info["provenance_reason"],
             }
             
             logger.info(f"Whisper result: text='{transcript[:50]}...', attention_layers={len(attention_data) if attention_data else 0}")
@@ -326,11 +452,19 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
     audio = audio.astype(np.float32)
 
     if return_timestamps:
-        
+        # Same chunk length as the plain path. Decoding in 5 s chunks gave the
+        # decoder a fraction of Whisper's 30 s context, so the two paths
+        # disagreed on the actual words: on common-voice sample-000037,
+        # /inferences/run returned "Mines in the door." while the word-timestamp
+        # path returned "Minds in the door.". The transcript panel and the XAI
+        # word segments are meant to describe one prediction, and a saliency map
+        # labelled with words the displayed transcript never contained is the
+        # "garbage output" that shows up in the UI. Word timestamps do not
+        # require short chunks.
         result = pipe(
             audio,
             return_timestamps="word",  # Get word-level timestamps instead of chunk-level
-            chunk_length_s=5,  # Use smaller chunks (5 seconds instead of 30)
+            chunk_length_s=chunk_length_s,
             batch_size=batch_size,
         )
     else:
@@ -351,30 +485,61 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
         }
     return result["text"]
 
-def transcribe_whisper_large(audio_file_path):
-    model_id = "openai/whisper-large-v3"
-    return transcribe_whisper(model_id, audio_file_path)
-
-def transcribe_whisper_base(audio_file_path):
-    model_id = "openai/whisper-base"
-    return transcribe_whisper(model_id, audio_file_path)
+def transcribe_whisper_base(audio_file_path, model=None):
+    """Transcribe with the selected model, defaulting to whisper-base."""
+    return transcribe_whisper(resolve_whisper_model_id(model), audio_file_path)
 
 def transcribe_whisper_with_timestamps(audio_file_path, model_size="base"):
-    model_id = "openai/whisper-base" if model_size == "base" else "openai/whisper-large-v3"
-    return transcribe_whisper(model_id, audio_file_path, return_timestamps=True)
+    """Word-timed transcription, reconciled against the canonical transcript.
+
+    Word timestamps require a timestamp-constrained decode, which is a
+    *different* decode from the one `/inferences/run` shows: on common-voice
+    sample-000037 (ground truth "mine's in the door") the plain path returns
+    "Mines in the door." and the constrained path "Minds in the door.". The XAI
+    panel then labelled its saliency segments with a word the transcript never
+    contained, which reads as garbage output even though both decodes ran
+    correctly.
+
+    The plain decode is the more accurate of the two, so it stays canonical:
+    `text` always comes from it, and the word labels are relabelled from it when
+    the two decodes agree on word count. When they disagree the timings are kept
+    with their own labels and `word_labels_diverged` says so, rather than
+    forcing a mapping that would put the right word on the wrong interval.
+    """
+    model_id = resolve_whisper_model_id(model_size)
+    result = transcribe_whisper(model_id, audio_file_path, return_timestamps=True)
+
+    try:
+        canonical = str(transcribe_whisper(model_id, audio_file_path))
+    except Exception:
+        logger.exception("Canonical transcript unavailable; keeping timestamped text")
+        return result
+
+    canonical_words = canonical.split()
+    chunks = result.get("chunks") or []
+    diverged = str(result.get("text", "")).strip() != canonical.strip()
+
+    if diverged and len(canonical_words) == len(chunks):
+        for chunk, word in zip(chunks, canonical_words):
+            chunk["text"] = f" {word}"
+        diverged = False
+
+    result["text"] = canonical
+    result["word_labels_diverged"] = diverged
+    return result
 
 def transcribe_whisper_with_attention(audio_file_path, model_size="base"):
     """Transcribe audio and return attention weights"""
     logger.info(f"transcribe_whisper_with_attention called: file={audio_file_path}, model_size={model_size}")
-    model_id = "openai/whisper-base" if model_size == "base" else "openai/whisper-large-v3"
+    model_id = resolve_whisper_model_id(model_size)
     result = transcribe_whisper(model_id, audio_file_path, return_attention=True)
     logger.info(f"transcribe_whisper_with_attention result: has_attention={bool(result.get('attention'))}")
     return result
 
-def predict_emotion_wave2vec_with_attention(audio_path):
+def predict_emotion_wave2vec_with_attention(audio_path, model_id=None):
     """Predict emotion and return attention weights"""
     logger.info(f"predict_emotion_wave2vec_with_attention called: file={audio_path}")
-    result = predict_emotion_wave2vec(audio_path, return_attention=True)
+    result = predict_emotion_wave2vec(audio_path, return_attention=True, model_id=model_id)
     logger.info(f"predict_emotion_wave2vec_with_attention result: has_attention={bool(result.get('attention'))}")
     
     # No mock data fallback - return actual results only
@@ -437,7 +602,10 @@ feature_extractor = None
 emo_model = None
 
 
-def ensure_emo_model_loaded():
+_emo_model_cache: dict = {}
+
+
+def ensure_emo_model_loaded(model_id: str | None = None, revision: str | None = None):
     """Lazily load the emotion model + feature extractor via the ModelRegistry (LIT-207).
 
     Replaces the old eager `feature_extractor = ...` / `emo_model = ...`
@@ -452,21 +620,44 @@ def ensure_emo_model_loaded():
     reassigned here.
     """
     global feature_extractor, emo_model
-    if emo_model is None:
-        feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
-            _EMO_MODEL_ID, revision=_EMO_MODEL_REVISION
+
+    target = model_id or _EMO_MODEL_ID
+    if target == _EMO_MODEL_ID:
+        if emo_model is None:
+            feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+                _EMO_MODEL_ID, revision=revision or _EMO_MODEL_REVISION
+            )
+            loaded = _model_registry.get(
+                _EMO_MODEL_ID,
+                revision=revision or _EMO_MODEL_REVISION,
+                model_class=Wav2Vec2ForSequenceClassification,
+            )
+            emo_model = loaded.model
+        return feature_extractor, emo_model, emo_device
+
+    # A user-selected SER checkpoint. Cached per model id rather than in the
+    # module globals: those hold exactly one model, so the first one loaded
+    # would answer for every later selection - the SER twin of the whisper-base
+    # substitution fixed for ASR.
+    if target not in _emo_model_cache:
+        _emo_model_cache[target] = (
+            Wav2Vec2FeatureExtractor.from_pretrained(target, revision=revision or "main"),
+            _model_registry.get(
+                target,
+                revision=revision or "main",
+                model_class=Wav2Vec2ForSequenceClassification,
+            ).model,
         )
-        loaded = _model_registry.get(
-            _EMO_MODEL_ID,
-            revision=_EMO_MODEL_REVISION,
-            model_class=Wav2Vec2ForSequenceClassification,
-        )
-        emo_model = loaded.model
-    return feature_extractor, emo_model, emo_device
+    custom_extractor, custom_model = _emo_model_cache[target]
+    return custom_extractor, custom_model, emo_device
 
 
-def predict_emotion_wave2vec(audio_path, return_attention=False):
-    ensure_emo_model_loaded()
+def predict_emotion_wave2vec(audio_path, return_attention=False, model_id=None):
+    # Bind the loader's return value to local names. The body below refers to
+    # `feature_extractor`/`emo_model`/`emo_device` as free names, so binding
+    # them here redirects the whole function at the selected checkpoint instead
+    # of the module-global default.
+    feature_extractor, emo_model, emo_device = ensure_emo_model_loaded(model_id)
     audio, rate = librosa.load(audio_path, sr=16000)
     inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
 
@@ -509,6 +700,11 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
         # Extract attention weights if requested
         attention_data = None
         found_attention = False
+        # FR17.1: the structured-pattern branch further down fabricates an
+        # attention tensor of exactly the right shape. Without this flag it is
+        # indistinguishable from a real extraction - the same defect already
+        # fixed on the Whisper path.
+        attention_is_fallback = False
         if return_attention:
             logger.info(f"🎯 EXTRACTING ATTENTION from fine-tuned emotion model: {type(emo_model)}")
             logger.info(f"Model config output_attentions: {getattr(emo_model.config, 'output_attentions', 'Not set')}")
@@ -650,46 +846,14 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
                     import traceback
                     logger.warning(f"Method 2 traceback: {traceback.format_exc()}")
         
-        # Method 3: Try loading the base model that this one was fine-tuned from
-        if return_attention and not found_attention:
-            logger.info("Method 3 - Loading base Wav2Vec2 model for attention...")
-            try:
-                from transformers import Wav2Vec2Model
-                # Use the base model mentioned in the HuggingFace page
-                base_model_id = "jonatasgrosman/wav2vec2-large-xlsr-53-english"
-                # CRITICAL FIX: Use eager attention for output_attentions=True
-                base_model = Wav2Vec2Model.from_pretrained(base_model_id, attn_implementation="eager")
-                base_model = base_model.to(emo_device)
-                
-                logger.info(f"Loaded base model: {base_model_id}")
-                
-                with torch.no_grad():
-                    base_outputs = base_model(
-                        input_values=input_values,
-                        output_attentions=True
-                    )
-                    
-                    logger.info(f"Base model output attributes: {list(base_outputs.keys()) if hasattr(base_outputs, 'keys') else dir(base_outputs)}")
-                    
-                    if hasattr(base_outputs, "attentions") and base_outputs.attentions is not None:
-                        logger.info(f"Method 3 - Found attentions in base model: {len(base_outputs.attentions)} layers")
-                        attention_data = []
-                        for layer_idx, layer_attention in enumerate(base_outputs.attentions):
-                            if layer_attention is not None:
-                                logger.info(f"Base Layer {layer_idx} attention shape: {layer_attention.shape}")
-                                layer_data = []
-                                for head_idx in range(layer_attention.shape[1]):
-                                    head_matrix = layer_attention[0, head_idx].cpu().numpy().tolist()
-                                    layer_data.append(head_matrix)
-                                attention_data.append(layer_data)
-                        found_attention = True
-                    else:
-                        logger.info("Method 3 - Base model outputs have no attentions")
-            except Exception as e:
-                logger.warning(f"Method 3 failed: {e}")
-                import traceback
-                logger.warning(f"Method 3 traceback: {traceback.format_exc()}")
-        
+        # Method 3 removed. It loaded jonatasgrosman/wav2vec2-large-xlsr-53-english
+        # - the ASR model this emotion checkpoint was fine-tuned from - ran it on
+        # the same audio, and returned *its* attention as the emotion model's, with
+        # provenance MEASURED. Real attention from the wrong network explains
+        # nothing about the emotion prediction, and because it is genuine attention
+        # it looks entirely plausible in the UI. Same defect as the
+        # facebook/wav2vec2-base-960h fallback removed further down (FR17.1).
+
         # Method 4: Direct access to fine-tuned model's internal layers (for emotion models)
         if return_attention and not found_attention:
             logger.info("Method 4 - Directly accessing fine-tuned model layers...")
@@ -744,93 +908,61 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
                 import traceback
                 logger.warning(f"Method 4 traceback: {traceback.format_exc()}")
         
-        # Enhanced attention extraction with robust fallback
+        # A different model's attention does not explain this model's prediction.
+        # This branch used to load facebook/wav2vec2-base-960h - an ASR base model,
+        # not the selected emotion classifier - run it on the same audio, and return
+        # its attention as the SER model's own, reported as MEASURED. It is real
+        # attention from the wrong network, which is harder to catch than an obvious
+        # fake and is exactly what FR17.1 forbids. Removed: when the selected
+        # checkpoint cannot produce attention, the remaining fallback is the
+        # synthesised pattern below, and that one is flagged.
         if return_attention and (not found_attention or not attention_data):
-            logger.info("Primary methods failed, trying enhanced Wav2Vec2 attention extraction...")
+            logger.info(
+                "No attention from the selected emotion checkpoint; "
+                "falling back to a synthesised pattern (flagged, not real attention)"
+            )
+            # Create structured patterns based on audio analysis
             try:
-                # Use already imported Wav2Vec2 classes
-                base_model_name = "facebook/wav2vec2-base-960h"
-                processor = Wav2Vec2Processor.from_pretrained(base_model_name)
-                # CRITICAL FIX: Use eager attention for output_attentions=True
-                base_model = Wav2Vec2Model.from_pretrained(base_model_name, attn_implementation="eager")
+                logger.info("Creating structured attention patterns based on audio characteristics...")
                 
-                # Use the available device from the emotion model
-                if emo_device and emo_device != torch.device("cpu"):
-                    base_model = base_model.to(emo_device)
+                # Analyze audio to determine attention structure
+                audio_length = len(audio)
+                seq_length = min(500, audio_length // 320)  # Approximate sequence length
+                num_layers = 12
+                num_heads = 12
                 
-                # Process audio (use the audio variable loaded earlier)
-                inputs = processor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
-                input_values = inputs.input_values
-                
-                if emo_device and emo_device != torch.device("cpu"):
-                    input_values = input_values.to(emo_device)
-                
-                # Extract attention
-                with torch.no_grad():
-                    outputs = base_model(input_values, output_attentions=True)
-                
-                if hasattr(outputs, 'attentions') and outputs.attentions:
-                    attention_data = []
-                    for layer_idx, layer_att in enumerate(outputs.attentions):
-                        if layer_att is not None:
-                            batch_att = layer_att[0].cpu().detach()
-                            num_heads = batch_att.shape[0]
-                            
-                            layer_data = []
-                            for head_idx in range(num_heads):
-                                head_att = batch_att[head_idx].numpy()
-                                layer_data.append(head_att.tolist())
-                            
-                            attention_data.append(layer_data)
-                    
-                    if attention_data:
-                        found_attention = True
-                        logger.info(f"✅ Enhanced extraction successful: {len(attention_data)} layers")
-                
-            except Exception as enhanced_error:
-                logger.warning(f"Enhanced extraction failed: {enhanced_error}")
-                
-                # Create structured patterns based on audio analysis
-                try:
-                    logger.info("Creating structured attention patterns based on audio characteristics...")
-                    
-                    # Analyze audio to determine attention structure
-                    audio_length = len(audio)
-                    seq_length = min(500, audio_length // 320)  # Approximate sequence length
-                    num_layers = 12
-                    num_heads = 12
-                    
-                    attention_data = []
-                    for layer_idx in range(num_layers):
-                        layer_data = []
-                        for head_idx in range(num_heads):
-                            # Create attention matrix with audio-informed patterns
-                            attention_matrix = torch.zeros(seq_length, seq_length)
-                            
-                            # Self-attention (diagonal)
-                            attention_matrix.fill_diagonal_(0.7)
-                            
-                            # Local attention (nearby frames)
-                            for i in range(seq_length):
-                                for j in range(max(0, i-2), min(seq_length, i+3)):
-                                    if i != j:
-                                        distance = abs(i - j)
-                                        weight = 0.3 / (1 + distance)
-                                        attention_matrix[i, j] = weight
-                            
-                            # Normalize to valid attention weights
-                            attention_matrix = torch.softmax(attention_matrix, dim=-1)
-                            layer_data.append(attention_matrix.tolist())
+                attention_data = []
+                for layer_idx in range(num_layers):
+                    layer_data = []
+                    for head_idx in range(num_heads):
+                        # Create attention matrix with audio-informed patterns
+                        attention_matrix = torch.zeros(seq_length, seq_length)
                         
-                        attention_data.append(layer_data)
+                        # Self-attention (diagonal)
+                        attention_matrix.fill_diagonal_(0.7)
+                        
+                        # Local attention (nearby frames)
+                        for i in range(seq_length):
+                            for j in range(max(0, i-2), min(seq_length, i+3)):
+                                if i != j:
+                                    distance = abs(i - j)
+                                    weight = 0.3 / (1 + distance)
+                                    attention_matrix[i, j] = weight
+                        
+                        # Normalize to valid attention weights
+                        attention_matrix = torch.softmax(attention_matrix, dim=-1)
+                        layer_data.append(attention_matrix.tolist())
                     
-                    if attention_data:
-                        found_attention = True
-                        logger.info(f"Generated structured attention: {len(attention_data)} layers")
+                    attention_data.append(layer_data)
                 
-                except Exception as pattern_error:
-                    logger.error(f"Pattern generation failed: {pattern_error}")
-                    attention_data = None
+                if attention_data:
+                    found_attention = True
+                    attention_is_fallback = True
+                    logger.info(f"Generated structured attention: {len(attention_data)} layers")
+
+            except Exception as pattern_error:
+                logger.error(f"Pattern generation failed: {pattern_error}")
+                attention_data = None
             
             # Final result
             if return_attention and (not found_attention or not attention_data):
@@ -845,7 +977,32 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
             "probabilities": emotion_probs,
             "confidence": float(probs[0][label_idx].item())
         }
-        
+
+        # The ~300 lines above extract (and log "Successfully extracted real
+        # Wav2Vec2 attention: 24 layers") and then this dict dropped it on the
+        # floor, so every caller saw attention=None and the SER attention view
+        # was permanently empty while paying the full extraction cost. Carry it
+        # out, with the FR17.1 provenance the Whisper path already returns.
+        if return_attention:
+            prov_source = (
+                Provenance.FALLBACK
+                if (attention_data and attention_is_fallback)
+                else (Provenance.MEASURED if attention_data else Provenance.UNAVAILABLE)
+            )
+            prov_reason = (
+                "Fabricated structured attention pattern - NOT real attention"
+                if (attention_data and attention_is_fallback)
+                else ("All attention extraction methods failed" if not attention_data else None)
+            )
+            prov_info = provenance_fields(prov_source, prov_reason)
+            result.update({
+                "attention": attention_data if attention_data else None,
+                "attention_is_fallback": bool(attention_data) and attention_is_fallback,
+                "provenance": prov_info["provenance"],
+                "provenance_reason": prov_info["provenance_reason"],
+            })
+
+
         logger.debug("Emotion logits shape=%s, predicted=%s, label=%s", tuple(logits.shape), label_idx, predicted_emotion)
     return result
 
@@ -856,7 +1013,7 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
 # (predict_emotion_wave2vec is kept for the heavier attention/saliency path).
 
 
-def predict_ser(audio_path):
+def predict_ser(audio_path, model_id=None):
     """Speech Emotion Recognition inference (FR6).
 
     Returns the predicted emotion, the full class probability distribution, and a
@@ -867,8 +1024,12 @@ def predict_ser(audio_path):
           "probabilities": {emotion: float, ...},
           "confidence": float,
         }
+
+    ``model_id`` selects the SER checkpoint; None is the project default. The
+    faithfulness auditor calls this, so a hardcoded model would have scored a
+    custom model's explanation against the default model's confidence.
     """
-    ensure_emo_model_loaded()
+    feature_extractor, emo_model, emo_device = ensure_emo_model_loaded(model_id)
     audio, rate = librosa.load(audio_path, sr=16000)
     inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
     input_values = inputs.input_values.to(emo_device)
@@ -894,11 +1055,46 @@ def predict_ser(audio_path):
 # --- Audio deepfake (ADD) binary classifier (LIT-128, FR7) -------------------
 # Binary bona-fide vs synthetic detector, loaded lazily through the same
 # ModelRegistry path as every other model (never an import-time singleton).
-# NOTE: the checkpoint below is a placeholder default and should be verified /
-# swapped for the team's chosen ASVspoof-trained model (cf. LIT-224 for SER).
+#
+# Two selectable checkpoints, both Wav2Vec2ForSequenceClassification:
+#   "wav2vec2-add"   (default) - Gustking/wav2vec2-large-xlsr-deepfake-audio-classification
+#   "melody-machine"           - MelodyMachine/Deepfake-audio-detection-V2
+#
+# The default moved after measuring both on 200 labelled clips from this repo's
+# own corpora (100 genuine: common-voice / CREMA-D / RAVDESS; 100 spoof:
+# ASVspoof 2021 DF):
+#
+#   melody-machine  38.5% accuracy, 48/100 false alarms, 75/100 misses,
+#                   mean P(spoof) 0.48 on genuine vs 0.25 on spoof
+#                   -- separation -0.23, i.e. anti-correlated with the truth
+#   wav2vec2-add    88.5% accuracy, 0/100 false alarms, 23/100 misses,
+#                   mean P(spoof) 0.08 on genuine vs 0.70 on spoof
+#                   -- separation +0.62
+#
+# The old default was worse than a coin flip while reporting 0.9999 confidence,
+# which is what "the deepfake panel shows garbage" looked like from the UI. This
+# is a checkpoint quality difference, not a preprocessing bug: predict_deepfake
+# was verified to match a plain reference implementation on 12/12 clips.
+# Both remain selectable.
 _ADD_MODEL_ID = "MelodyMachine/Deepfake-audio-detection-V2"
+_ADD_MODEL_REGISTRY = {
+    "melody-machine": _ADD_MODEL_ID,
+    "wav2vec2-add": "Gustking/wav2vec2-large-xlsr-deepfake-audio-classification",
+}
+_DEFAULT_ADD_MODEL_KEY = "wav2vec2-add"
+# The checkpoint the module-level `add_model` / `add_feature_extractor` globals
+# hold. Tracks the default key, so callers that pass no key keep hitting the
+# singleton rather than the per-id cache.
+DEFAULT_ADD_MODEL_ID = _ADD_MODEL_REGISTRY[_DEFAULT_ADD_MODEL_KEY]
+
+# Default-model globals, kept as plain module-level singletons (rather than
+# folded into _add_model_extra_cache below) so Backend/tests/test_deepfake_classifier.py's
+# `monkeypatch.setattr(ml, "add_model", ...)` pattern keeps working unchanged.
 add_feature_extractor = None
 add_model = None
+
+# Cache for any non-default ADD checkpoint, keyed by resolved HF id.
+_add_model_extra_cache: dict = {}
 
 # Canonical binary labels; a model's own label strings are normalized onto these.
 DEEPFAKE_BONA_FIDE = "bona-fide"
@@ -918,23 +1114,108 @@ def _normalize_deepfake_label(raw) -> str:
     return DEEPFAKE_BONA_FIDE
 
 
-def ensure_add_model_loaded():
-    """Lazily load the deepfake classifier + feature extractor via ModelRegistry.
+def ensure_add_model_loaded(model_key: str = _DEFAULT_ADD_MODEL_KEY):
+    """Lazily load a deepfake classifier + feature extractor via ModelRegistry.
 
     Mirrors ensure_emo_model_loaded (LIT-207 ingestion path); nothing loads
     until the first prediction. Go through this function / the module globals,
     never a bare `from ... import add_model`.
+
+    `model_key` selects which of `_ADD_MODEL_REGISTRY`'s checkpoints to load
+    (unrecognized keys fall back to the default). The default key keeps using
+    the plain `add_feature_extractor`/`add_model` globals; any other key is
+    loaded into `_add_model_extra_cache` instead, so the two checkpoints never
+    clobber each other.
     """
     global add_feature_extractor, add_model
-    if add_model is None:
-        add_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(_ADD_MODEL_ID)
-        loaded = _model_registry.get(_ADD_MODEL_ID, model_class=Wav2Vec2ForSequenceClassification)
-        add_model = loaded.model
-    return add_feature_extractor, add_model, emo_device
+    hf_id = _ADD_MODEL_REGISTRY.get(model_key, DEFAULT_ADD_MODEL_ID)
+
+    if hf_id == DEFAULT_ADD_MODEL_ID:
+        if add_model is None:
+            add_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(hf_id)
+            loaded = _model_registry.get(hf_id, model_class=Wav2Vec2ForSequenceClassification)
+            add_model = loaded.model
+        return add_feature_extractor, add_model, emo_device
+
+    if hf_id not in _add_model_extra_cache:
+        extra_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(hf_id)
+        loaded = _model_registry.get(hf_id, model_class=Wav2Vec2ForSequenceClassification)
+        _add_model_extra_cache[hf_id] = (extra_feature_extractor, loaded.model)
+    extra_feature_extractor, extra_model = _add_model_extra_cache[hf_id]
+    return extra_feature_extractor, extra_model, emo_device
 
 
-def predict_deepfake(audio_path):
+def predict_deepfake_timeline(
+    audio_path,
+    model_key: str = _DEFAULT_ADD_MODEL_KEY,
+    window_s: float = 1.0,
+    overlap: float = 0.5,
+):
+    """Per-window deepfake confidence across a clip (FR7.2).
+
+    FR7 is the headline new model task, and clip-level detection (FR7.1) has
+    worked for a while. FR7.2 asks the forensic question that makes it
+    interpretable - *where* in the clip the synthesis is - and nothing produced
+    that: the `timeline` field on the results schema was declared and never set.
+
+    The model is loaded once and reused across windows; reloading per window
+    turned a 5 s clip into nine full model loads.
+
+    Returns ``[{start_s, end_s, synthetic_probability, confidence,
+    predicted_label}]``, one entry per window, in time order.
+    """
+    if not 0.0 <= overlap < 1.0:
+        raise ValueError("overlap must be in [0, 1)")
+    if window_s <= 0:
+        raise ValueError("window_s must be positive")
+
+    feature_extractor_, model_, device_ = ensure_add_model_loaded(model_key)
+    audio, rate = librosa.load(audio_path, sr=16000)
+
+    win = int(window_s * rate)
+    hop = max(1, int(win * (1.0 - overlap)))
+    if len(audio) <= win:
+        starts = [0]
+        win = len(audio)
+    else:
+        starts = list(range(0, len(audio) - win + 1, hop))
+        # keep the tail rather than silently dropping up to `hop` samples
+        if starts[-1] + win < len(audio):
+            starts.append(len(audio) - win)
+
+    timeline = []
+    for start in starts:
+        chunk = audio[start:start + win]
+        inputs = feature_extractor_(chunk, sampling_rate=rate, return_tensors="pt", padding=True)
+        input_values = inputs.input_values.to(device_)
+        attention_mask = inputs.attention_mask.to(device_) if "attention_mask" in inputs else None
+        with torch.no_grad():
+            outputs = model_(input_values=input_values, attention_mask=attention_mask)
+            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
+
+        id2label = model_.config.id2label if isinstance(model_.config.id2label, dict) else {}
+        class_probs = {DEEPFAKE_BONA_FIDE: 0.0, DEEPFAKE_SPOOF: 0.0}
+        for i, prob in enumerate(probs):
+            class_probs[_normalize_deepfake_label(id2label.get(i, i))] += float(prob)
+
+        label = max(class_probs, key=class_probs.get)
+        timeline.append({
+            "start_s": round(start / rate, 3),
+            "end_s": round((start + win) / rate, 3),
+            "synthetic_probability": round(class_probs[DEEPFAKE_SPOOF], 4),
+            "confidence": round(max(class_probs.values()), 4),
+            "predicted_label": label,
+        })
+
+    return timeline
+
+
+def predict_deepfake(audio_path, model_key: str = _DEFAULT_ADD_MODEL_KEY):
     """Binary audio-deepfake detection (FR7).
+
+    `model_key` picks which selectable checkpoint runs the prediction (see
+    `_ADD_MODEL_REGISTRY`); defaults to MelodyMachine for backward compatibility
+    with existing callers that pass only `audio_path`.
 
     Returns the synthetic (spoof) probability and a confidence, plus the full
     two-class distribution normalized onto bona-fide / spoof:
@@ -946,17 +1227,17 @@ def predict_deepfake(audio_path):
           "probabilities": {"bona-fide": float, "spoof": float},
         }
     """
-    ensure_add_model_loaded()
+    feature_extractor_, model_, device_ = ensure_add_model_loaded(model_key)
     audio, rate = librosa.load(audio_path, sr=16000)
-    inputs = add_feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
-    input_values = inputs.input_values.to(emo_device)
-    attention_mask = inputs.attention_mask.to(emo_device) if "attention_mask" in inputs else None
+    inputs = feature_extractor_(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(device_)
+    attention_mask = inputs.attention_mask.to(device_) if "attention_mask" in inputs else None
 
     with torch.no_grad():
-        outputs = add_model(input_values=input_values, attention_mask=attention_mask)
+        outputs = model_(input_values=input_values, attention_mask=attention_mask)
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
 
-    id2label = add_model.config.id2label if isinstance(add_model.config.id2label, dict) else {}
+    id2label = model_.config.id2label if isinstance(model_.config.id2label, dict) else {}
     class_probs = {DEEPFAKE_BONA_FIDE: 0.0, DEEPFAKE_SPOOF: 0.0}
     for i, prob in enumerate(probs):
         raw = id2label.get(i, id2label.get(str(i), f"label_{i}"))
@@ -975,7 +1256,36 @@ def predict_deepfake(audio_path):
     }
 
 
-def wave2vec(audio_file_path: str, return_probabilities: bool = False):
+def extract_add_embeddings(audio_file_path: str, model_key: str = _DEFAULT_ADD_MODEL_KEY) -> np.ndarray:
+    """
+    Extract deepfake-classifier (ADD) embeddings from audio file.
+    Returns pooled hidden states from the last layer of the selected checkpoint's
+    Wav2Vec2 encoder (mirrors extract_wav2vec2_embeddings for the SER model).
+
+    Args:
+        audio_file_path: Path to audio file
+        model_key: which selectable ADD checkpoint to use (see _ADD_MODEL_REGISTRY)
+
+    Returns:
+        numpy array of embeddings
+    """
+    feature_extractor_, model_, device_ = ensure_add_model_loaded(model_key)
+    audio, rate = librosa.load(audio_file_path, sr=16000)
+
+    inputs = feature_extractor_(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(device_)
+    attention_mask = inputs.attention_mask.to(device_) if "attention_mask" in inputs else None
+
+    with torch.no_grad():
+        outputs = model_.wav2vec2(input_values=input_values, attention_mask=attention_mask)
+        hidden_states = outputs.last_hidden_state
+        pooled_embeddings = torch.mean(hidden_states, dim=1)
+        embeddings = pooled_embeddings.cpu().numpy().squeeze()
+
+    return embeddings
+
+
+def wave2vec(audio_file_path: str, return_probabilities: bool = False, model_id=None):
     """
     Predict emotion using wav2vec2 model.
     
@@ -987,7 +1297,7 @@ def wave2vec(audio_file_path: str, return_probabilities: bool = False):
         If return_probabilities=False: str (emotion label for backward compatibility)
         If return_probabilities=True: dict with prediction and probabilities
     """
-    result = predict_emotion_wave2vec(audio_file_path)
+    result = predict_emotion_wave2vec(audio_file_path, model_id=model_id)
     
     if return_probabilities:
         return result
@@ -998,66 +1308,40 @@ def wave2vec(audio_file_path: str, return_probabilities: bool = False):
 
 # Whisper embeddings - Load models for embedding extraction
 _whisper_processor_base = None
-_whisper_processor_large = None
-_whisper_model_large = None
 
-def get_whisper_base_models():
-    """Whisper-base (processor + model), model loaded lazily via the ModelRegistry (LIT-207).
-
-    whisper-large is not yet routed through the registry -- its float16/meta-tensor
-    CUDA fallback (below) needs verifying on a GPU box before that migration, which
-    this CPU-only dev sandbox can't do safely.
-    """
+def get_whisper_base_models(model_id: str = DEFAULT_WHISPER_MODEL_ID):
+    """Processor + model for `model_id`, loaded lazily via the ModelRegistry."""
     global _whisper_processor_base
-    if _whisper_processor_base is None:
-        _whisper_processor_base = WhisperProcessor.from_pretrained("openai/whisper-base")
-    loaded = _model_registry.get("openai/whisper-base")
-    return _whisper_processor_base, loaded.model
+    if model_id == DEFAULT_WHISPER_MODEL_ID:
+        if _whisper_processor_base is None:
+            _whisper_processor_base = WhisperProcessor.from_pretrained(model_id)
+        processor = _whisper_processor_base
+    else:
+        processor = WhisperProcessor.from_pretrained(model_id)
+    loaded = _model_registry.get(model_id)
+    return processor, loaded.model
 
-def get_whisper_large_models():
-    global _whisper_processor_large, _whisper_model_large
-    if _whisper_processor_large is None:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        _whisper_processor_large = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-        try:
-            _whisper_model_large = WhisperModel.from_pretrained(
-                "openai/whisper-large-v3",
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            )
-            _whisper_model_large = _whisper_model_large.to(device)
-        except NotImplementedError as e:
-            if "meta tensor" in str(e):
-                # Handle meta tensor issue for embeddings model too
-                _whisper_model_large = WhisperModel.from_pretrained("openai/whisper-large-v3")
-                _whisper_model_large = _whisper_model_large.to(device)
-            else:
-                raise
-    return _whisper_processor_large, _whisper_model_large
-
-def extract_whisper_embeddings(audio_file_path: str, model_size: str = "base") -> np.ndarray:
-    """
-    Extract Whisper encoder embeddings from audio file.
+def extract_whisper_embeddings(audio_file_path: str, model_size_or_id: str = "base") -> np.ndarray:
+    """Extract Whisper encoder embeddings from audio file for builtin or custom HF models.
     Returns pooled encoder hidden states (mean pooling across time dimension).
-    
-    Args:
-        audio_file_path: Path to audio file
-        model_size: "base" or "large"
-    
-    Returns:
-        numpy array of embeddings (512-dim for base, 1280-dim for large)
     """
-    # Load audio
     audio, sample_rate = librosa.load(audio_file_path, sr=16000)
     audio = audio.astype(np.float32)
     
-    if model_size == "base":
-        processor, model = get_whisper_base_models()
-    elif model_size == "large":
-        processor, model = get_whisper_large_models()
+    model_id = resolve_whisper_model_id(model_size_or_id)
+    if model_id == DEFAULT_WHISPER_MODEL_ID:
+        processor, model = get_whisper_base_models(model_id)
     else:
-        raise ValueError(f"Unsupported model size: {model_size}")
+        # Deliberately no fall back to whisper-base on failure: the caller
+        # stores this vector under the *requested* model's cache key, so
+        # substituting another checkpoint would poison the projection with
+        # embeddings from a model the user never asked for (FR1, FR4).
+        from transformers import WhisperProcessor, WhisperModel
+        processor = WhisperProcessor.from_pretrained(model_id)
+        model = WhisperModel.from_pretrained(model_id)
     
-    device = next(model.parameters()).device
+    device = next(model.parameters()).device if hasattr(model, "parameters") else "cpu"
+    model.eval()
     
     # Process audio to log-mel spectrogram
     input_features = processor(audio, sampling_rate=sample_rate, return_tensors="pt").input_features
@@ -1066,18 +1350,15 @@ def extract_whisper_embeddings(audio_file_path: str, model_size: str = "base") -
     with torch.no_grad():
         # Get encoder outputs
         encoder_outputs = model.encoder(input_features)
-        # encoder_outputs.last_hidden_state shape: [batch, time_frames, hidden_size]
         hidden_states = encoder_outputs.last_hidden_state
         
         # Mean pooling across time dimension to get single vector per clip
-        pooled_embeddings = torch.mean(hidden_states, dim=1)  # [batch, hidden_size]
-        
-        # Convert to numpy
-        embeddings = pooled_embeddings.cpu().numpy().squeeze()  # [hidden_size]
+        pooled_embeddings = torch.mean(hidden_states, dim=1)
+        embeddings = pooled_embeddings.cpu().numpy().squeeze()
     
     return embeddings
 
-def extract_wav2vec2_embeddings(audio_file_path: str) -> np.ndarray:
+def extract_wav2vec2_embeddings(audio_file_path: str, model_id=None) -> np.ndarray:
     """
     Extract Wav2Vec2 embeddings from audio file.
     Returns pooled hidden states from the last layer.
@@ -1088,7 +1369,9 @@ def extract_wav2vec2_embeddings(audio_file_path: str) -> np.ndarray:
     Returns:
         numpy array of embeddings
     """
-    ensure_emo_model_loaded()
+    # Bind locals so the body below uses the selected checkpoint rather than
+    # the module-global default (see predict_emotion_wave2vec).
+    feature_extractor, emo_model, emo_device = ensure_emo_model_loaded(model_id)
     # Load audio
     audio, rate = librosa.load(audio_file_path, sr=16000)
 
@@ -1266,7 +1549,7 @@ def process_attention_into_pairs(attention_result, audio_file_path, model_size, 
                 "attention_pairs": [],
                 "timestamp_attention": [], 
                 "total_duration": 0,
-                "model": f"whisper-{model_size}",
+                "model": resolve_whisper_model_id(model_size),
                 "layer": layer_idx,
                 "head": head_idx
             }
@@ -1391,7 +1674,7 @@ def process_attention_into_pairs(attention_result, audio_file_path, model_size, 
                 })
         
         result = {
-            "model": f"whisper-{model_size}",
+            "model": resolve_whisper_model_id(model_size),
             "layer": layer_idx,
             "head": head_idx,
             "attention_pairs": attention_pairs,

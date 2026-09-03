@@ -7,17 +7,22 @@ corpora are downloaded, so these run fast and offline.
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 import soundfile as sf
 
+from app.infrastructure import dataset_ingestion
 from app.infrastructure.dataset_ingestion import (
     CORPUS_REGISTRY,
     ColumnMap,
     CommonVoiceLoader,
+    CorpusSpec,
     CsvCatalogLoader,
+    ESDLoader,
+    EMOTION_LABELS,
     TARGET_SAMPLE_RATE,
     TaskFamily,
     get_corpus_spec,
@@ -152,6 +157,146 @@ class TestSubsample:
             catalog_corpus.subsample(-1)
 
 
+class TestIntegrityValidation:
+    """FR2.1 — file integrity checking (LIT-237)."""
+
+    def test_all_real_clips_pass_deep_check(self, catalog_corpus):
+        for sample in catalog_corpus.iter_metadata():
+            report = catalog_corpus.check_integrity(sample, deep=True)
+            assert report.ok is True
+            assert report.reason is None
+
+    def test_missing_file_is_rejected(self, catalog_corpus, tmp_path: Path):
+        sample = next(iter(catalog_corpus))
+        ghost = replace(sample, audio_path=tmp_path / "does-not-exist.wav")
+        report = catalog_corpus.check_integrity(ghost, deep=True)
+        assert report.ok is False
+        assert report.reason == "missing"
+
+    def test_shallow_check_skips_decode(self, catalog_corpus, tmp_path: Path):
+        # A corrupt (non-audio) file that exists still passes deep=False,
+        # since the cheap listing-path check is existence-only by design.
+        bogus = tmp_path / "bogus.wav"
+        bogus.write_bytes(b"not audio")
+        sample = replace(next(iter(catalog_corpus)), audio_path=bogus)
+        assert catalog_corpus.check_integrity(sample, deep=False).ok is True
+        assert catalog_corpus.check_integrity(sample, deep=True).ok is False
+
+    def test_undecodable_file_is_rejected_deep(self, catalog_corpus, tmp_path: Path):
+        bogus = tmp_path / "bogus.wav"
+        bogus.write_bytes(b"not audio")
+        sample = replace(next(iter(catalog_corpus)), audio_path=bogus)
+        report = catalog_corpus.check_integrity(sample, deep=True)
+        assert report.ok is False
+        assert report.reason == "undecodable"
+
+    def test_silent_clip_is_rejected_deep(self, catalog_corpus, tmp_path: Path):
+        silent = tmp_path / "silent.wav"
+        sf.write(str(silent), np.zeros(16_000, dtype=np.float32), 16_000)
+        sample = replace(next(iter(catalog_corpus)), audio_path=silent)
+        report = catalog_corpus.check_integrity(sample, deep=True)
+        assert report.ok is False
+        assert report.reason == "silent"
+
+    def test_validated_stream_excludes_rejects_and_reports_them(self, catalog_corpus, tmp_path: Path):
+        # Monkeypatch one sample's path to a missing file by wrapping iter_metadata.
+        original_iter = catalog_corpus.iter_metadata
+
+        def _iter_with_one_missing():
+            for i, meta in enumerate(original_iter()):
+                if i == 2:
+                    yield replace(meta, audio_path=tmp_path / "ghost.wav")
+                else:
+                    yield meta
+
+        catalog_corpus.iter_metadata = _iter_with_one_missing
+        rejects = []
+        kept = list(catalog_corpus.validated_stream(deep=False, on_reject=rejects.append))
+        assert len(kept) == 4
+        assert len(rejects) == 1
+        assert rejects[0].reason == "missing"
+
+    def test_validated_stream_limit_counts_accepted_not_examined(self, catalog_corpus, tmp_path: Path):
+        original_iter = catalog_corpus.iter_metadata
+
+        def _iter_with_first_missing():
+            for i, meta in enumerate(original_iter()):
+                if i == 0:
+                    yield replace(meta, audio_path=tmp_path / "ghost.wav")
+                else:
+                    yield meta
+
+        catalog_corpus.iter_metadata = _iter_with_first_missing
+        kept = list(catalog_corpus.validated_stream(limit=2, deep=False))
+        assert len(kept) == 2
+        assert all(s.audio_path.exists() for s in kept)
+
+
+class TestLicenseNotice:
+    """FR2.3 / SAD C5 — licence notice on load for non-commercial corpora."""
+
+    def test_non_commercial_corpora_matches_fr23(self):
+        assert dataset_ingestion.NON_COMMERCIAL_CORPORA == {
+            "ravdess", "l2-arctic", "esd", "asvspoof-2021",
+        }
+
+    def test_notice_logged_once_for_non_commercial_corpus(self, catalog_corpus, caplog):
+        catalog_corpus.name = "ravdess"  # pretend this fixture is a non-commercial corpus
+        with caplog.at_level("WARNING"):
+            list(catalog_corpus.iter_metadata())
+            list(catalog_corpus.iter_metadata())
+        assert caplog.text.count("non-commercial") == 1
+
+    def test_no_notice_for_commercial_corpus(self, catalog_corpus, caplog):
+        assert catalog_corpus.name == "fixture-asr"
+        with caplog.at_level("WARNING"):
+            list(catalog_corpus.iter_metadata())
+        assert "non-commercial" not in caplog.text
+
+
+class TestFootprintAndAvailability:
+    """FR2.2 footprint measurement + the corpus-availability probe (LIT-237)."""
+
+    def test_measure_footprint_sums_bytes_per_subdirectory(self, tmp_path: Path):
+        (tmp_path / "corpus-a").mkdir()
+        (tmp_path / "corpus-a" / "f1.wav").write_bytes(b"x" * 100)
+        (tmp_path / "corpus-a" / "f2.wav").write_bytes(b"x" * 50)
+        (tmp_path / "corpus-b").mkdir()
+        (tmp_path / "corpus-b" / "f1.wav").write_bytes(b"x" * 10)
+        (tmp_path / "not-a-dir.txt").write_bytes(b"ignored")
+
+        usage = dataset_ingestion.measure_footprint(tmp_path)
+        assert usage == {"corpus-a": 150, "corpus-b": 10}
+
+    def test_measure_footprint_missing_dir_returns_empty(self, tmp_path: Path):
+        assert dataset_ingestion.measure_footprint(tmp_path / "nope") == {}
+
+    def test_is_corpus_available_true_when_data_present(self, catalog_corpus, monkeypatch):
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: catalog_corpus)
+        assert dataset_ingestion.is_corpus_available("fixture-asr") is True
+
+    def test_is_corpus_available_false_when_data_missing(self, tmp_path: Path, monkeypatch):
+        empty_loader = CsvCatalogLoader(
+            name="empty",
+            task_family=TaskFamily.ASR,
+            catalog_path=tmp_path / "missing.csv",
+            audio_base_dir=tmp_path,
+            column_map=ColumnMap(),
+        )
+        monkeypatch.setattr(dataset_ingestion, "get_loader", lambda name, **kw: empty_loader)
+        assert dataset_ingestion.is_corpus_available("empty") is False
+
+    def test_is_corpus_available_false_for_unknown_corpus(self):
+        assert dataset_ingestion.is_corpus_available("not-a-real-corpus") is False
+
+    def test_is_corpus_available_false_for_unwired_corpus(self, monkeypatch):
+        def _raise(name, **kw):
+            raise NotImplementedError(f"No loader registered for corpus '{name}' yet")
+
+        monkeypatch.setattr(dataset_ingestion, "get_loader", _raise)
+        assert dataset_ingestion.is_corpus_available("esd") is False
+
+
 class TestCorpusRegistry:
     def test_seven_approved_corpora_registered(self):
         names = list_supported_corpora()
@@ -177,16 +322,19 @@ class TestCorpusRegistry:
         with pytest.raises(ValueError):
             get_corpus_spec("not-a-corpus")
 
-    def test_pending_loader_raises_with_owner_issue(self):
-        # Concrete loaders not yet contributed must signal that honestly.
-        # Pick a still-pending corpus dynamically so this test survives each new
-        # loader landing (rather than hardcoding a name every PR has to update).
-        pending = [n for n, s in CORPUS_REGISTRY.items() if s.loader_factory is None]
-        assert pending, "expected at least one not-yet-implemented loader"
-        name = pending[0]
+    def test_pending_loader_raises_with_owner_issue(self, monkeypatch):
+        # Concrete loaders not yet contributed must signal that honestly. All
+        # seven approved corpora currently have a loader (LIT-236 was the
+        # last), so there's no naturally-pending entry left to pick dynamically
+        # -- inject a synthetic one instead of losing coverage of this path.
+        monkeypatch.setitem(
+            CORPUS_REGISTRY,
+            "fake-pending",
+            CorpusSpec("fake-pending", TaskFamily.ASR, "n/a", owner_issue="LIT-000"),
+        )
         with pytest.raises(NotImplementedError) as exc:
-            get_loader(name)
-        assert CORPUS_REGISTRY[name].owner_issue in str(exc.value)
+            get_loader("fake-pending")
+        assert "LIT-000" in str(exc.value)
 
 
 def _write_cv_catalog(tmp_path: Path, *, columns: str = "processed") -> tuple[Path, Path]:
@@ -268,4 +416,99 @@ class TestCommonVoiceLoader:
         assert first.dataset == "common-voice"
         assert first.label  # every validated CV clip has a transcript
         audio, sr = loader.load_sample_audio(first)
+        assert sr == TARGET_SAMPLE_RATE and audio.ndim == 1
+
+
+def _write_esd_catalog(tmp_path: Path, *, with_bom: bool = True) -> tuple[Path, Path]:
+    """Write a tiny ESD-shaped catalog + clips, mirroring the real corpus's
+    ``filename,sample_id,speaker_id,emotion,emotion_cn,transcription,dataset``
+    schema. ``with_bom=True`` reproduces the real catalog's UTF-8 BOM on the
+    header row (LIT-236) so the encoding fix is actually exercised.
+    """
+    audio_dir = tmp_path / "esd"
+    audio_dir.mkdir()
+    raw_emotions = ["Angry", "Happy", "Neutral", "Sad", "Surprise"]
+    rows = []
+    for i, emotion in enumerate(raw_emotions):
+        fname = f"000{i}_0001{i}.wav"
+        _write_tone(audio_dir / fname, sr=16_000, seconds=0.25)
+        rows.append(
+            {
+                "filename": fname,
+                "sample_id": fname.removesuffix(".wav"),
+                "speaker_id": f"000{i}",
+                "emotion": emotion,
+                "emotion_cn": emotion,
+                "transcription": f"sample sentence {i}",
+                "dataset": "ESD",
+            }
+        )
+    catalog = audio_dir / "esd_test_metadata.csv"
+    encoding = "utf-8-sig" if with_bom else "utf-8"
+    with catalog.open("w", newline="", encoding=encoding) as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    return catalog, audio_dir
+
+
+class TestESDLoader:
+    def test_bom_prefixed_catalog_still_resolves_every_row(self, tmp_path: Path):
+        # This is the LIT-236 bug: CsvCatalogLoader's old hardcoded
+        # encoding="utf-8" merges the BOM into the first column name, so
+        # every row silently fails to resolve a filename and gets skipped.
+        catalog, audio_dir = _write_esd_catalog(tmp_path, with_bom=True)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        samples = list(loader)
+        assert len(samples) == 5
+        assert all(s.audio_path.exists() for s in samples)
+
+    def test_plain_utf8_catalog_also_resolves(self, tmp_path: Path):
+        # utf-8-sig is a strict superset of utf-8 -- a catalog without a BOM
+        # must keep working too.
+        catalog, audio_dir = _write_esd_catalog(tmp_path, with_bom=False)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        assert len(list(loader)) == 5
+
+    def test_emotion_labels_normalize_onto_canonical_vocabulary(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        labels = {s.label for s in loader}
+        # Raw catalog values are Title case and say "Surprise"; every label
+        # produced must already match the classifier's own vocabulary.
+        assert labels == {"angry", "happy", "neutral", "sad", "surprised"}
+        assert labels <= set(EMOTION_LABELS)
+
+    def test_task_family_and_license(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        first = next(iter(loader))
+        assert loader.task_family is TaskFamily.SER
+        assert first.license == "Research-only"
+
+    def test_load_audio_is_16k_mono(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = ESDLoader(catalog_path=catalog, audio_base_dir=audio_dir)
+        audio, sr = loader.load_sample_audio(next(iter(loader)))
+        assert sr == TARGET_SAMPLE_RATE
+        assert audio.ndim == 1 and audio.dtype == np.float32
+
+    def test_registry_get_loader_returns_esd_loader(self, tmp_path: Path):
+        catalog, audio_dir = _write_esd_catalog(tmp_path)
+        loader = get_loader("esd", catalog_path=catalog, audio_base_dir=audio_dir)
+        assert isinstance(loader, ESDLoader)
+        assert len(list(loader)) == 5
+
+    @pytest.mark.skipif(
+        not ESDLoader.DEFAULT_CATALOG.exists(),
+        reason="real ESD data not provisioned (Backend/data/ is gitignored)",
+    )
+    def test_real_catalog_loads_when_present(self):
+        loader = ESDLoader()
+        samples = list(loader.stream(limit=5))
+        assert samples
+        for s in samples:
+            assert s.label in EMOTION_LABELS
+            assert s.audio_path.exists()
+        audio, sr = loader.load_sample_audio(samples[0])
         assert sr == TARGET_SAMPLE_RATE and audio.ndim == 1

@@ -7,7 +7,6 @@ import uuid
 import librosa
 import soundfile as sf
 import requests
-from app.orchestration.inference_service import run_inference, extract_single_embedding
 router = APIRouter()
 
 # Ensure uploads directory exists
@@ -57,19 +56,17 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
 
         
 
-        try:
-            prediction = await run_inference(model, str(file_path))
-            
-        except Exception as e:
-            print("Prediction API failed:", e)
-            prediction = {}
-        
-        # Generate embeddings for the uploaded file
-        try:
-            embedding_result = await extract_single_embedding(model, file_path=str(file_path))
-            print(f"Generated embeddings for {file.filename}")
-        except Exception as e:
-            print(f"Embedding generation failed for {file.filename}:", e)
+        # FR3.2 / SAD §3.6.2: no model inference on the request path. This route
+        # used to await a full forward pass and an embedding extraction before
+        # responding, which made upload latency a function of model speed and
+        # made it the most visible violation of the async architecture the SAD
+        # describes.
+        #
+        # Nothing is lost: the client dispatches the real multi-task job to
+        # POST /api/inference/multitask immediately after upload and follows it
+        # over the WebSocket channel, and embeddings are computed on demand by
+        # POST /inferences/embeddings. `prediction` stays in the response shape,
+        # as null, so existing callers keep parsing.
         return JSONResponse(
             status_code=200,
             content={
@@ -80,7 +77,7 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
                 "duration": duration,
                 "sample_rate": sample_rate,
                 "size": file_size,
-                "prediction": prediction
+                "prediction": None
             }
         )
     

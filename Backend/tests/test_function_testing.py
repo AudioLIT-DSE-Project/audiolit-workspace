@@ -306,3 +306,30 @@ class TestDataFlowIntegration:
         # This test would use real models but is skipped by default
         # Can be enabled for full integration testing
         pass
+
+
+class TestUploadDoesNotBlockOnInference:
+    """FR3.2 — the web tier never runs a forward pass on the request path."""
+
+    @pytest.mark.asyncio
+    async def test_upload_route_runs_no_model(self, client, sample_audio_file, monkeypatch):
+        import app.orchestration.inference_service as isvc
+
+        called = []
+        monkeypatch.setattr(isvc, "run_inference",
+                            lambda *a, **k: called.append("run_inference"))
+        monkeypatch.setattr(isvc, "extract_single_embedding",
+                            lambda *a, **k: called.append("embedding"))
+
+        with open(sample_audio_file, "rb") as fh:
+            r = await client.post(
+                "/upload",
+                files={"file": ("clip.wav", fh, "audio/wav")},
+                data={"model": "whisper-base"},
+            )
+
+        assert r.status_code == 200, r.text
+        assert called == [], f"upload ran inference on the request path: {called}"
+        # the shape callers parse is unchanged
+        for key in ("file_path", "file_id", "duration", "sample_rate", "prediction"):
+            assert key in r.json()

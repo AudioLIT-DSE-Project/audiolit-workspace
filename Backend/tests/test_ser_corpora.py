@@ -101,6 +101,14 @@ class TestCremaD:
         with pytest.raises(FileNotFoundError):
             list(CremaDLoader(tmp_path / "absent"))
 
+    def test_flat_layout_without_audiowav_subfolder_is_tolerated(self, tmp_path: Path):
+        """Real-world distributions sometimes get extracted flat (LIT-235) -
+        mirrors RavdessLoader's existing flat-layout tolerance."""
+        root = tmp_path / "crema_d_flat"
+        _wav(root / "1001_DFA_ANG_XX.wav")
+        samples = list(CremaDLoader(root))
+        assert [m.label for m in samples] == ["angry"]
+
     def test_audio_is_standardised_to_16k_mono(self, crema_root: Path):
         loader = CremaDLoader(crema_root)
         meta = next(iter(loader))
@@ -196,10 +204,15 @@ class TestRegistryWiring:
         assert isinstance(get_loader("crema-d", root_dir=crema_root), CremaDLoader)
         assert isinstance(get_loader("ravdess", root_dir=ravdess_root), RavdessLoader)
 
-    def test_esd_still_reports_itself_as_unimplemented(self):
-        """Out of LIT-208's scope; must say so rather than return empty data."""
-        with pytest.raises(NotImplementedError, match="LIT-208"):
-            get_loader("esd")
+    def test_esd_now_resolves_through_get_loader(self):
+        """Was out of LIT-208's scope (raised NotImplementedError); LIT-236
+        added the loader. Full ESDLoader behaviour (BOM handling, label
+        normalisation) is covered in test_dataset_ingestion.py's TestESDLoader,
+        not duplicated here -- this just confirms the registry wiring.
+        """
+        from app.infrastructure.dataset_ingestion import ESDLoader
+
+        assert isinstance(get_loader("esd"), ESDLoader)
 
     def test_corpus_list_is_unchanged(self):
         assert set(list_supported_corpora()) == {

@@ -7,7 +7,15 @@ import pytest
 import asyncio
 import json
 import time
-from unittest.mock import patch, Mock
+from unittest.mock import patch
+import fakeredis
+from app.core.redis import cache_manager
+
+# Fixture to mock Redis during API tests so it doesn't fail in CI
+@pytest.fixture(autouse=True)
+def mock_redis():
+    with patch.object(cache_manager, 'client', fakeredis.FakeStrictRedis()) as mock_client:
+        yield mock_client
 
 # Test Basic Cache Operations (Critical Priority)
 class TestResultsCacheBasicOperations:
@@ -321,3 +329,38 @@ class TestResultsCacheOptimization:
             # Verify retrieval works
             get_response = await client.get(f"/results/whisper/size_test_{i}")
             assert get_response.status_code == 200
+
+
+class TestForensicFeatureMapSerialization:
+    """Test deepfake forensic feature map serialization routing (LIT-152, FR3/FR7)."""
+
+    @pytest.mark.asyncio
+    async def test_deepfake_forensic_map_serialization(self, client):
+        """Test storing and retrieving deepfake attributes with verification flags."""
+        deepfake_payload = {
+            "predicted_label": "spoof",
+            "synthetic_probability": 0.94,
+            "confidence": 0.94,
+            "probabilities": {"bona-fide": 0.06, "spoof": 0.94},
+            "timeline": [{"time": 0.0, "synthetic_probability": 0.92}, {"time": 0.1, "synthetic_probability": 0.96}],
+        }
+
+        # Store deepfake result
+        put = await client.post("/results/deepfake/hash_spoof_123", json=deepfake_payload)
+        assert put.status_code == 200
+        assert put.json()["model"] == "deepfake"
+        assert put.json()["audio_hash"] == "hash_spoof_123"
+
+        # Retrieve and verify Pydantic validated forensic_map payload
+        get = await client.get("/results/deepfake/hash_spoof_123")
+        assert get.status_code == 200
+        data = get.json()
+        assert data["cached"] is True
+        assert "forensic_map" in data
+        fmap = data["forensic_map"]
+        assert fmap["predicted_label"] == "spoof"
+        assert fmap["synthetic_probability"] == pytest.approx(0.94)
+        assert fmap["verification_flags"]["spoof_detected"] is True
+        assert fmap["verification_flags"]["authentic"] is False
+        assert len(fmap["timeline"]) == 2
+
