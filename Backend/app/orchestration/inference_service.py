@@ -61,6 +61,39 @@ def _resolve_audio_path(
     )
 
 
+def _embedding_family(model: str) -> str:
+    """Which extractor owns ``model``: ``add`` / ``wav2vec2`` / ``whisper``.
+
+    Routing used to be three substring tests in an if/elif chain, which got two
+    cases wrong. ``wav2vec2-add`` contains "wav2vec", so the deepfake models were
+    handed to the emotion extractor - same 1024 dims, no error, wrong latent
+    space. And a custom SER checkpoint whose name says neither "whisper" nor
+    "wav2vec" (``myorg/custom-ser``) fell through to the *Whisper* extractor,
+    which is how a custom emotion model ended up plotted in Whisper's space.
+
+    The registry knows each model's family, so ask it. Substrings stay as the
+    fast path for the built-in keys and as the fallback when the model is not
+    registered, since guessing beats failing the request outright.
+    """
+    if model in ADD_MODEL_KEYS:
+        return "add"
+
+    lowered = model.lower()
+    if "whisper" in lowered:
+        return "whisper"
+    if "wav2vec" in lowered:
+        return "wav2vec2"
+
+    try:
+        from app.domain.model_registry_service import registry
+        family = getattr(registry.get(model), "family", None)
+        if family in ("whisper", "wav2vec2"):
+            return family
+    except Exception:
+        logger.warning("Could not resolve family for %s; defaulting to whisper", model)
+    return "whisper"
+
+
 async def run_inference(
     model: str,
     file_path: Optional[str] = None,
@@ -176,15 +209,20 @@ async def extract_single_embedding(
         embedding = cached_embeddings.get("embedding")
         logger.info(f"Using cached embeddings for {resolved_path}")
     else:
-        is_whisper = "whisper" in model.lower()
-        is_wav2vec = "wav2vec" in model.lower()
+        family = _embedding_family(model)
 
-        if is_whisper:
-            embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model)
-        elif is_wav2vec or model == "wav2vec2":
-            embedding = await asyncio.to_thread(extract_wav2vec2_embeddings, str(resolved_path))
-        elif model in ADD_MODEL_KEYS:
+        if family == "add":
             embedding = await asyncio.to_thread(extract_add_embeddings, str(resolved_path), model)
+        elif family == "wav2vec2":
+            # Pass the selection through: this call dropped `model`, so a custom
+            # SER checkpoint got the default model's embeddings cached under the
+            # custom model's key (FR1, FR4) - the same substitution already fixed
+            # on the prediction path. "wav2vec2" is the family alias rather than
+            # a hub id, so it stays None and resolves to the default checkpoint.
+            ser_model_id = None if model == "wav2vec2" else model
+            embedding = await asyncio.to_thread(
+                extract_wav2vec2_embeddings, str(resolved_path), ser_model_id
+            )
         else:
             embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model)
 
