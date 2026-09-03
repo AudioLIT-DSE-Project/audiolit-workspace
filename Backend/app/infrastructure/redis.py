@@ -36,8 +36,34 @@ async def put_queue(sid: str, state: dict[str, Any]) -> None:
     await redis.set(k_queue(sid), json.dumps(state), ex=settings.SESSION_TTL_SECONDS)
 
 async def cache_result(model: str, h: str, payload: dict, ttl: int = 6*60*60) -> None:
-    await redis.set(k_result(model, h), json.dumps(payload), ex=ttl)
+    try:
+        await redis.set(k_result(model, h), json.dumps(payload), ex=ttl)
+    except Exception:
+        pass
 
 async def get_result(model: str, h: str) -> dict | None:
-    raw = await redis.get(k_result(model, h))
-    return json.loads(raw) if raw else None
+    try:
+        raw = await redis.get(k_result(model, h))
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+def cache_result_sync(model: str, h: str, payload: dict, ttl: int = 6*60*60) -> None:
+    try:
+        from app.infrastructure.rq_connection import get_redis_connection
+        conn = get_redis_connection()
+        conn.set(k_result(model, h), json.dumps(payload), ex=ttl)
+    except Exception:
+        pass
+
+def get_result_sync(model: str, h: str) -> dict | None:
+    try:
+        from app.infrastructure.rq_connection import get_redis_connection
+        conn = get_redis_connection()
+        raw = conn.get(k_result(model, h))
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+

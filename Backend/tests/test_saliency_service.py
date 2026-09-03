@@ -21,7 +21,62 @@ from app.domain.saliency_service import (
 
 # Mock the model_loader_service to avoid downloading HuggingFace models in CI
 import app.domain.model_loader_service as model_loader_service
+import time
+from app.domain.saliency_service import generate_perturbation_matrix, audio_to_spectrogram
 
+class TestPerturbationMatrixEngine:
+    """Test 2D Spectrogram Patch Segmentation & Perturbation Matrix Engine (SRS FR8)."""
+
+    def test_generate_500_variants_within_duration(self, dummy_audio_file):
+        """Verify DoD: Perturbation routine generates 500 masked variants successfully."""
+        import librosa
+        audio, sr = librosa.load(str(dummy_audio_file), sr=16000)
+        spectrogram = audio_to_spectrogram(audio)
+        
+        start_time = time.time()
+        
+        # Generate 500 variants using zero masking
+        variants = generate_perturbation_matrix(
+            spectrogram=spectrogram,
+            n_patches_freq=8,
+            n_patches_time=8,
+            n_variants=500,
+            perturbation_type="zero",
+            random_state=42
+        )
+        
+        duration = time.time() - start_time
+        
+        # Should return a 3D array: (500, freq_bins, time_bins)
+        assert variants.ndim == 3
+        assert variants.shape[0] == 500
+        assert variants.shape[1] == spectrogram.shape[0]
+        assert variants.shape[2] == spectrogram.shape[1]
+        
+        # The base spectrogram was modified (contains zeros)
+        assert not np.array_equal(variants[0], spectrogram)
+        
+        # DoD: "within expected duration thresholds". 500 variants of a 2s audio 
+        # spectrogram should take less than 2 seconds even on CPU.
+        assert duration < 5.0, f"Perturbation generation took too long: {duration:.2f}s"
+        
+    def test_noise_perturbation_type(self, dummy_audio_file):
+        """Verify noise perturbation applies random values instead of zeros."""
+        import librosa
+        audio, sr = librosa.load(str(dummy_audio_file), sr=16000)
+        spectrogram = audio_to_spectrogram(audio)
+        
+        variants = generate_perturbation_matrix(
+            spectrogram=spectrogram,
+            n_variants=10,
+            perturbation_type="noise",
+            noise_level=0.5,
+            random_state=42
+        )
+        
+        # Check that the variants contain noise (values not strictly zero or original)
+        assert np.any(variants != 0.0)
+        assert not np.array_equal(variants[0], spectrogram)
 class MockFeatureExtractor:
     def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
         class Inputs:
@@ -37,13 +92,18 @@ class MockFeatureExtractor:
 class MockEmoModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear = torch.nn.Linear(16000, 6)
+        self.conv = torch.nn.Conv1d(1, 4, 3, padding=1)
+        self.linear = torch.nn.Linear(16000 * 4, 6)
         self.config = type('obj', (object,), {'id2label': {0: 'neutral', 1: 'happy', 2: 'sad'}})()
 
     def forward(self, input_values, attention_mask=None):
-        x = input_values[:, :16000]
-        if x.shape[-1] < 16000:
-            x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
+        inp = input_values.unsqueeze(1) if input_values.dim() == 2 else input_values
+        conv_out = self.conv(inp)
+        x = conv_out.view(conv_out.shape[0], -1)
+        if x.shape[-1] < 16000 * 4:
+            x = torch.nn.functional.pad(x, (0, 16000 * 4 - x.shape[-1]))
+        else:
+            x = x[:, :16000 * 4]
         logits = self.linear(x)
         
         class MockOutput:
@@ -62,10 +122,26 @@ class MockEmoModel(torch.nn.Module):
 
 @pytest.fixture
 def mock_model_loader(monkeypatch):
-    monkeypatch.setattr(model_loader_service, "feature_extractor", MockFeatureExtractor())
-    monkeypatch.setattr(model_loader_service, "emo_model", MockEmoModel())
     monkeypatch.setattr(model_loader_service, "emo_device", torch.device("cpu"))
-    monkeypatch.setattr(model_loader_service, "ensure_emo_model_loaded", lambda: None)
+    # Returns the (feature_extractor, model, device) triple the callers now bind
+    # locally. The old stub took no arguments and returned None, which only
+    # worked while every caller read the module globals instead of the return
+    # value - the same shape of test double that hid the custom-model
+    # substitution it was standing in for.
+    # Seeded. MockEmoModel's conv/linear weights are randomly initialised, and
+    # Grad-CAM's ReLU zeroes the whole map whenever the weighted feature-map sum
+    # happens to come out negative everywhere - so on some draws Grad-CAM
+    # degrades to the shared energy fallback and matches IG exactly. Unseeded,
+    # that depended on whatever consumed the global RNG earlier in the session,
+    # which is why these passed alone and failed in a full run.
+    torch.manual_seed(0)
+    _fe, _model, _dev = MockFeatureExtractor(), MockEmoModel(), torch.device("cpu")
+    monkeypatch.setattr(model_loader_service, "feature_extractor", _fe)
+    monkeypatch.setattr(model_loader_service, "emo_model", _model)
+    monkeypatch.setattr(
+        model_loader_service, "ensure_emo_model_loaded",
+        lambda model_id=None, revision=None: (_fe, _model, _dev),
+    )
 
 @pytest.fixture
 def dummy_audio_file(tmp_path: Path) -> Path:
@@ -210,3 +286,129 @@ class TestWav2Vec2Saliency:
         
         assert np.max(saliency_matrix) <= 1.0
         assert np.min(saliency_matrix) >= 0.0
+
+
+class TestAddAndGradCamSaliency:
+    """Test ADD model Grad-CAM saliency and fallback contract (FR8.2)."""
+
+    def test_generate_saliency_add_model_gradcam_success(self, monkeypatch, dummy_audio_file):
+        from app.domain.saliency_service import generate_saliency
+
+        class DummyAddModule(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv1d(1, 4, 3, padding=1)
+                self.fc = nn.Linear(4, 2)
+
+            def forward(self, input_values):
+                x = self.conv(input_values)
+                return self.fc(x.mean(dim=-1))
+
+        class DummyFeatureExtractor:
+            def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
+                class Inputs:
+                    def __init__(self, audio):
+                        self.input_values = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+                        if self.input_values.ndim == 2:
+                            self.input_values = self.input_values.unsqueeze(1)
+
+                    def __contains__(self, key):
+                        return key == "input_values"
+
+                return Inputs(audio)
+
+        dummy_model = DummyAddModule()
+        dummy_fe = DummyFeatureExtractor()
+        monkeypatch.setattr(
+            "app.domain.model_loader_service.ensure_add_model_loaded",
+            lambda key: (dummy_fe, dummy_model, "cpu"),
+        )
+
+        res = generate_saliency(str(dummy_audio_file), model="melody-machine", method="gradcam")
+        assert res["model"] == "melody-machine"
+        assert res["method"] == "gradcam"
+        assert res["provenance"] == "measured"
+        assert res["provenance_reason"] is None
+        assert "saliency_matrix" in res
+        assert "base_spectrogram" in res
+
+    def test_generate_saliency_add_model_non_gradcam_raises(self, dummy_audio_file):
+        from app.domain.saliency_service import generate_saliency
+        with pytest.raises(ValueError, match="is not supported for deepfake-detection models"):
+            generate_saliency(str(dummy_audio_file), model="melody-machine", method="ig")
+
+    def test_generate_saliency_no_conv_layer_returns_unavailable(self, monkeypatch, dummy_audio_file):
+        from app.domain.saliency_service import generate_add_gradcam_saliency
+
+        class LinearOnlyModule(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(16000, 2)
+
+            def forward(self, input_values):
+                return self.fc(input_values)
+
+        class DummyFeatureExtractor:
+            def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
+                class Inputs:
+                    def __init__(self, audio):
+                        self.input_values = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+
+                return Inputs(audio)
+
+        monkeypatch.setattr(
+            "app.domain.model_loader_service.ensure_add_model_loaded",
+            lambda key: (DummyFeatureExtractor(), LinearOnlyModule(), "cpu"),
+        )
+
+        res = generate_add_gradcam_saliency(str(dummy_audio_file), model_key="melody-machine")
+        assert res["provenance"] == "unavailable"
+        assert "no Conv1d/Conv2d layer" in res["provenance_reason"]
+
+    def test_gradcam_not_equal_to_ig_for_wav2vec2(self, mock_model_loader, dummy_audio_file):
+        """Two different methods must give two different maps.
+
+        They come out identical whenever *both* degrade to the shared encoder-
+        energy fallback, so check provenance first - otherwise the only symptom
+        is an equality failure that says nothing about the cause.
+        """
+        from app.domain.saliency_service import generate_saliency
+
+        res_gradcam = generate_saliency(str(dummy_audio_file), model="wav2vec2", method="gradcam")
+        res_ig = generate_saliency(str(dummy_audio_file), model="wav2vec2", method="ig")
+
+        for name, res in (("gradcam", res_gradcam), ("ig", res_ig)):
+            assert res["provenance"] == "measured", (
+                f"{name} fell back to the energy map "
+                f"({res.get('provenance_reason')}); both methods then return the "
+                "same series and the comparison below is vacuous"
+            )
+
+        cam_arr = np.array(res_gradcam["series"])
+        ig_arr = np.array(res_ig["series"])
+        assert not np.allclose(cam_arr, ig_arr)
+
+    def test_generate_whisper_saliency_gradcam_end_to_end(self, dummy_audio_file):
+        """End-to-end test for generate_whisper_saliency with method='gradcam'.
+
+        Asserts a non-empty saliency_matrix is returned with MEASURED provenance.
+        """
+        from app.domain.saliency_service import generate_whisper_saliency
+
+        res = generate_whisper_saliency(str(dummy_audio_file), model_size="whisper-base", method="gradcam")
+        assert res["model"] == "openai/whisper-base"
+        assert res["method"] == "gradcam"
+        assert res["provenance"] == "measured"
+        assert res["provenance_reason"] is None
+        assert "saliency_matrix" in res
+        matrix = np.array(res["saliency_matrix"])
+        assert matrix.size > 0
+        assert matrix.shape[0] == 128
+        assert "base_spectrogram" in res
+        base_spect = np.array(res["base_spectrogram"])
+        assert base_spect.size > 0
+        assert base_spect.shape[0] == 128
+        assert res["total_duration"] > 0
+
+
+

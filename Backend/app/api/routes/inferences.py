@@ -19,10 +19,12 @@ from app.domain.model_loader_service import (
     extract_whisper_attention_pairs,
     extract_whisper_embeddings,
     extract_wav2vec2_embeddings,
+    extract_add_embeddings,
 )
-from app.infrastructure.dataset_service import resolve_file
-from app.orchestration.inference_service import run_inference, extract_single_embedding
+from app.infrastructure.dataset_service import resolve_file, load_metadata
+from app.orchestration.inference_service import run_inference, extract_single_embedding, ADD_MODEL_KEYS
 from app.infrastructure.redis import get_result, cache_result
+from app.infrastructure import cache_keys as ck
 from app.api.dependencies import get_session_id
 
 router = APIRouter()
@@ -39,14 +41,28 @@ DATASET_DIRS = {
 logger = logging.getLogger(__name__)
 
 
+@router.post("/inferences/cache/clear")
+async def clear_inference_cache():
+    """Clear all cached prediction & embedding results from Redis."""
+    from app.infrastructure.redis import redis
+    try:
+        keys = await redis.keys("result:*")
+        if keys:
+            await redis.delete(*keys)
+        return {"status": "ok", "deleted_count": len(keys)}
+    except Exception as e:
+        logger.error(f"Failed to clear cache: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/inferences/run")
 async def run_inference_endpoint(
     http_request: Request,
     request: dict = Body(..., example={
         "model": "whisper-base",
         "file_path": "/path/to/audio.wav",
-        "dataset": "common-voice", 
-        "dataset_file": "sample-001.mp3"
+        "dataset": "common-voice",
+        "dataset_file": "sample-001.mp3",
+        "force_refresh": False
     })
 ):
     # Extract parameters from request body
@@ -54,12 +70,17 @@ async def run_inference_endpoint(
     file_path = request.get("file_path")
     dataset = request.get("dataset")
     dataset_file = request.get("dataset_file")
-    
+    # LIT-248: bypasses the cached prediction for the per-row "Regenerate"
+    # button - without this, re-running the same deterministic model on the
+    # same file just hands back the same cached result, which looks like the
+    # button silently did nothing.
+    force_refresh = bool(request.get("force_refresh", False))
+
     if not model:
         raise HTTPException(status_code=400, detail="Model is required")
-    
+
     session_id = get_session_id(http_request)
-    return await run_inference(model, file_path, dataset, dataset_file, session_id)
+    return await run_inference(model, file_path, dataset, dataset_file, session_id, force_refresh=force_refresh)
 
 
 @router.post("/inferences/batch-check")
@@ -96,7 +117,9 @@ async def check_batch_cache(
             # Check cache
             cached_result = await get_result(model, cache_key)
             if cached_result is not None:
-                cached_results[filename] = cached_result.get("prediction", cached_result)
+                cached_results[filename] = ck.as_transcript(
+                    ck.unwrap_prediction(cached_result)
+                )
             else:
                 missing_files.append(filename)
                 
@@ -178,10 +201,7 @@ async def batch_whisper_analysis(request: Request):
                 transcript = None
                 if cached_result is not None:
                     # Extract transcript from cached result
-                    if isinstance(cached_result, dict):
-                        transcript = cached_result.get("prediction", cached_result.get("transcript"))
-                    else:
-                        transcript = cached_result
+                    transcript = ck.as_transcript(ck.unwrap_prediction(cached_result))
                     cached_count += 1
                     logger.info(f"Using cached transcript for {filename}")
                 else:
@@ -284,7 +304,7 @@ async def get_whisper_accuracy(request: Request):
         body = await request.json()
         model = body.get("model", "whisper-base")
         dataset = body.get("dataset")
-        dataset_file = body.get("dataset_file")
+        dataset_file = body.get("dataset_file") or body.get("filename") or body.get("file")
         file_path = body.get("file_path")
         
         if not dataset_file and not file_path:
@@ -302,10 +322,19 @@ async def get_whisper_accuracy(request: Request):
             raise HTTPException(status_code=404, detail="Audio file not found")
         
         # Create cache key and get cached prediction
-        file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-        cache_key = f"{model}_{file_content_hash}"
+        file_path_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
+        file_stat = resolved_path.stat()
+        file_content_hash = hashlib.md5(f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()).hexdigest()
         
-        cached_result = await get_result(model, cache_key)
+        cache_key = f"v2_{model}_{file_path_hash}"
+        cached_result = (
+            await get_result(model, f"v2_{model}_{file_path_hash}") or
+            await get_result(model, f"v2_{model}_{file_content_hash}") or
+            await get_result(model, f"{model}_attention_v2_{file_path_hash}") or
+            await get_result(model, f"{model}_attention_v2_{file_content_hash}") or
+            await get_result(model, f"{model}_{file_path_hash}") or
+            await get_result("predictions", f"v2_{model}_{file_path_hash}")
+        )
         
         if cached_result is None:
             # If not cached, run inference first
@@ -326,11 +355,15 @@ async def get_whisper_accuracy(request: Request):
                 print(f"DEBUG: Failed to run inference: {e}")
                 raise HTTPException(status_code=500, detail=f"Failed to run inference for {dataset_file}: {str(e)}")
         
-        # Extract transcript from cached result
-        if isinstance(cached_result, dict):
-            predicted_transcript = cached_result.get("prediction", cached_result.get("transcript", ""))
-        else:
-            predicted_transcript = str(cached_result)
+        # Extract transcript from cached result.
+        #
+        # Entries written by dataset warmup before the transcript and
+        # attention shapes were separated store `prediction` as a
+        # {"text", "attention"} dict. `as_transcript` flattens any of those
+        # shapes to the plain string the accuracy maths below requires -
+        # without it, clean_text() raises AttributeError on .lower() and the
+        # UI sits on a spinner.
+        predicted_transcript = ck.as_transcript(ck.unwrap_prediction(cached_result))
         
         # Get ground truth from dataset metadata
         ground_truth = ""
@@ -503,7 +536,9 @@ async def batch_wav2vec2_prediction(request: Request):
         body = await request.json()
         filenames = body.get("filenames", [])
         dataset = body.get("dataset")
-        
+        # Selected SER checkpoint; None means the project default.
+        batch_ser_model = body.get("model") or body.get("ser_model")
+
         if not filenames:
             raise HTTPException(status_code=400, detail="No filenames provided")
         
@@ -530,7 +565,8 @@ async def batch_wav2vec2_prediction(request: Request):
                 
                 # Create cache key
                 file_content_hash = hashlib.md5(str(file_path).encode()).hexdigest()
-                cache_key = f"wav2vec2_detailed_{file_content_hash}"
+                _suffix = "" if not batch_ser_model or batch_ser_model == ck.DEFAULT_SER_MODEL else f"_{batch_ser_model}"
+                cache_key = f"wav2vec2_detailed{_suffix}_{file_content_hash}"
                 
                 # Check cache first
                 cached_result = await get_result("wav2vec2", cache_key)
@@ -541,7 +577,9 @@ async def batch_wav2vec2_prediction(request: Request):
                     logger.debug(f"Using cached wav2vec2 result for {filename}")
                 else:
                     # Run model and cache result
-                    result = await asyncio.to_thread(predict_emotion_wave2vec, str(file_path))
+                    result = await asyncio.to_thread(
+                        predict_emotion_wave2vec, str(file_path), False, batch_ser_model
+                    )
                     await cache_result("wav2vec2", cache_key, {"prediction": result}, ttl=6*60*60)
                     cache_stats["misses"] += 1
                     logger.debug(f"Generated and cached wav2vec2 result for {filename}")
@@ -615,7 +653,11 @@ async def get_wav2vec2_detailed_prediction(
     dataset = request.get("dataset")
     dataset_file = request.get("dataset_file")
     include_attention = request.get("include_attention", True)  # Default to True for attention extraction
-    
+    # The selected SER checkpoint. Without it this route always ran the default
+    # model and cached under a model-less key, so picking a custom emotion model
+    # returned the default model's prediction.
+    ser_model = request.get("model") or request.get("ser_model")
+
     session_id = get_session_id(http_request)
     
     # Resolve file path
@@ -638,7 +680,8 @@ async def get_wav2vec2_detailed_prediction(
     
     # Create cache key for detailed predictions (v3 after fixing attention extraction)
     file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-    cache_key = f"wav2vec2_detailed_attention_v3_{file_content_hash}"
+    _suffix = "" if not ser_model or ser_model == ck.DEFAULT_SER_MODEL else f"_{ser_model}"
+    cache_key = f"wav2vec2_detailed_attention_v3{_suffix}_{file_content_hash}"
     
     # Check if result is cached
     cached_result = await get_result("wav2vec2", cache_key)
@@ -662,10 +705,14 @@ async def get_wav2vec2_detailed_prediction(
     try:
         if include_attention:
             # Use the more expensive attention-enabled function
-            detailed_result = await asyncio.to_thread(predict_emotion_wave2vec_with_attention, str(resolved_path))
+            detailed_result = await asyncio.to_thread(
+                predict_emotion_wave2vec_with_attention, str(resolved_path), ser_model
+            )
         else:
             # Use the regular prediction function which is faster
-            detailed_result = await asyncio.to_thread(predict_emotion_wave2vec, str(resolved_path))
+            detailed_result = await asyncio.to_thread(
+                predict_emotion_wave2vec, str(resolved_path), False, ser_model
+            )
             # Ensure the result has the expected structure
             if "attention" not in detailed_result:
                 detailed_result["attention"] = None
@@ -772,14 +819,17 @@ async def extract_embeddings_endpoint(
                 embedding = cached_embeddings.get("embedding")
                 logger.info(f"Using cached embeddings for {filename}")
             else:
-                # Extract embeddings based on model type
-                if model.startswith("whisper"):
-                    model_size = "base" if "base" in model else "large"
-                    embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model_size)
-                elif model == "wav2vec2":
+                is_whisper = "whisper" in model.lower()
+                is_wav2vec = "wav2vec" in model.lower()
+
+                if is_whisper:
+                    embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model)
+                elif is_wav2vec or model == "wav2vec2":
                     embedding = await asyncio.to_thread(extract_wav2vec2_embeddings, str(resolved_path))
+                elif model in ADD_MODEL_KEYS:
+                    embedding = await asyncio.to_thread(extract_add_embeddings, str(resolved_path), model)
                 else:
-                    raise HTTPException(status_code=400, detail=f"Embedding extraction not supported for model: {model}")
+                    embedding = await asyncio.to_thread(extract_whisper_embeddings, str(resolved_path), model)
                 
                 # Cache the embeddings (24 hours TTL since embeddings don't change)
                 await cache_result(model, cache_key, {"embedding": embedding.tolist()}, ttl=24*60*60)
@@ -838,15 +888,97 @@ async def extract_embeddings_endpoint(
     }
     
     if reduced_embeddings is not None:
+        # FR11.3: colour-code by emotion (SER), bona-fide/synthetic (ADD) and
+        # accent/speaker. Labels come from cached model output and corpus
+        # metadata only - `null` where genuinely unknown. The frontend used to
+        # guess emotion from RAVDESS filename conventions and otherwise colour
+        # by scatter quartile, which made every projection look clustered
+        # because the colours WERE the geometry.
+        labels_by_file = await _point_labels(
+            [embeddings_data[i]["filename"] for i in range(len(reduced_embeddings))],
+            dataset, session_id,
+        )
         response["reduced_embeddings"] = [
             {
                 "filename": embeddings_data[i]["filename"],
-                "coordinates": reduced_embeddings[i].tolist()
+                "coordinates": reduced_embeddings[i].tolist(),
+                "labels": labels_by_file.get(embeddings_data[i]["filename"], _EMPTY_LABELS.copy()),
             }
             for i in range(len(reduced_embeddings))
         ]
     
     return response
+
+
+_EMPTY_LABELS = {"emotion": None, "deepfake": None, "accent": None, "speaker": None}
+
+
+async def _point_labels(filenames, dataset, session_id, ser_model=None):
+    """Per-file labels for the latent projection, or None. Never a guess."""
+    from app.infrastructure import cache_keys as ck
+    from app.infrastructure.redis import get_result
+    from app.orchestration.inference_service import ADD_MODEL_KEYS
+
+    out = {}
+    meta_by_name = {}
+    if dataset:
+        try:
+            for row in load_metadata(dataset):
+                name = str(row.get("filename") or "").split("/")[-1].split("\\")[-1]
+                if name:
+                    meta_by_name[name] = row
+        except (FileNotFoundError, ValueError, KeyError) as exc:
+            # Narrow on purpose: a bare `except Exception` here swallowed a
+            # NameError for an unimported load_metadata, and the labels came
+            # back empty with no error anywhere.
+            logger.debug("point labels: no metadata for %s (%s)", dataset, exc)
+
+    for fn in filenames:
+        labels = _EMPTY_LABELS.copy()
+        short = str(fn).split("/")[-1].split("\\")[-1]
+
+        row = meta_by_name.get(short) or {}
+        for key, field in (("accent", "accent"), ("speaker", "speaker"),
+                           ("emotion", "emotion")):
+            val = row.get(field)
+            if val not in (None, "", "unknown"):
+                labels[key] = str(val)
+
+        try:
+            resolved = resolve_file(dataset, fn, session_id) if dataset else Path(fn)
+            hashes = ck.both_hashes(resolved)
+        except Exception:
+            out[fn] = labels
+            continue
+
+        # SER: prefer the model's own prediction over a corpus label.
+        # The selected SER checkpoint if the caller knows it, else the default.
+        # `model` on an embeddings request is the *embedding* model, so it must
+        # not be passed here - that would look for SER results under a Whisper
+        # id and find nothing.
+        for ns, key in ck.ser_keys(hashes, ser_model):
+            hit = await get_result(ns, key)
+            if hit:
+                pred = ck.unwrap_prediction(hit)
+                if isinstance(pred, dict) and pred.get("predicted_emotion"):
+                    labels["emotion"] = pred["predicted_emotion"]
+                break
+
+        for add_model in ADD_MODEL_KEYS:
+            found = False
+            for ns, key in ck.deepfake_keys(add_model, hashes):
+                hit = await get_result(ns, key)
+                if hit:
+                    pred = ck.unwrap_prediction(hit)
+                    if isinstance(pred, dict) and pred.get("predicted_label"):
+                        labels["deepfake"] = pred["predicted_label"]
+                        found = True
+                    break
+            if found:
+                break
+
+        out[fn] = labels
+    return out
 
 
 @router.post("/inferences/embeddings/single")
@@ -1093,8 +1225,7 @@ async def get_whisper_with_attention(
     
     # Get transcription with attention
     try:
-        model_size = "base" if "base" in model else "large"
-        result = await asyncio.to_thread(transcribe_whisper_with_attention, str(resolved_path), model_size)
+        result = await asyncio.to_thread(transcribe_whisper_with_attention, str(resolved_path), model)
         
         # Cache the result
         await cache_result(model, cache_key, {"prediction": result}, ttl=6*60*60)
@@ -1202,7 +1333,7 @@ async def extract_attention_pairs_endpoint(
             return cached_result
         
         # Extract attention pairs using your existing infrastructure
-        model_size = "base" if "base" in model else "large"
+        model_size = model
         
         # Use your existing attention function as base
         attention_result = transcribe_whisper_with_attention(str(resolved_path), model_size)
@@ -1267,3 +1398,64 @@ async def extract_attention_pairs_endpoint(
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Attention extraction failed: {str(e)}")
+
+
+@router.post("/inferences/deepfake-timeline")
+async def deepfake_timeline_endpoint(request: Request):
+    """Windowed deepfake confidence across a clip (FR7.2).
+
+    FR7.1 (clip-level bona-fide/synthetic) has worked for a while. This is the
+    forensic half: *where* in the clip the detector suspects synthesis. The
+    `timeline` field existed on the results schema and was never populated.
+    """
+    from app.infrastructure import cache_keys as ck
+    from app.infrastructure.dataset_service import resolve_audio_reference
+    from app.domain.model_loader_service import predict_deepfake_timeline
+    from app.orchestration.inference_service import ADD_MODEL_KEYS
+
+    body = await request.json()
+    session_id = get_session_id(request)
+    model = body.get("model") or "melody-machine"
+    if model not in ADD_MODEL_KEYS:
+        model = "melody-machine"
+
+    try:
+        resolved_path = resolve_audio_reference(
+            file_path=body.get("file_path"),
+            dataset=body.get("dataset"),
+            dataset_file=body.get("dataset_file"),
+            session_id=session_id,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    window_s = float(body.get("window_s", 1.0))
+    overlap = float(body.get("overlap", 0.5))
+    keys = ck.add_timeline_keys(model, ck.both_hashes(resolved_path))
+
+    if not body.get("no_cache"):
+        for ns, key in keys:
+            hit = await get_result(ns, key)
+            if hit and hit.get("timeline"):
+                return {"model": model, "timeline": hit["timeline"], "cached": True}
+
+    # A windowed scan is ~one model call per window. The panel opens on every
+    # file selection, so its automatic request asks for cache only and a scan is
+    # started explicitly; otherwise browsing a dataset would silently queue ten
+    # forward passes per click.
+    if body.get("cache_only"):
+        return {"model": model, "timeline": None, "cached": False, "needs_scan": True}
+
+    try:
+        timeline = await asyncio.to_thread(
+            predict_deepfake_timeline, str(resolved_path), model, window_s, overlap
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Deepfake timeline failed for %s: %s", resolved_path, e)
+        raise HTTPException(status_code=500, detail=f"Deepfake timeline failed: {e}")
+
+    for ns, key in keys:
+        await cache_result(ns, key, {"timeline": timeline}, ttl=24 * 60 * 60)
+    return {"model": model, "timeline": timeline, "cached": False}

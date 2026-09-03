@@ -15,7 +15,11 @@ interface EmbeddingPlotProps {
   selectedFile?: string | null;
   selectionMode?: 'box' | 'lasso';
   onSelectionChange?: (selectedFiles: string[]) => void;
+  /** Which label drives point colour (FR11.3). Never the filename. */
+  colorBy?: ColorBy;
 }
+
+export type ColorBy = 'emotion' | 'deepfake' | 'accent' | 'speaker';
 
 type PlaneType = 'none' | 'xy' | 'xz' | 'yz';
 
@@ -28,9 +32,10 @@ interface EmbeddingPlotContentProps {
   selectedFile?: string | null;
   selectionMode?: 'box' | 'lasso';
   onSelectionChange?: (selectedFiles: string[]) => void;
+  colorBy?: ColorBy;
 }
 
-const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange }: EmbeddingPlotContentProps) => {
+const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, colorBy = 'emotion' }: EmbeddingPlotContentProps) => {
   const { embeddingData, isLoading, error } = useEmbedding();
   const plotRef = useRef<any>(null);
   const [selectedPlane, setSelectedPlane] = useState<PlaneType>('none');
@@ -46,53 +51,47 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     }
   }, [is3D]);
 
-  // Generate mock data as fallback
-  const generateMockData = () => {
-    const n = 50;
-    const x = [];
-    const y = [];
-    const colors = [];
-    const text = [];
-    
-    for (let i = 0; i < n; i++) {
-      x.push(Math.random() * 20 - 10);
-      y.push(Math.random() * 20 - 10);
-      colors.push(['neutral', 'happy', 'sad', 'angry'][Math.floor(Math.random() * 4)]);
-      text.push(`Sample ${i + 1}`);
-    }
-    
-    return { x, y, colors, text };
-  };
+  const [lassoSelectedFiles, setLassoSelectedFiles] = useState<string[]>([]);
 
   // Handle point selection
   const handlePointClick = useCallback((event: any) => {
     if (event.points && event.points.length > 0) {
       const point = event.points[0];
-      // Use customdata[0] which contains the raw filename (not the HTML-formatted text)
-      const filename = point.customdata[0];
+      const filename = point.customdata
+        ? (Array.isArray(point.customdata) ? point.customdata[0] : point.customdata)
+        : (point.text || point.hovertext || '');
       const coordinates = is3D ? [point.x, point.y, point.z] : [point.x, point.y];
-      
-      if (onPointSelect) {
+
+      if (onPointSelect && filename) {
         onPointSelect(filename, coordinates);
       }
     }
   }, [onPointSelect, is3D]);
 
-  // Handle 2D box/lasso selection
+  // Handle 2D/3D box & lasso selection
   const handleSelection = useCallback((event: any) => {
-    if (!is3D && onSelectionChange && event?.points) {
-      // Use customdata[0] which contains the raw filename (not the HTML-formatted text)
-      const selected = event.points.map((p: any) => p.customdata[0]);
-      onSelectionChange(selected);
+    if (event?.points) {
+      const selected = Array.from(new Set(event.points.map((p: any) => {
+        if (p.customdata) {
+          return Array.isArray(p.customdata) ? p.customdata[0] : p.customdata;
+        }
+        return p.text || p.hovertext || '';
+      }).filter((fn: any) => typeof fn === 'string' && fn.length > 0))) as string[];
+
+      setLassoSelectedFiles(selected);
+      if (onSelectionChange) {
+        onSelectionChange(selected);
+      }
     }
-  }, [is3D, onSelectionChange]);
+  }, [onSelectionChange]);
 
   // Handle deselection
   const handleDeselect = useCallback(() => {
-    if (!is3D && onSelectionChange) {
+    setLassoSelectedFiles([]);
+    if (onSelectionChange) {
       onSelectionChange([]);
     }
-  }, [is3D, onSelectionChange]);
+  }, [onSelectionChange]);
 
   // Use real embedding data if available, otherwise fall back to mock data
   const getPlotData = () => {
@@ -104,56 +103,25 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
         : undefined;
       const text = embeddingData.reduced_embeddings.map(point => point.filename);
       
-      // Enhanced color mapping with spatial clustering
-      const colors = embeddingData.reduced_embeddings.map((point, index) => {
-        const filename = point.filename.toLowerCase();
-        
-        // First try emotion-based coloring from RAVDESS dataset
-        if (filename.includes('01-01') || filename.includes('neutral')) return 'neutral';
-        if (filename.includes('01-03') || filename.includes('happy') || filename.includes('joy')) return 'happy';
-        if (filename.includes('01-04') || filename.includes('sad') || filename.includes('sadness')) return 'sad';
-        if (filename.includes('01-05') || filename.includes('angry') || filename.includes('anger')) return 'angry';
-        if (filename.includes('01-06') || filename.includes('fear') || filename.includes('afraid')) return 'fear';
-        if (filename.includes('01-07') || filename.includes('disgust')) return 'disgust';
-        if (filename.includes('01-08') || filename.includes('surprise')) return 'surprise';
-        if (filename.includes('01-02') || filename.includes('calm')) return 'calm';
-        
-        // For Common Voice or other datasets, use spatial clustering
-        const coords = point.coordinates;
-        if (coords.length >= 2) {
-          const [px, py] = coords;
-          
-          // Calculate quartiles for better spatial distribution
-          const sortedX = x.slice().sort((a, b) => a - b);
-          const sortedY = y.slice().sort((a, b) => a - b);
-          const q1X = sortedX[Math.floor(sortedX.length * 0.25)];
-          const q3X = sortedX[Math.floor(sortedX.length * 0.75)];
-          const q1Y = sortedY[Math.floor(sortedY.length * 0.25)];
-          const q3Y = sortedY[Math.floor(sortedY.length * 0.75)];
-          
-          // Assign colors based on spatial regions
-          if (px > q3X && py > q3Y) return 'region1'; // Top-right
-          if (px < q1X && py > q3Y) return 'region2'; // Top-left
-          if (px < q1X && py < q1Y) return 'region3'; // Bottom-left
-          if (px > q3X && py < q1Y) return 'region4'; // Bottom-right
-          if (px >= q1X && px <= q3X && py >= q1Y && py <= q3Y) return 'center'; // Center
-          if (px >= q1X && px <= q3X) return 'mid_vertical'; // Middle band
-          if (py >= q1Y && py <= q3Y) return 'mid_horizontal'; // Middle band
-        }
-        
-        return 'unknown';
+      // FR11.3: colour is a function of model output or corpus metadata only.
+      // The previous version guessed emotion from RAVDESS filename conventions
+      // and, failing that, coloured by scatter quartile - so every projection
+      // looked clustered because the colours WERE the geometry, and it would
+      // show "structure" on random data. Unknown now renders as unknown.
+      const colors = embeddingData.reduced_embeddings.map((point) => {
+        const labels = (point as { labels?: Record<string, string | null> }).labels;
+        const value = labels ? labels[colorBy] : null;
+        return value ?? 'unlabelled';
       });
-      
+
       return { x, y, z, colors, text };
     }
     
-    const mockData = generateMockData();
-    if (is3D) {
-      // Generate mock Z coordinates
-      const z = mockData.x.map(() => Math.random() * 20 - 10);
-      return { ...mockData, z };
-    }
-    return mockData;
+    // No embeddings: render nothing (FR11 / A2). The previous version returned
+    // 50 random points with random emotion labels, indistinguishable from a
+    // real projection - and in a projection, apparent cluster structure IS the
+    // finding. An empty plot is honest; an invented one is not.
+    return { x: [], y: [], z: [], colors: [], text: [] };
   };
 
   // Create transparent plane surfaces for 3D visualization
@@ -234,10 +202,10 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     // Calculate dot product
     const dotProduct = vector[0] * planeNormal[0] + vector[1] * planeNormal[1] + vector[2] * planeNormal[2];
     
-    // Calculate angle between vector and plane normal (0° = perpendicular to plane, 90° = in plane)
+    // Calculate angle between vector and plane normal (0Â° = perpendicular to plane, 90Â° = in plane)
     const angleToNormal = Math.acos(Math.abs(dotProduct) / vectorMagnitude) * (180 / Math.PI);
     
-    // Convert to angle from plane (90° - angle to normal)
+    // Convert to angle from plane (90Â° - angle to normal)
     return 90 - angleToNormal;
   };
 
@@ -295,8 +263,22 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     return (
       <div className="h-full flex items-center justify-center p-4">
         <div className="text-xs text-red-500 text-center">
-          <div className="font-medium">⚠️ Error loading embeddings</div>
+          <div className="font-medium">Error loading embeddings</div>
           <div className="mt-1">{error}</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (x.length === 0) {
+    return (
+      <div className="h-full flex items-center justify-center p-4">
+        <div className="text-xs text-muted-foreground text-center max-w-xs">
+          <div className="font-medium text-foreground">No embeddings for this selection</div>
+          <div className="mt-1">
+            Run inference on the selected files, or warm the dataset, to populate
+            the latent projection.
+          </div>
         </div>
       </div>
     );
@@ -305,25 +287,45 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Create marker sizes based on selection
   const markerSizes = text.map(filename => {
     if (selectedFile === filename) return 12; // Currently selected file (medium-large)
-    if (selectedByAngle.includes(filename)) return 8; // Angle range selected (medium)
+    if (selectedByAngle.includes(filename) || lassoSelectedFiles.includes(filename)) return 9; // Selected range/lasso
     return 6; // Default (smaller)
   });
 
-  // Create marker colors based on selection
-  const markerColors = text.map(filename => {
+  // Marker colour: selection state first, then the label (FR11.3). Colours
+  // were previously constant blue, so the label mapping never reached the plot
+  // at all - the "colour coding" was invisible even when it was computed.
+  // Colourblind-safe categorical set; `unlabelled` is a deliberate neutral so
+  // unknown reads as unknown rather than as a category.
+  const LABEL_COLOURS: Record<string, string> = {
+    unlabelled: '#9ca3af',
+    neutral: '#6366f1', calm: '#14b8a6', happy: '#f59e0b', sad: '#3b82f6',
+    angry: '#dc2626', fearful: '#7c3aed', fear: '#7c3aed', disgust: '#65a30d',
+    surprised: '#db2777', surprise: '#db2777',
+    'bona-fide': '#059669', bona_fide: '#059669', synthetic: '#dc2626',
+  };
+  const PALETTE = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed',
+                   '#0891b2', '#be185d', '#4d7c0f'];
+  const distinct = Array.from(new Set(colors.filter(c => c !== 'unlabelled')));
+  const colourFor = (label: string) => {
+    if (LABEL_COLOURS[label]) return LABEL_COLOURS[label];
+    const i = distinct.indexOf(label);
+    return i >= 0 ? PALETTE[i % PALETTE.length] : LABEL_COLOURS.unlabelled;
+  };
+
+  const markerColors = text.map((filename, index) => {
     if (selectedFile === filename) return '#FFD700'; // Gold for selected file
     if (selectedByAngle.includes(filename)) return '#ef4444'; // Red for angle selected
-    return '#3b82f6'; // Blue for all other points
+    if (lassoSelectedFiles.includes(filename)) return '#f59e0b'; // Amber for lasso selection
+    return colourFor(colors[index] ?? 'unlabelled');
   });
 
   // Create marker opacities based on selection
-  const hasSelection = selectedFile || selectedByAngle.length > 0;
+  const hasSelection = selectedFile || selectedByAngle.length > 0 || lassoSelectedFiles.length > 0;
   const markerOpacities = text.map(filename => {
     if (!hasSelection) return 0.8; // Default opacity when no selection
     if (selectedFile === filename) return 1.0; // Full opacity for selected file
-    if (selectedByAngle.includes(filename)) return 0.9; // High opacity for angle selected
-    // Different transparency for 2D vs 3D unselected points
-    return is3D ? 0.1 : 0.45; // More transparent in 3D, slightly visible in 2D
+    if (selectedByAngle.includes(filename) || lassoSelectedFiles.includes(filename)) return 0.95;
+    return is3D ? 0.1 : 0.45;
   });
 
   // Create traces array - start with main scatter plot
@@ -337,7 +339,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     if (is3D && selectedPlane !== 'none' && selectedByAngle.includes(filename) && z) {
       const [px, py, pz] = [x[index], y[index], z[index]];
       const angle = calculateAngleToPlane(px, py, pz, selectedPlane);
-      baseText += `<br>Angle: ${angle.toFixed(1)}°`;
+      baseText += `<br>Angle: ${angle.toFixed(1)}Â°`;
       baseText += `<br>Plane: ${selectedPlane.toUpperCase()}`;
     }
     
@@ -495,7 +497,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Add compact annotation
   if (embeddingData) {
     layout.annotations = [{
-      text: `${embeddingData.total_files} files • ${is3D ? '3D' : '2D'}`,
+      text: `${embeddingData.total_files} files â€¢ ${is3D ? '3D' : '2D'}`,
       xref: 'paper',
       yref: 'paper',
       x: 0.02,
@@ -564,12 +566,12 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
                   onChange={(e) => setAngleMax(Number(e.target.value))}
                   className="w-14 h-6 text-xs text-center px-1"
                 />
-                <span className="text-xs text-gray-500">°</span>
+                <span className="text-xs text-gray-500">Â°</span>
               </div>
               
               {selectedByAngle.length > 0 && (
                 <div className="text-[10px] text-red-600 bg-red-50 px-2 py-1 rounded">
-                  🔴 {selectedByAngle.length} points selected
+                  ðŸ”´ {selectedByAngle.length} points selected
                 </div>
               )}
             </div>
@@ -577,9 +579,9 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
           
           {selectedPlane !== 'none' && (
             <div className="text-[10px] text-gray-500 mt-1">
-              {selectedPlane === 'xy' && '🔵 Blue plane: X-Y (Z=0)'}
-              {selectedPlane === 'xz' && '🟢 Green plane: X-Z (Y=0)'}
-              {selectedPlane === 'yz' && '🔴 Red plane: Y-Z (X=0)'}
+              {selectedPlane === 'xy' && 'ðŸ”µ Blue plane: X-Y (Z=0)'}
+              {selectedPlane === 'xz' && 'ðŸŸ¢ Green plane: X-Z (Y=0)'}
+              {selectedPlane === 'yz' && 'ðŸ”´ Red plane: Y-Z (X=0)'}
             </div>
           )}
         </div>
@@ -615,7 +617,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   );
 };
 
-export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange }: EmbeddingPlotProps) => {
+export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, colorBy = 'emotion' }: EmbeddingPlotProps) => {
   return (
     <div className="w-full h-full min-h-0 relative">
       <EmbeddingPlotContent
@@ -626,6 +628,7 @@ export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSel
         selectedFile={selectedFile}
         selectionMode={selectionMode}
         onSelectionChange={onSelectionChange}
+        colorBy={colorBy}
       />
     </div>
   );

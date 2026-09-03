@@ -8,8 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { EmbeddingPlot } from "../visualization/EmbeddingPlot";
-import { ScalarPlot } from "../visualization/ScalarPlot";
+import { EmbeddingPlot, ColorBy } from "../visualization/EmbeddingPlot";
 import { useEmbedding } from "../../contexts/EmbeddingContext";
 import { RefreshCw, Eye, Box, Square, BarChart3, HelpCircle } from "lucide-react";
 import { getFeatureExplanation } from "@/lib/audioFeatures";
@@ -115,6 +114,8 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
   const [reductionMethod, setReductionMethod] = useState("pca");
   const [is3D, setIs3D] = useState(false);
   const [selectionMode, setSelectionMode] = useState<'box' | 'lasso'>('box');
+  // FR11.3: which label drives point colour. Never the filename.
+  const [colorBy, setColorBy] = useState<ColorBy>('emotion');
   const [analysisType, setAnalysisType] = useState<'predictions' | 'common-terms' | 'audio-features'>('audio-features');
   const [selectedByAngle, setSelectedByAngle] = useState<string[]>([]);
   const [selectedPoints2D, setSelectedPoints2D] = useState<string[]>([]);
@@ -396,9 +397,9 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
 
   return (
     <TooltipProvider>
-      <div className="h-full bg-white border-r border-gray-200 flex flex-col">
-        <div className="panel-header p-3 border-b border-gray-200">
-          <h3 className="font-bold text-sm text-gray-800 flex items-center gap-1.5">
+      <div className="h-full bg-card border-r border-border flex flex-col">
+        <div className="panel-header p-3 border-b border-border">
+          <h3 className="font-bold text-sm text-foreground flex items-center gap-1.5">
         Audio Embeddings
         <Tooltip>
           <TooltipTrigger>
@@ -486,7 +487,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               {/* Selection Mode (2D only) */}
               {!is3D && (
               <Select value={selectionMode} onValueChange={(value: 'box' | 'lasso') => setSelectionMode(value)}>
-                <SelectTrigger className="w-20 h-8 text-xs border border-gray-200 rounded-md">
+                <SelectTrigger className="w-20 h-8 text-xs border border-border rounded-md">
                 <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -495,6 +496,19 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                 </SelectContent>
               </Select>
               )}
+
+              {/* Colour by (FR11.3) */}
+              <Select value={colorBy} onValueChange={(v: ColorBy) => setColorBy(v)}>
+                <SelectTrigger className="w-28 h-8 text-xs border border-border rounded-md">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="emotion">Emotion</SelectItem>
+                  <SelectItem value="deepfake">Bona-fide / Synthetic</SelectItem>
+                  <SelectItem value="accent">Accent</SelectItem>
+                  <SelectItem value="speaker">Speaker</SelectItem>
+                </SelectContent>
+              </Select>
 
               {/* Analysis Type */}
               <Select
@@ -507,7 +521,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                 setSelectedPoints2D([]);
               }}
               >
-              <SelectTrigger className="flex-1 h-8 text-xs border border-gray-200 rounded-md">
+              <SelectTrigger className="flex-1 h-8 text-xs border border-border rounded-md">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -559,6 +573,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               selectedFile={selectedFile}
               selectionMode={selectionMode}
               onSelectionChange={handle2DSelectionChange}
+              colorBy={colorBy}
             />
           </div>
 
@@ -680,7 +695,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                                   className="h-1 my-1"
                                 />
                                 <div className="text-xs-tight text-gray-500">
-                                  Mean: {feature.mean.toFixed(3)} • Std: {feature.std.toFixed(3)} • Stability: {feature.stability_score.toFixed(2)}
+                                  Mean: {feature.mean.toFixed(3)} â€¢ Std: {feature.std.toFixed(3)} â€¢ Stability: {feature.stability_score.toFixed(2)}
                                 </div>
                               </div>
                             ))}

@@ -1,7 +1,9 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.0
 redis==5.0.7
+msgpack>=1.0,<2.0
 rq==2.10.0
+lz4>=4.0,<5.0
 pydantic-settings==2.3.4
 httpx==0.27.0
 pytest==8.2.0
@@ -21,3 +23,4 @@ captum>=0.6.0
 lime>=0.2.0
 shap>=0.42.0
 accelerate
+jiwer>=4.0.0

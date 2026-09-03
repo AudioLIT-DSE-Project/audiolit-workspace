@@ -25,6 +25,10 @@ jobs:
         run: |
           cd Frontend
           npm run lint
+      - name: Run Jest
+        run: |
+          cd Frontend
+          npm test
       - name: Build Vite App
         run: |
           cd Frontend
