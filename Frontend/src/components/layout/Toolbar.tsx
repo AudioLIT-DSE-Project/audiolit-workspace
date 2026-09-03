@@ -8,10 +8,25 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { Upload, HelpCircle } from "lucide-react";
-import { API_BASE } from '@/lib/api';
-import { CustomDatasetManager } from '@/components/dataset/CustomDatasetManager';
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
+import { Upload, HelpCircle, Sun, Moon, Flame } from "lucide-react";
+import { useTheme } from "next-themes";
+import { API_BASE } from "@/lib/api";
+import { CustomDatasetManager } from "@/components/dataset/CustomDatasetManager";
+import { HFModelSelector } from "./HFModelSelector";
+import { useModelRegistry } from "@/context/ModelRegistryContext";
+
+export interface SelectedTasks {
+  asr: boolean;
+  ser: boolean;
+  add: boolean;
+}
 
 interface UploadedFile {
   file_id: string;
@@ -34,6 +49,10 @@ interface ToolbarProps {
   dataset: string;
   setDataset: (dataset: string) => void;
   onBatchInference?: (model: string, dataset: string) => void; // New callback for batch inference
+  selectedTasks: SelectedTasks;
+  setSelectedTasks: (tasks: SelectedTasks) => void;
+  onWarmupClick?: () => void;
+  warmupJobId?: string | null;
 }
 
 interface CustomDataset {
@@ -42,38 +61,129 @@ interface CustomDataset {
   total_files: number;
 }
 
-const modelDatasetMap: Record<string, string[]> = {
-  "whisper-base": ["common-voice", "ravdess", "custom"],
-  "whisper-large": ["common-voice", "ravdess", "custom"],
-  "wav2vec2": ["common-voice", "ravdess", "custom"],
-};
-
 const defaultDatasetForModel: Record<string, string> = {
   "whisper-base": "common-voice",
-  "whisper-large": "common-voice",
-  "wav2vec2": "ravdess",
+  wav2vec2: "ravdess",
+  "melody-machine": "asvspoof-2021",
+  "wav2vec2-add": "asvspoof-2021",
 };
 
-export const Toolbar = ({apiData, setApiData, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference}: ToolbarProps) => {
+const DATASET_TASK_FAMILIES: Record<string, "ASR" | "SER" | "DEEPFAKE"> = {
+  "common-voice": "ASR",
+  librispeech: "ASR",
+  "l2-arctic": "ASR",
+  ravdess: "SER",
+  "crema-d": "SER",
+  esd: "SER",
+  "asvspoof-2021": "DEEPFAKE",
+};
+
+// Explicit family lookup for the built-in dropdown keys - avoids the substring
+// heuristic below misclassifying "wav2vec2-add" (contains "wav2vec2") as SER.
+const BUILTIN_MODEL_TASK_FAMILY: Record<string, "ASR" | "SER" | "DEEPFAKE"> = {
+  "whisper-base": "ASR",
+  wav2vec2: "SER",
+  "melody-machine": "DEEPFAKE",
+  "wav2vec2-add": "DEEPFAKE",
+};
+
+const getModelTaskFamily = (modelName: string): "ASR" | "SER" | "DEEPFAKE" => {
+  if (BUILTIN_MODEL_TASK_FAMILY[modelName]) return BUILTIN_MODEL_TASK_FAMILY[modelName];
+  const m = modelName.toLowerCase();
+  // Check DEEPFAKE substrings first: a custom-resolved wav2vec2 checkpoint
+  // fine-tuned for deepfake detection would otherwise match "wav2vec2" below.
+  if (m.includes("asvspoof") || m.includes("deepfake") || m.includes("spoof") || m.includes("fake")) return "DEEPFAKE";
+  if (m.includes("wav2vec2") || m.includes("ser") || m.includes("emotion")) return "SER";
+  return "ASR";
+};
+
+// Friendlier labels for the built-in corpora GET /datasets/list returns
+// (LIT-235). Anything not listed here just displays its raw registry name.
+const DATASET_LABELS: Record<string, string> = {
+  "common-voice": "Common Voice",
+  librispeech: "LibriSpeech",
+  "crema-d": "CREMA-D",
+  ravdess: "RAVDESS",
+  "l2-arctic": "L2-ARCTIC",
+  esd: "ESD",
+  "asvspoof-2021": "ASVspoof 2021",
+};
+
+export const Toolbar = ({
+  apiData,
+  setApiData,
+  selectedFile,
+  uploadedFiles,
+  onFileSelect,
+  model,
+  setModel,
+  dataset,
+  setDataset,
+  onBatchInference,
+  selectedTasks,
+  setSelectedTasks,
+  onWarmupClick,
+}: ToolbarProps) => {
+  const handleTaskToggle = (task: keyof SelectedTasks) => {
+    setSelectedTasks({ ...selectedTasks, [task]: !selectedTasks[task] });
+  };
+
+  // SRS §3.6.6: dark mode with a manual override on top of the system default.
+  const { resolvedTheme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const { resolvedCustomModels } = useModelRegistry();
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
+  // Built-in corpora (LIT-235) - was a hardcoded 2-entry list disconnected
+  // from the backend's actual dataset registry; now fetched for real.
+  const [builtinDatasets, setBuiltinDatasets] = useState<string[]>(["common-voice", "ravdess", "l2-arctic", "librispeech", "crema-d", "esd"]);
+  // FR2 §5.1 — which built-in corpora actually have data provisioned under
+  // Backend/data/ (as opposed to just having a loader wired). A corpus can
+  // be code-complete but unprovisioned on a given machine (LibriSpeech,
+  // today); this lets the dropdown say so instead of offering it and 404ing.
+  const [datasetAvailability, setDatasetAvailability] = useState<Record<string, boolean>>({});
+
+  const activeModelFamily = getModelTaskFamily(model);
+
+  const handleCustomModelResolved = (modelId: string) => {
+    onModelChange(modelId);
+  };
 
   const fetchCustomDatasets = async () => {
     try {
       const response = await fetch(`${API_BASE}/upload/dataset/list`, {
-        credentials: 'include'
+        credentials: "include",
       });
-      
+
       if (response.ok) {
         const data = await response.json();
         setCustomDatasets(data.datasets || []);
       }
     } catch (err) {
-      console.error('Error fetching custom datasets:', err);
+      console.error("Error fetching custom datasets:", err);
+    }
+  };
+
+  const fetchBuiltinDatasets = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/datasets/list`);
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data.datasets) && data.datasets.length > 0) {
+          setBuiltinDatasets(data.datasets);
+        }
+        if (data.available && typeof data.available === "object") {
+          setDatasetAvailability(data.available);
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching built-in datasets:", err);
     }
   };
 
   useEffect(() => {
     fetchCustomDatasets();
+    fetchBuiltinDatasets();
   }, []);
 
   const handleDatasetCreated = (datasetName: string) => {
@@ -85,176 +195,301 @@ export const Toolbar = ({apiData, setApiData, selectedFile, uploadedFiles, onFil
     setDataset(datasetName);
   };
 
-const onModelChange = (value: string) => {
-  setModel(value);
-  
-  // Update dataset based on model
-  const allowedDatasets = modelDatasetMap[value] || ["custom"];
-  const defaultDataset = defaultDatasetForModel[value] || "custom";
-  
-  // Check if current dataset is a custom dataset
-  const isCurrentCustomDataset = dataset.startsWith('custom:');
+  const onModelChange = (value: string) => {
+    setModel(value);
 
-  if (!allowedDatasets.includes(dataset) && !isCurrentCustomDataset) {
-    // Use the canonical handler so all side effects fire (metadata loading)
-    onDatasetChange(defaultDataset);
-  } else if (!isCurrentCustomDataset && dataset !== 'custom' && onBatchInference) {
-    // Dataset is already valid and not custom, fire batch inference directly
-    onBatchInference(value, dataset);
-  }
-};
+    const newModelFamily = getModelTaskFamily(value);
+    const isCurrentCustomDataset = dataset.startsWith("custom:");
 
-  const onDatasetChange = (value: string) => {
-    setDataset(value);
-    
-    // Check if this is a custom dataset (formatted as custom:session_id:dataset_name)
-    const isCustomDataset = value.startsWith('custom:');
-    
-    // Trigger batch inference when dataset changes (except for custom datasets)
-    if (!isCustomDataset && value !== 'custom' && onBatchInference) {
-      onBatchInference(model, value);
+    // If current dataset task family doesn't match the new model's task family, auto-switch to a compatible default
+    if (!isCurrentCustomDataset && DATASET_TASK_FAMILIES[dataset] && DATASET_TASK_FAMILIES[dataset] !== newModelFamily) {
+      const compatibleDefault = newModelFamily === "SER" ? "ravdess" : newModelFamily === "DEEPFAKE" ? "asvspoof-2021" : "common-voice";
+      setDataset(compatibleDefault);
     }
   };
 
+  const onDatasetChange = (value: string) => {
+    setDataset(value);
+  };
+
   // Get datasets allowed for current model
-  const allowedDatasets = modelDatasetMap[model] || ["custom"];
+  const allowedDatasets = builtinDatasets;
 
   return (
     <TooltipProvider>
-      <div className="h-12 bg-white border-b border-border px-5 flex items-center justify-between">
+      <div className="h-12 bg-card border-b border-border px-5 flex items-center justify-between">
         {/* Left side: Model and Dataset selectors */}
         <div className="flex items-center gap-5">
           <div className="flex items-center gap-2.5">
-            <span className="text-base font-bold text-foreground">LIT for Voice</span>
-            <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
-              v1.0
+            <span className="text-base font-bold text-foreground tracking-tight">
+              AudioLIT
+            </span>
+            <Badge
+              variant="outline"
+              className="text-[10px] bg-primary/10 text-primary border-primary/20"
+            >
+              v2.0
             </Badge>
           </div>
 
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
               <div className="flex items-center gap-1">
-                <span className="text-xs font-medium text-foreground">Model:</span>
+                <span className="text-xs font-medium text-foreground">
+                  Model:
+                </span>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
                   </TooltipTrigger>
-                    <TooltipContent className="space-y-1">
-                    <p className="text-xs">Choose the AI model for audio analysis:</p>
-                    <p className="text-xs">• Whisper: Speech-to-text transcription</p>
-                    <p className="text-xs">• Wav2Vec2: Emotion recognition</p>
-                    </TooltipContent>
+                  <TooltipContent className="space-y-1">
+                    <p className="text-xs">
+                      Choose the AI model for audio analysis:
+                    </p>
+                    <p className="text-xs">
+                      • Whisper: Speech-to-text transcription (ASR)
+                    </p>
+                    <p className="text-xs">• Wav2Vec2: Emotion recognition (SER)</p>
+                    <p className="text-xs">• MelodyMachine / Wav2Vec2 XLSR: Deepfake detection (ADD)</p>
+                  </TooltipContent>
                 </Tooltip>
               </div>
               <Select value={model} onValueChange={onModelChange}>
-                <SelectTrigger className="w-32 h-7 border-border text-xs">
+                <SelectTrigger className="w-40 h-7 border-border text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="whisper-base">Whisper Base</SelectItem>
-                  <SelectItem value="whisper-large">Whisper Large</SelectItem>
-                  <SelectItem value="wav2vec2">Wav2Vec2</SelectItem>
+                  <SelectItem value="whisper-base">Whisper Base (ASR)</SelectItem>
+                  <SelectItem value="wav2vec2">Wav2Vec2 (SER)</SelectItem>
+                  <SelectItem value="melody-machine">MelodyMachine (Deepfake)</SelectItem>
+                  <SelectItem value="wav2vec2-add">Wav2Vec2 XLSR (Deepfake)</SelectItem>
+                  {resolvedCustomModels.length > 0 && (
+                    <>
+                      <SelectItem disabled value="separator-models">
+                        ── Custom Models ──
+                      </SelectItem>
+                      {resolvedCustomModels.map((customModel) => (
+                        <SelectItem key={customModel} value={customModel}>
+                          {customModel}
+                        </SelectItem>
+                      ))}
+                    </>
+                  )}
+                  <div className="p-1 border-t border-border mt-1">
+                    <HFModelSelector onModelResolved={handleCustomModelResolved} />
+                  </div>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="flex items-center gap-1.5">
               <div className="flex items-center gap-1">
-                <span className="text-xs font-medium text-foreground">Dataset:</span>
+                <span className="text-xs font-medium text-foreground">
+                  Dataset:
+                </span>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
                   </TooltipTrigger>
                   <TooltipContent className="space-y-1">
-                    <p className="text-xs">Select the audio dataset to analyze:</p>
-                    <p className="text-xs">• Common Voice: Speech recognition dataset</p>
-                    <p className="text-xs">• RAVDESS: Emotion recognition dataset</p>
-                    <p className="text-xs">• Custom: Your uploaded datasets</p>
+                    <p className="text-xs">
+                      Select the audio dataset to analyze:
+                    </p>
+                    <p className="text-xs">
+                      • ASR: Common Voice, L2-ARCTIC, LibriSpeech
+                    </p>
+                    <p className="text-xs">
+                      • SER: RAVDESS, CREMA-D, ESD
+                    </p>
+                    <p className="text-xs">
+                      • Deepfake: ASVspoof 2021
+                    </p>
                   </TooltipContent>
                 </Tooltip>
               </div>
               <Select value={dataset} onValueChange={onDatasetChange}>
-              <SelectTrigger className="w-40 h-7 border-border text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {/* Built-in datasets */}
-                {allowedDatasets.filter(ds => ds !== 'custom').map((ds) => {
-                  let label = ds;
-                  if (ds === "common-voice") label = "Common Voice";
-                  else if (ds === "ravdess") label = "RAVDESS";
-                  return (
-                    <SelectItem key={ds} value={ds}>
-                      {label}
-                    </SelectItem>
-                  );
-                })}
-                
-                {/* Custom datasets */}
-                {customDatasets.length > 0 && (
-                  <>
-                    <SelectItem disabled value="separator">
-                      ── Custom Datasets ──
-                    </SelectItem>
-                    {customDatasets.map((customDataset) => (
-                      <SelectItem key={customDataset.formatted_name} value={customDataset.formatted_name}>
-                        {customDataset.dataset_name}
-                      </SelectItem>
-                    ))}
-                  </>
-                )}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {uploadedFiles && uploadedFiles.length > 0 && (
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-foreground">File:</span>
-              <Select
-                value={selectedFile?.file_id || ""}
-                onValueChange={(fileId) => {
-                  const file = uploadedFiles.find(f => f.file_id === fileId);
-                  if (file && onFileSelect) {
-                    onFileSelect(file);
-                  }
-                }}
-              >
-                <SelectTrigger className="w-48 h-7 border-border text-xs">
-                  <SelectValue placeholder="Select uploaded file" />
+                <SelectTrigger className="w-44 h-7 border-border text-xs">
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {uploadedFiles.map((file) => (
-                    <SelectItem key={file.file_id} value={file.file_id}>
-                      {file.filename}
-                    </SelectItem>
-                  ))}
+                  {/* Built-in datasets */}
+                  {allowedDatasets
+                    .filter((ds) => ds !== "custom")
+                    .map((ds) => {
+                      const dsFamily = DATASET_TASK_FAMILIES[ds];
+                      const isCompatible = !dsFamily || dsFamily === activeModelFamily;
+                      // `undefined` means the availability probe hasn't
+                      // resolved yet - treat as available rather than
+                      // disabling every option until the fetch completes.
+                      const isProvisioned = datasetAvailability[ds] !== false;
+                      const suffix = !isCompatible
+                        ? `(${dsFamily} only)`
+                        : !isProvisioned
+                        ? "(not provisioned)"
+                        : "";
+                      return (
+                        <SelectItem key={ds} value={ds} disabled={!isCompatible || !isProvisioned}>
+                          {DATASET_LABELS[ds] || ds} {suffix}
+                        </SelectItem>
+                      );
+                    })}
+
+                  {/* Custom datasets */}
+                  {customDatasets.length > 0 && (
+                    <>
+                      <SelectItem disabled value="separator">
+                        ── Custom Datasets ──
+                      </SelectItem>
+                      {customDatasets.map((customDataset) => (
+                        <SelectItem
+                          key={customDataset.formatted_name}
+                          value={customDataset.formatted_name}
+                        >
+                          {customDataset.dataset_name}
+                        </SelectItem>
+                      ))}
+                    </>
+                  )}
                 </SelectContent>
               </Select>
             </div>
-          )}
+
+            {uploadedFiles && uploadedFiles.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-foreground">
+                  File:
+                </span>
+                <Select
+                  value={selectedFile?.file_id || ""}
+                  onValueChange={(fileId) => {
+                    const file = uploadedFiles.find(
+                      (f) => f.file_id === fileId,
+                    );
+                    if (file && onFileSelect) {
+                      onFileSelect(file);
+                    }
+                  }}
+                >
+                  <SelectTrigger className="w-48 h-7 border-border text-xs">
+                    <SelectValue placeholder="Select uploaded file" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {uploadedFiles.map((file) => (
+                      <SelectItem key={file.file_id} value={file.file_id}>
+                        {file.filename}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
+                <span className="text-xs font-medium text-foreground">
+                  Tasks:
+                </span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
+                  </TooltipTrigger>
+                  <TooltipContent className="space-y-1">
+                    <p className="text-xs">
+                      Choose which analyses run on upload:
+                    </p>
+                    <p className="text-xs">• ASR: Transcription (Whisper)</p>
+                    <p className="text-xs">
+                      • SER: Emotion recognition (Wav2Vec2)
+                    </p>
+                    <p className="text-xs">• ADD: Deepfake detection</p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+              {(["asr", "ser", "add"] as const).map((task) => (
+                <div key={task} className="flex items-center gap-1">
+                  <Checkbox
+                    id={`task-${task}`}
+                    checked={selectedTasks[task]}
+                    onCheckedChange={() => handleTaskToggle(task)}
+                    className="h-3.5 w-3.5"
+                  />
+                  <label
+                    htmlFor={`task-${task}`}
+                    className="text-xs uppercase text-foreground cursor-pointer"
+                  >
+                    {task}
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Right side: Action buttons */}
+        <div className="flex items-center gap-2.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={() =>
+                  setTheme(resolvedTheme === "dark" ? "light" : "dark")
+                }
+              >
+                {mounted && resolvedTheme === "dark" ? (
+                  <Sun className="h-3.5 w-3.5" />
+                ) : (
+                  <Moon className="h-3.5 w-3.5" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Toggle dark mode</p>
+            </TooltipContent>
+          </Tooltip>
+
+          <HFModelSelector onModelResolved={handleCustomModelResolved} />
+
+          <CustomDatasetManager
+            onDatasetCreated={handleDatasetCreated}
+            onDatasetSelected={handleDatasetSelected}
+          />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30 font-medium"
+                onClick={onWarmupClick}
+              >
+                <Flame className="h-3.5 w-3.5 mr-1 text-amber-500 fill-amber-500/20" />
+                Warmup Dataset
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Pre-compute and cache XAI analyses for full dataset</p>
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="default"
+                size="sm"
+                className="h-7 text-xs shadow-aws-sm"
+              >
+                <Upload className="h-3.5 w-3.5 mr-1.5" />
+                Upload
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Upload audio files for analysis</p>
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
-
-      {/* Right side: Action buttons */}
-      <div className="flex items-center gap-2.5">
-        <CustomDatasetManager
-          onDatasetCreated={handleDatasetCreated}
-          onDatasetSelected={handleDatasetSelected}
-        />
-
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="default" size="sm" className="h-7 text-xs shadow-aws-sm">
-              <Upload className="h-3.5 w-3.5 mr-1.5" />
-              Upload
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>Upload audio files for analysis</p>
-          </TooltipContent>
-        </Tooltip>
-      </div>
-    </div>
     </TooltipProvider>
   );
 };

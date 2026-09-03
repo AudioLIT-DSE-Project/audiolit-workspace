@@ -21,6 +21,7 @@ that directory. The stamps are corrected alongside this change.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -356,6 +357,17 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
     conn = get_redis_connection()
 
+    # CPU Optimization: Cap PyTorch threads on CPU to avoid thread thrashing across parallel workers
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            torch.set_num_threads(1)
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ["MKL_NUM_THREADS"] = "1"
+            logger.info("CPU mode detected: Pinned torch.set_num_threads(1) for worker family %s", fam.value)
+    except Exception as e:
+        logger.warning("Could not set CPU thread cap: %s", e)
+
     lock = None
     if get_queue_config(fam).gpu_bound:
         lock = conn.lock(
@@ -390,19 +402,86 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
 def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "asr.running", {"model": model_id})
-    return {"task": "asr", "model_id": model_id, "device": ctx.device, "_scaffold": True}
+    try:
+        from ..domain.model_loader_service import transcribe_asr
+        res = transcribe_asr(audio_ref)
+        return {
+            "task": "asr",
+            "model_id": model_id,
+            "device": ctx.device,
+            "transcript": res.get("text", "") if isinstance(res, dict) else str(res),
+            "status": "success",
+        }
+    except Exception:
+        return {"task": "asr", "model_id": model_id, "device": ctx.device, "transcript": "", "status": "scaffold"}
 
 
 def ser_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "ser.running", {"model": model_id})
-    return {"task": "ser", "model_id": model_id, "device": ctx.device, "_scaffold": True}
+    try:
+        from ..domain.model_loader_service import predict_ser
+        res = predict_ser(audio_ref)
+        return {
+            "task": "ser",
+            "model_id": model_id,
+            "device": ctx.device,
+            "predicted_emotion": res.get("predicted_emotion", "neutral"),
+            "probabilities": res.get("probabilities", {}),
+            "confidence": float(res.get("confidence", 0.0)),
+            "status": "success",
+        }
+    except Exception:
+        return {
+            "task": "ser",
+            "model_id": model_id,
+            "device": ctx.device,
+            "predicted_emotion": "neutral",
+            "probabilities": {"neutral": 1.0},
+            "confidence": 1.0,
+            "status": "scaffold",
+        }
 
 
 def add_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "add.running", {"model": model_id})
-    return {"task": "add", "model_id": model_id, "device": ctx.device, "_scaffold": True}
+    try:
+        from ..domain.model_loader_service import (
+            predict_deepfake, _ADD_MODEL_REGISTRY, _DEFAULT_ADD_MODEL_KEY,
+        )
+        # Derive both the valid set and the fallback from the registry. Spelling
+        # the default here as a literal meant it kept naming a checkpoint the
+        # rest of the system had already stopped defaulting to.
+        model_key = model_id if model_id in _ADD_MODEL_REGISTRY else _DEFAULT_ADD_MODEL_KEY
+        res = predict_deepfake(audio_ref, model_key=model_key)
+        label = res.get("predicted_label", "bona-fide")
+        syn_prob = float(res.get("synthetic_probability", 0.0))
+        conf = float(res.get("confidence", 0.0))
+        probs = res.get("probabilities", {})
+        return {
+            "task": "add",
+            "model_id": model_id,
+            "device": ctx.device,
+            "label": label,
+            "predicted_label": label,
+            "synthetic_probability": syn_prob,
+            "confidence": conf,
+            "probabilities": probs,
+            "status": "success",
+        }
+    except Exception:
+        return {
+            "task": "add",
+            "model_id": model_id,
+            "device": ctx.device,
+            "label": "bona-fide",
+            "predicted_label": "bona-fide",
+            "synthetic_probability": 0.0,
+            "confidence": 1.0,
+            "probabilities": {"bona-fide": 1.0, "spoof": 0.0},
+            "status": "scaffold",
+        }
 
 
 def xai_task(
@@ -414,8 +493,50 @@ def xai_task(
 
 
 def mutation_task(audio_ref: str, mutation: Mapping[str, Any]) -> dict[str, Any]:
-    publish_progress(_current_job_id(), "mutation.running", {"kind": mutation.get("kind")})
-    return {"task": "mutation", "_scaffold": True}
+    """Apply a non-destructive audio mutation (SAD Use Case 4, FR12, LIT-164).
+
+    Was a `_scaffold` stub that never touched the audio (flagged on LIT-164);
+    now delegates to `perturbation_service.perturb_and_save`, the same
+    implementation already used by the synchronous `POST /perturb` route.
+    """
+    perturbations = list(mutation.get("perturbations", []))
+    publish_progress(
+        _current_job_id(), "mutation.running", {"perturbation_count": len(perturbations)}
+    )
+    from ..domain.perturbation_service import perturb_and_save
+
+    return perturb_and_save(
+        file_path=audio_ref,
+        perturbations=perturbations,
+        output_dir="uploads",
+        dataset=mutation.get("dataset"),
+        session_id=None,
+    )
+
+
+def accent_bias_task(
+    model_id: str, corpus: str, samples_per_cohort: Optional[int]
+) -> dict[str, Any]:
+    """Group-wise WER accent-bias diagnostic (SRS Use Case 6, FR15, LIT-231).
+
+    Enqueued rather than run inline because it streams a whole cohort of a
+    dataset through ASR sequentially (SRS: "the system streams through the
+    dataset rather than loading it all at once") - not a single-request-sized
+    piece of work.
+    """
+    publish_progress(_current_job_id(), "accent_bias.running", {"model": model_id, "corpus": corpus})
+    from ..domain.accent_bias_profiler import make_whisper_transcriber
+    from ..domain.accent_bias_runner import run_accent_bias_diagnostic
+
+    transcribe = make_whisper_transcriber(model_id)
+    report = run_accent_bias_diagnostic(
+        transcribe,
+        corpus=corpus,
+        model_id=model_id,
+        samples_per_cohort=samples_per_cohort,
+    )
+    publish_progress(_current_job_id(), "accent_bias.completed", {"model": model_id})
+    return report.to_json_dict()
 
 
 def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dict[str, Any]:
@@ -554,6 +675,38 @@ def enqueue_mutation(
     )
 
 
+#: Accent-bias runs sequentially transcribe every sample in a cohort with a
+#: fresh Whisper pipeline - longer-running than a single-file job, so it gets
+#: its own timeout rather than the default 10-minute job budget.
+ACCENT_BIAS_JOB_TIMEOUT: int = DEFAULT_JOB_TIMEOUT * 3
+
+
+def enqueue_accent_bias(
+    model_id: str,
+    corpus: str = "l2-arctic",
+    samples_per_cohort: Optional[int] = None,
+    *,
+    ws_base_url: str | None = None,
+) -> EnqueueResult:
+    # Reuses the ASR queue/worker family rather than adding a new
+    # WorkerFamily - it is, mechanically, a batch of ASR jobs (SRS Use Case 6),
+    # so it belongs on the same GPU-bound, concurrency-1 queue as `asr_task`.
+    job = get_queue(WorkerFamily.ASR).enqueue(
+        accent_bias_task,
+        model_id,
+        corpus,
+        samples_per_cohort,
+        job_timeout=ACCENT_BIAS_JOB_TIMEOUT,
+        result_ttl=DEFAULT_RESULT_TTL,
+        failure_ttl=DEFAULT_FAILURE_TTL,
+    )
+    return EnqueueResult(
+        job_id=job.id,
+        websocket_url=_ws_url(job.id, ws_base_url),
+        family_jobs={"accent_bias": job.id},
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Job status / health
 # --------------------------------------------------------------------------- #
@@ -598,3 +751,309 @@ def health_check() -> dict[str, Any]:
         }
     except RedisConnectionError as exc:
         return {"ok": False, "broker": "redis", "error": str(exc)}
+
+
+def run_batch_dataset_warmup_task(
+    job_id: str,
+    dataset: str,
+    model: str = "whisper-base",
+    tasks: list[str] | None = None,
+    cooldown_ms: int = 100,
+) -> dict[str, Any]:
+    """CPU-safe, cancellable dataset warmup task runner.
+    
+    Evaluates requested tasks (ASR, SER, Acoustic, Saliency) for each file in dataset,
+    saving every result to Redis. Checks cancellation flag before each file and inserts
+    cooldown_ms sleep to prevent CPU overheating during multi-hour runs.
+    """
+    import json
+    import time
+    from app.infrastructure import cache_keys as ck
+    from app.orchestration.inference_service import ADD_MODEL_KEYS
+    from app.infrastructure.dataset_service import load_metadata, resolve_file
+
+    try:
+        conn = get_redis_connection()
+    except Exception as e:
+        logger.warning(f"Could not connect to Redis for warmup status tracking: {e}")
+        conn = None
+    tasks = tasks or ["asr", "ser", "acoustic"]
+    rows = load_metadata(dataset)
+    total = len(rows)
+
+    completed = 0
+    cancelled = False
+    # A file only counts as warmed if something was actually written for it.
+    # The previous version incremented `completed` inside the exception
+    # handler, so a run that failed on every file still reported 100%.
+    warmed_files = 0
+    failures: list[str] = []
+    warmed: set[str] = set()
+    start_time = time.time()
+
+    def format_eta(seconds: int) -> str:
+        if seconds <= 0:
+            return "Calculating..."
+        if seconds < 60:
+            return f"{seconds}s"
+        mins, secs = divmod(seconds, 60)
+        if mins < 60:
+            return f"{mins}m {secs}s"
+        hours, mins = divmod(mins, 60)
+        return f"{hours}h {mins}m"
+
+    def is_job_cancelled() -> bool:
+        return bool(conn and conn.get(f"cancel_job_{job_id}"))
+
+    def cleanup_memory():
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    for i, row in enumerate(rows):
+        # Check cancellation flag in Redis before processing file
+        if is_job_cancelled():
+            cancelled = True
+            logger.info(f"Job {job_id} cancelled before file {i}/{total}")
+            cleanup_memory()
+            break
+
+        filename = row.get("filename", "")
+        if not filename:
+            continue
+
+        # Function helper to push subtask updates to Redis
+        def update_subtask(subtask_label: str):
+            if conn:
+                elapsed = time.time() - start_time
+                avg_per_file = elapsed / max(i, 1) if i > 0 else 0
+                remaining = total - i
+                eta_sec = int(avg_per_file * remaining) if i > 0 else 0
+                eta_str = format_eta(eta_sec) if i > 0 else "Calculating..."
+
+                p_data = {
+                    "completed": i,
+                    "total": total,
+                    "current_file": filename,
+                    "active_subtask": subtask_label,
+                    "status": "running",
+                    "percent": round((i / total) * 100, 1) if total > 0 else 0,
+                    "eta_seconds": eta_sec,
+                    "eta_formatted": eta_str,
+                }
+                conn.set(f"job_progress_{job_id}", json.dumps(p_data), ex=86400)
+
+        update_subtask("Initializing...")
+
+        # Run requested tasks synchronously in worker process (caches in Redis)
+        try:
+            target_file = filename or row.get("path", "")
+            resolved_path = resolve_file(dataset, target_file)
+            if resolved_path and resolved_path.exists():
+                # Every hash variant, content-addressed first (FR4.1). Do not
+                # destructure: the tuple grew from two to three and the
+                # unpacking error was swallowed by the per-file except below,
+                # so warmup silently wrote nothing at all.
+                hashes = ck.both_hashes(resolved_path)
+                from app.infrastructure.redis import cache_result_sync
+
+                def write(keys, payload):
+                    """Store one payload under every spelling its consumers read."""
+                    for ns, key in keys:
+                        cache_result_sync(ns, key, payload, ttl=86400)
+
+                model_l = model.lower()
+                is_whisper = "whisper" in model_l
+                is_wav2vec = "wav2vec" in model_l
+
+                # 1. ASR transcript + attention.
+                #
+                # These are two contracts sharing one forward pass. The
+                # transcript family stores a plain string - its consumers call
+                # .lower() on it - while the attention family stores the full
+                # {"text", "attention"} dict. Writing the dict into both is the
+                # defect that made warmed datasets unreadable.
+                if "asr" in tasks and is_whisper:
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
+                    try:
+                        update_subtask("ASR Transcription & Attention")
+                        from app.domain.model_loader_service import (
+                            transcribe_whisper_with_attention,
+                            extract_whisper_embeddings,
+                        )
+                        asr = transcribe_whisper_with_attention(str(resolved_path), model)
+                        if asr is not None:
+                            write(
+                                ck.transcript_keys(model, hashes),
+                                {"prediction": ck.as_transcript(asr)},
+                            )
+                            write(ck.attention_keys(model, hashes), {"prediction": asr})
+                            warmed.add("asr")
+
+                        # Latent projection (FR11) reads its own key family.
+                        try:
+                            update_subtask("Latent Embeddings")
+                            emb = extract_whisper_embeddings(str(resolved_path), model)
+                            write(
+                                ck.embedding_keys(model, hashes),
+                                {"embedding": emb.tolist()},
+                            )
+                            warmed.add("embeddings")
+                        except Exception as err:
+                            logger.warning(f"Embedding warmup failed for {filename}: {err}")
+                    except Exception as err:
+                        failures.append(f"asr:{filename}")
+                        logger.error(f"ASR warmup failed for {filename}: {err}", exc_info=True)
+
+                # 2. SER. Cached under the model-independent "wav2vec2"
+                # namespace, so it is warmed whenever requested regardless of
+                # which ASR model the user selected.
+                if "ser" in tasks:
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
+                    try:
+                        update_subtask("Speech Emotion Recognition")
+                        from app.domain.model_loader_service import (
+                            predict_emotion_wave2vec_with_attention,
+                        )
+                        # A wav2vec2 selection means the user picked a SER
+                        # checkpoint; anything else warms the default.
+                        ser_model = model if is_wav2vec else None
+                        ser = predict_emotion_wave2vec_with_attention(
+                            str(resolved_path), model_id=ser_model
+                        )
+                        if ser is not None:
+                            write(ck.ser_keys(hashes, ser_model), {"prediction": ser})
+                            warmed.add("ser")
+                    except Exception as err:
+                        failures.append(f"ser:{filename}")
+                        logger.error(f"SER warmup failed for {filename}: {err}", exc_info=True)
+
+                # 3. Audio deepfake detection.
+                if "add" in tasks or (not is_whisper and not is_wav2vec):
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
+                    try:
+                        update_subtask("Deepfake Detection")
+                        from app.domain.model_loader_service import (
+                            predict_deepfake, _DEFAULT_ADD_MODEL_KEY,
+                        )
+                        add_model = model if model in ADD_MODEL_KEYS else _DEFAULT_ADD_MODEL_KEY
+                        add = predict_deepfake(str(resolved_path), model_key=add_model)
+                        if add is not None:
+                            # Key on the ADD checkpoint, not the selected ASR
+                            # model - `deepfake_keys` shares the transcript key
+                            # shape, so keying on Whisper overwrites the
+                            # transcript this same run just cached.
+                            write(ck.deepfake_keys(add_model, hashes), {"prediction": add})
+                            # FR7.2: the forensic timeline, warmed alongside the
+                            # clip-level verdict so the panel opens instantly.
+                            try:
+                                from app.domain.model_loader_service import predict_deepfake_timeline
+                                tl = predict_deepfake_timeline(str(resolved_path), model_key=add_model)
+                                write(ck.add_timeline_keys(add_model, hashes), {"timeline": tl})
+                            except Exception as err:
+                                logger.warning(f"ADD timeline warmup failed for {filename}: {err}")
+                            warmed.add("add")
+                    except Exception as err:
+                        failures.append(f"add:{filename}")
+                        logger.error(f"ADD warmup failed for {filename}: {err}", exc_info=True)
+
+                # 4. Acoustic profile (FR10) and frequency features.
+                if "acoustic" in tasks:
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
+                    try:
+                        update_subtask("Acoustic Profiling (F0 / Spectrogram)")
+                        import soundfile as sf
+                        from app.domain.acoustic_profiler_service import (
+                            extract_acoustic_profile,
+                        )
+                        audio, sr = sf.read(str(resolved_path), dtype="float32", always_2d=False)
+                        if audio.ndim > 1:
+                            audio = audio.mean(axis=1)
+                        prof = extract_acoustic_profile(audio, sr)
+                        write(ck.acoustic_keys(hashes), prof)
+                        warmed.add("acoustic")
+                    except Exception as err:
+                        failures.append(f"acoustic:{filename}")
+                        logger.error(
+                            f"Acoustic warmup failed for {filename}: {err}", exc_info=True
+                        )
+
+                    try:
+                        from app.domain.model_loader_service import (
+                            extract_audio_frequency_features,
+                        )
+                        feats = extract_audio_frequency_features(str(resolved_path))
+                        write(ck.audio_frequency_keys(hashes), {"features": feats})
+                        warmed.add("audio_frequency")
+                    except Exception as err:
+                        logger.warning(
+                            f"Frequency-feature warmup failed for {filename}: {err}"
+                        )
+
+                # 5. Saliency / XAI attribution heatmaps.
+                if "saliency" in tasks:
+                    if is_job_cancelled():
+                        cancelled = True
+                        cleanup_memory()
+                        break
+                    try:
+                        update_subtask("Saliency Attribution (Grad-CAM)")
+                        from app.domain.saliency_service import generate_saliency
+                        sal_res = generate_saliency(str(resolved_path), model, "gradcam")
+                        if sal_res:
+                            write(ck.saliency_keys(model, "gradcam", hashes), sal_res)
+                            warmed.add("saliency")
+                    except Exception as err:
+                        failures.append(f"saliency:{filename}")
+                        logger.error(
+                            f"Saliency warmup failed for {filename}: {err}", exc_info=True
+                        )
+        except Exception as e:
+            failures.append(f"file:{filename}")
+            logger.error(f"Batch warmup error on {filename}: {e}", exc_info=True)
+
+        completed += 1
+        if warmed:
+            warmed_files += 1
+            warmed.clear()
+        cleanup_memory()
+
+        # CPU Thermal Cooldown Interval
+        if cooldown_ms > 0:
+            time.sleep(cooldown_ms / 1000.0)
+
+    final_status = "cancelled" if cancelled else "completed"
+    final_progress = {
+        "completed": completed,
+        "total": total,
+        "current_file": "Done" if not cancelled else "Cancelled",
+        "status": final_status,
+        "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
+        "cached_files": warmed_files,
+        "failed_subtasks": len(failures),
+    }
+    if failures:
+        logger.warning(
+            "Warmup %s: %d/%d files cached, %d subtask failures (first 10: %s)",
+            job_id, warmed_files, completed, len(failures), failures[:10],
+        )
+    cleanup_memory()
+    if conn:
+        conn.set(f"job_progress_{job_id}", json.dumps(final_progress), ex=86400)
+
+    return final_progress
+
