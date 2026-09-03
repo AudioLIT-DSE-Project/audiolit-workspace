@@ -101,24 +101,40 @@ class TestPredictDeepfake:
 
 
 class TestSecondAddCheckpoint:
-    """model_key="wav2vec2-add" must use its own cache entry, independent of
-    the default (MelodyMachine) globals mocked via _install_fake above."""
+    """A non-default checkpoint must use its own cache entry, independent of the
+    default-model globals mocked via _install_fake above.
+
+    The key is derived rather than written literally: the default moved from
+    MelodyMachine to the Gustking checkpoint (38.5% -> 88.5% on 200 labelled
+    clips), and this test is about the *non-default* path whichever that is.
+    """
 
     def test_uses_extra_cache_not_default_globals(self, monkeypatch, clip):
-        # Default-model globals stay unset/mocked to something that would fail
-        # loudly if wrongly consulted for the second checkpoint.
+        non_default_key = next(
+            k for k in ml._ADD_MODEL_REGISTRY if k != ml._DEFAULT_ADD_MODEL_KEY
+        )
+
+        # Default-model globals stay unset, so they fail loudly if wrongly
+        # consulted for the second checkpoint.
         monkeypatch.setattr(ml, "add_feature_extractor", None)
         monkeypatch.setattr(ml, "add_model", None)
 
-        gustking_id = ml._ADD_MODEL_REGISTRY["wav2vec2-add"]
+        other_id = ml._ADD_MODEL_REGISTRY[non_default_key]
         fake_model = _FakeModel({0: "real", 1: "fake"}, [0.1, 3.0])
         monkeypatch.setitem(
-            ml._add_model_extra_cache, gustking_id, (_fake_feature_extractor, fake_model)
+            ml._add_model_extra_cache, other_id, (_fake_feature_extractor, fake_model)
         )
 
-        out = predict_deepfake(str(clip), model_key="wav2vec2-add")
+        out = predict_deepfake(str(clip), model_key=non_default_key)
 
         assert out["predicted_label"] == DEEPFAKE_SPOOF
+
+    def test_the_default_key_resolves_to_the_globals(self):
+        assert (ml._ADD_MODEL_REGISTRY[ml._DEFAULT_ADD_MODEL_KEY]
+                == ml.DEFAULT_ADD_MODEL_ID), (
+            "the singleton globals and the default key must name one checkpoint, "
+            "or a caller passing no key silently loads a second copy"
+        )
 
 
 class TestDeepfakeTimeline:

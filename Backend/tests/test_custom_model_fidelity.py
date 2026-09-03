@@ -85,8 +85,10 @@ class TestEntryPointsHonourTheSelection:
         assert loaded == [CUSTOM]
 
     def test_timestamps_entry_point(self, loaded):
+        """Two decodes now: the word-timed one and the canonical one it is
+        reconciled against. Both must use the checkpoint that was asked for."""
         ml.transcribe_whisper_with_timestamps("a.wav", CUSTOM)
-        assert loaded == [CUSTOM]
+        assert loaded and set(loaded) == {CUSTOM}
 
     def test_attention_pairs_entry_point(self, loaded):
         ml.extract_whisper_attention_pairs("a.wav", CUSTOM)
