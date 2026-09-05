@@ -10,6 +10,7 @@ import NotFound from "./pages/NotFound";
 import { ModelRegistryProvider } from "@/context/ModelRegistryContext";
 import { PlaybackProvider } from "@/contexts/PlaybackContext";
 import { ModelDownloadBanner } from "@/components/layout/ModelDownloadBanner";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 const queryClient = new QueryClient();
 
@@ -24,13 +25,15 @@ const App = () => (
           <Toaster />
           <Sonner />
           <ModelDownloadBanner />
-          <BrowserRouter>
-            <Routes>
-              <Route path="/" element={<Index />} />
-              {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </BrowserRouter>
+          <ErrorBoundary>
+            <BrowserRouter>
+              <Routes>
+                <Route path="/" element={<Index />} />
+                {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </BrowserRouter>
+          </ErrorBoundary>
         </TooltipProvider>
         </PlaybackProvider>
       </ModelRegistryProvider>
