@@ -272,40 +272,57 @@ class TestWav2Vec2Saliency:
         assert np.min(saliency_matrix) >= 0.0
 
 
+class DummyAddModel(nn.Module):
+    """Mimics the real HF Wav2Vec2 feature-encoder conv stack: the *first*
+    Conv1d has in_channels=1, every later one has in_channels == a wider
+    channel count (like config.conv_dim). find_last_conv_layer() returns the
+    LAST one, so a test whose model has only a single Conv1d layer can't
+    catch the "target_layer.in_channels == 1" bug in
+    generate_add_gradcam_saliency - this shape is what actually exposed it.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv1d(1, 8, 3, padding=1)
+        self.conv2 = nn.Conv1d(8, 8, 3, padding=1)
+        self.linear = nn.Linear(8, 2)
+        self.config = type("obj", (object,), {"id2label": {0: "bonafide", 1: "spoof"}})()
+
+    def forward(self, input_values, attention_mask=None):
+        x = input_values.unsqueeze(1) if input_values.dim() == 2 else input_values
+        x = self.conv1(x)
+        x = self.conv2(x)
+        logits = self.linear(x.mean(dim=-1))
+
+        class MockOutput:
+            def __init__(self, logits):
+                self.logits = logits
+
+        return MockOutput(logits)
+
+    def wav2vec2(self, input_values, attention_mask=None):
+        x = input_values if input_values.dim() == 2 else input_values.squeeze(1)
+        x = x[:, :16000]
+        if x.shape[-1] < 16000:
+            x = torch.nn.functional.pad(x, (0, 16000 - x.shape[-1]))
+
+        class MockOutput:
+            def __init__(self, x):
+                self.last_hidden_state = x.unsqueeze(-1).repeat(1, 1, 8)
+
+        return MockOutput(x)
+
+
 class TestAddAndGradCamSaliency:
-    """Test ADD model Grad-CAM saliency and fallback contract (FR8.2)."""
+    """Test ADD model saliency across all XAI methods (FR8.1, FR8.2, FR9)."""
 
     def test_generate_saliency_add_model_gradcam_success(self, monkeypatch, dummy_audio_file):
         from app.domain.saliency_service import generate_saliency
 
-        class DummyAddModule(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.conv = nn.Conv1d(1, 4, 3, padding=1)
-                self.fc = nn.Linear(4, 2)
-
-            def forward(self, input_values):
-                x = self.conv(input_values)
-                return self.fc(x.mean(dim=-1))
-
-        class DummyFeatureExtractor:
-            def __call__(self, audio, sampling_rate, return_tensors="pt", padding=True):
-                class Inputs:
-                    def __init__(self, audio):
-                        self.input_values = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
-                        if self.input_values.ndim == 2:
-                            self.input_values = self.input_values.unsqueeze(1)
-
-                    def __contains__(self, key):
-                        return key == "input_values"
-
-                return Inputs(audio)
-
-        dummy_model = DummyAddModule()
-        dummy_fe = DummyFeatureExtractor()
+        dummy_model = DummyAddModel()
         monkeypatch.setattr(
             "app.domain.model_loader_service.ensure_add_model_loaded",
-            lambda key: (dummy_fe, dummy_model, "cpu"),
+            lambda key: (MockFeatureExtractor(), dummy_model, "cpu"),
         )
 
         res = generate_saliency(str(dummy_audio_file), model="melody-machine", method="gradcam")
@@ -313,13 +330,51 @@ class TestAddAndGradCamSaliency:
         assert res["method"] == "gradcam"
         assert res["provenance"] == "measured"
         assert res["provenance_reason"] is None
+        # Every other saliency path keys segments as start_time/end_time, and
+        # the frontend (SaliencyVisualization.tsx) only reads those two names.
+        # This function alone used to emit "start"/"end", which stayed hidden
+        # as long as Grad-CAM never actually succeeded for a real ADD
+        # checkpoint - once fixed, the mismatch surfaced as a page-crashing
+        # `undefined.toFixed()` with no error boundary to catch it.
+        assert len(res["segments"]) > 0
+        for segment in res["segments"]:
+            assert isinstance(segment["start_time"], (int, float))
+            assert isinstance(segment["end_time"], (int, float))
         assert "saliency_matrix" in res
         assert "base_spectrogram" in res
 
-    def test_generate_saliency_add_model_non_gradcam_raises(self, dummy_audio_file):
+    @pytest.mark.parametrize("method", ["integrated_gradients", "ig", "lime", "shap"])
+    def test_generate_saliency_add_model_non_gradcam_now_works(self, monkeypatch, dummy_audio_file, method):
+        """FR9 commits Integrated Gradients "for ASR, SER, and ADD"; FR8.1 commits
+        LIME/SHAP generally. These used to unconditionally 400 for every ADD
+        model regardless of method - see LIT-* fix wiring generate_add_saliency.
+        """
         from app.domain.saliency_service import generate_saliency
-        with pytest.raises(ValueError, match="is not supported for deepfake-detection models"):
-            generate_saliency(str(dummy_audio_file), model="melody-machine", method="ig")
+
+        dummy_model = DummyAddModel()
+        monkeypatch.setattr(
+            "app.domain.model_loader_service.ensure_add_model_loaded",
+            lambda key: (MockFeatureExtractor(), dummy_model, "cpu"),
+        )
+
+        res = generate_saliency(str(dummy_audio_file), model="wav2vec2-add", method=method)
+        assert res["model"] == "wav2vec2-add"
+        assert res["method"] == method
+        assert res["predicted_label"] in ("bona-fide", "spoof")
+        assert len(res["series"]) > 0
+        assert len(res["segments"]) > 0
+
+    def test_generate_saliency_add_model_unsupported_method_raises(self, monkeypatch, dummy_audio_file):
+        from app.domain.saliency_service import generate_saliency
+
+        dummy_model = DummyAddModel()
+        monkeypatch.setattr(
+            "app.domain.model_loader_service.ensure_add_model_loaded",
+            lambda key: (MockFeatureExtractor(), dummy_model, "cpu"),
+        )
+
+        with pytest.raises(ValueError, match="Unsupported saliency method"):
+            generate_saliency(str(dummy_audio_file), model="melody-machine", method="not-a-real-method")
 
     def test_generate_saliency_no_conv_layer_returns_unavailable(self, monkeypatch, dummy_audio_file):
         from app.domain.saliency_service import generate_add_gradcam_saliency
