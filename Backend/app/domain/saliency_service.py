@@ -39,7 +39,7 @@ _model_locks: Dict[str, threading.Lock] = {}
 _model_locks_guard = threading.Lock()
 
 
-def _lock_for_model(model_key: str) -> threading.Lock:
+def lock_for_model(model_key: str) -> threading.Lock:
     with _model_locks_guard:
         lock = _model_locks.get(model_key)
         if lock is None:
@@ -65,6 +65,32 @@ def detect_model_type(model: str) -> str:
     elif "wav2vec" in model.lower():
         return "wav2vec2"
     return "unknown"
+
+
+def model_lock_key(model: str) -> Optional[str]:
+    """Lock key for the shared nn.Module `model` actually resolves to.
+
+    Single source of truth for both generate_saliency() below and
+    inference_service.run_inference() (plain ASR/SER/ADD inference) - the two
+    must derive identical keys for the same model, or a plain transcription
+    forward pass can interleave with a saliency Grad-CAM's registered hooks on
+    the very same cached module (register_forward_hook fires on ANY forward
+    pass through that layer, not just the one that registered it) and corrupt
+    both: a live L2-ARCTIC + whisper-base repro produced a Grad-CAM "size of
+    tensor a (2) must match the size of tensor b (0)" crash on one thread and
+    garbage (non-audio-matching) transcripts on the other, from ordinary
+    concurrent page load (the Saliency tab's XAI fetch racing the transcript
+    fetch). Returns None for a model type inference_service has no shared
+    cached instance to protect.
+    """
+    model_type = detect_model_type(model)
+    if model_type == "whisper":
+        return f"whisper:{resolve_whisper_model_id(model)}"
+    elif model_type == "wav2vec2":
+        return "wav2vec2:ser-emotion"
+    elif model_type == "add":
+        return f"add:{model}"
+    return None
 
 
 #################################################################################################################
@@ -707,18 +733,28 @@ def generate_add_gradcam_saliency(audio_file_path: str, model_name: str = "melod
     audio, sr = librosa.load(audio_file_path, sr=16000)
     spect = audio_to_spectrogram(audio)
     spect_norm = (spect - spect.min()) / (spect.max() - spect.min() + 1e-8)
-    
+
     feature_extractor, add_model, device = model_loader_service.ensure_add_model_loaded(key)
-    
+
     try:
         target_layer = find_last_conv_layer(add_model)
-        if isinstance(target_layer, torch.nn.Conv1d):
-            if target_layer.in_channels == 1:
-                inputs = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
-            else:
-                inputs = torch.from_numpy(spect_norm).unsqueeze(0).to(device)
+        if isinstance(target_layer, torch.nn.Conv2d):
+            inputs = torch.from_numpy(spect_norm.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
         else:
-            inputs = torch.from_numpy(spect_norm).unsqueeze(0).unsqueeze(0).to(device)
+            # Both real ADD checkpoints (MelodyMachine, Wav2Vec2 XLSR) are
+            # Wav2Vec2ForSequenceClassification, whose forward() always takes
+            # the raw waveform through the feature extractor - which conv
+            # layer Grad-CAM hooks for activations/gradients doesn't change
+            # what the model itself accepts as input. The previous branch
+            # keyed the input shape off target_layer.in_channels == 1, but
+            # find_last_conv_layer() returns the *last* Conv1d, and Wav2Vec2's
+            # feature encoder only has in_channels == 1 on its *first* layer
+            # (every later layer is in_channels == config.conv_dim, e.g. 512)
+            # - so that check was never true for a real checkpoint, and every
+            # request fell through to feeding a 2-D spectrogram into a model
+            # built for 1-D waveform input, raising a Conv1d shape RuntimeError.
+            fe_inputs = feature_extractor(audio, sampling_rate=sr, return_tensors="pt", padding=True)
+            inputs = fe_inputs.input_values.to(device)
         cam = compute_grad_cam(add_model, inputs, target_layer=target_layer)
         
         timeline = cam.mean(axis=0) if cam.ndim == 2 else cam
@@ -731,8 +767,17 @@ def generate_add_gradcam_saliency(audio_file_path: str, model_name: str = "melod
             t_start = (idx / n_frames) * total_duration
             t_end = ((idx + 1) / n_frames) * total_duration
             segments.append({
-                "start": round(t_start, 3),
-                "end": round(t_end, 3),
+                # Every other saliency path (whisper, wav2vec2, and this
+                # module's own generate_add_saliency) keys segments as
+                # start_time/end_time - the frontend's SaliencyVisualization
+                # reads exactly those two fields (segment.start_time.toFixed(1)).
+                # This function alone used "start"/"end", which rendered fine
+                # as long as Grad-CAM never actually succeeded for a real ADD
+                # checkpoint (see the fixed input-shape bug above) - once it
+                # does, start_time comes back undefined and .toFixed() throws,
+                # taking down the whole page (no error boundary previously).
+                "start_time": round(t_start, 3),
+                "end_time": round(t_end, 3),
                 "intensity": float(w)
             })
             
@@ -766,25 +811,202 @@ def generate_add_gradcam_saliency(audio_file_path: str, model_name: str = "melod
         }
 
 
+def generate_add_saliency(audio_file_path: str, model_name: str = "melody-machine", method: str = "integrated_gradients") -> Dict:
+    """Captum IG/LIME/SHAP for the deepfake-detection (ADD) classifiers (SRS FR9: IG
+    "for ASR, SER, and ADD"; FR8.1 for the LIME/SHAP case).
+
+    Mirrors generate_wav2vec2_saliency's already-working Captum wiring - both ADD
+    checkpoints (melody-machine, wav2vec2-add) are Wav2Vec2ForSequenceClassification,
+    the same architecture family as the SER model, so the same attribution-over-
+    raw-waveform approach applies; only the model source (ensure_add_model_loaded)
+    and the predicted class (bona-fide/spoof instead of an emotion) differ.
+    """
+    feature_extractor, add_model, device = model_loader_service.ensure_add_model_loaded(model_name)
+    audio, rate = librosa.load(audio_file_path, sr=16000)
+
+    max_seconds = MAX_SALIENCY_SECONDS_SHAP if method == "shap" else MAX_SALIENCY_SECONDS
+    max_len = int(max_seconds * rate)
+    if len(audio) > max_len:
+        audio = audio[:max_len]
+    segment_duration = len(audio) / rate if rate > 0 else 0.0
+
+    inputs = feature_extractor(audio, sampling_rate=rate, return_tensors="pt", padding=True)
+    input_values = inputs.input_values.to(device)
+    attention_mask = inputs.attention_mask.to(device) if "attention_mask" in inputs else None
+    input_values.requires_grad_(True)
+
+    with torch.no_grad():
+        tmp_out = add_model(input_values=input_values, attention_mask=attention_mask)
+        target_idx = int(torch.argmax(tmp_out.logits, dim=-1).item())
+    id2label = getattr(add_model.config, "id2label", {})
+    raw_label = id2label.get(target_idx, id2label.get(str(target_idx), f"class_{target_idx}"))
+    predicted_label = model_loader_service._normalize_deepfake_label(raw_label)
+
+    def model_forward(inputs, mask=None, cls_idx: int = 0):
+        outputs = add_model(input_values=inputs, attention_mask=mask)
+        return outputs.logits[:, cls_idx]
+
+    shap_fallback_reason = None
+    if method in ("integrated_gradients", "ig"):
+        ig = IntegratedGradients(model_forward)
+        n_steps_val = 4 if not torch.cuda.is_available() else 16
+        attributions = ig.attribute(
+            input_values,
+            additional_forward_args=(attention_mask, target_idx),
+            n_steps=n_steps_val,
+            internal_batch_size=1,
+        )
+    elif method == "lime":
+        lime = Lime(model_forward)
+        attributions = lime.attribute(input_values, additional_forward_args=(attention_mask, target_idx))
+    elif method == "shap":
+        gs = GradientShap(model_forward)
+        baseline = torch.zeros_like(input_values)
+        try:
+            attributions = gs.attribute(
+                input_values,
+                baselines=baseline,
+                additional_forward_args=(attention_mask, target_idx),
+                n_samples=max(2, min(16, SALIENCY_SHAP_SAMPLES)),
+                stdevs=0.09,
+            )
+        except Exception:
+            logger.exception("ADD SHAP failed; falling back to encoder energy map")
+            attributions = None
+            shap_fallback_reason = "SHAP computation failed or OOM; showing encoder energy map, not attribution"
+    else:
+        raise ValueError(
+            f"Unsupported saliency method '{method}'. Supported methods: 'gradcam', 'integrated_gradients', 'lime', 'shap'"
+        )
+
+    if attributions is not None:
+        tmp = attributions.detach().cpu().numpy().squeeze()
+        tmp = np.abs(tmp) if tmp.ndim <= 1 else np.mean(np.abs(tmp), axis=0)
+        mx = float(np.max(tmp)) if tmp.size > 0 else 0.0
+        saliency_scores = (tmp / mx) if mx > 0 else np.zeros_like(tmp)
+    else:
+        saliency_scores = np.array([])
+
+    use_energy_fallback = (
+        saliency_scores.size == 0
+        or (np.max(saliency_scores) - np.min(saliency_scores) if saliency_scores.size > 0 else 0.0) < 1e-6
+    )
+    fallback_reason = shap_fallback_reason
+    if use_energy_fallback:
+        if fallback_reason is None:
+            fallback_reason = "attribution was empty or constant; showing encoder energy, not attribution"
+        with torch.no_grad():
+            hs = add_model.wav2vec2(input_values=input_values, attention_mask=attention_mask).last_hidden_state
+            energy = hs.abs().mean(dim=2).squeeze(0).detach().cpu().numpy()
+        if energy.size > 0:
+            e_min, e_ptp = float(np.min(energy)), float(np.ptp(energy))
+            saliency_scores = (energy - e_min) / (e_ptp + 1e-9)
+        else:
+            saliency_scores = np.zeros(1, dtype=np.float32)
+
+    series = saliency_scores.astype(np.float32)
+    if series.size > 0:
+        win = max(3, int(series.size / 64))
+        if win % 2 == 0:
+            win += 1
+        kernel = np.ones(win, dtype=np.float32) / float(win)
+        series = np.convolve(series, kernel, mode="same")
+        p95 = float(np.percentile(series, 95))
+        if p95 > 0:
+            series = np.clip(series, 0, p95)
+        smin, smax = float(np.min(series)), float(np.max(series))
+        series = (series - smin) / (smax - smin + 1e-9)
+
+    T = len(saliency_scores)
+    num_segments = 32
+    segment_length = segment_duration / num_segments if num_segments > 0 else segment_duration
+    fps = (T / segment_duration) if segment_duration > 0 else 1.0
+    segments = []
+    for i in range(num_segments):
+        start_time = i * segment_length
+        end_time = (i + 1) * segment_length
+        start_frame = max(0, min(T - 1, int(start_time * fps)))
+        end_frame = max(start_frame + 1, min(T, int(end_time * fps)))
+        segment_saliency = float(np.mean(saliency_scores[start_frame:end_frame])) if T > 0 else 0.0
+        segments.append({
+            "start_time": start_time,
+            "end_time": end_time,
+            "saliency": segment_saliency,
+            "intensity": float(abs(segment_saliency)),
+        })
+
+    if len(segments) > 0:
+        abs_vals = np.abs([s["saliency"] for s in segments])
+        max_abs = float(np.max(abs_vals)) if len(abs_vals) > 0 else 0.0
+        if max_abs > 1e-9:
+            for i, segment in enumerate(segments):
+                segment["intensity"] = float(abs_vals[i] / max_abs)
+        else:
+            sorted_indices = np.argsort(-abs_vals)
+            for rank, idx in enumerate(sorted_indices):
+                segments[idx]["intensity"] = float(1.0 - (rank / len(segments)) * 0.9)
+        for segment in segments:
+            segment["intensity"] = max(0.1, segment["intensity"])
+
+    mel_spect = librosa.feature.melspectrogram(y=audio, sr=16000, n_fft=2048, hop_length=512, n_mels=128)
+    log_mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
+    log_mel_spect_norm = (log_mel_spect - log_mel_spect.min()) / (log_mel_spect.max() - log_mel_spect.min() + 1e-9)
+
+    stft = np.abs(librosa.stft(audio, n_fft=2048, hop_length=512))
+    n_frames = stft.shape[1]
+    if saliency_scores.size > 0:
+        attr_resampled = np.interp(
+            np.linspace(0, len(saliency_scores) - 1, n_frames),
+            np.arange(len(saliency_scores)),
+            np.abs(saliency_scores),
+        )
+    else:
+        attr_resampled = np.zeros(n_frames, dtype=np.float32)
+    attr_2d = np.tile(attr_resampled, (stft.shape[0], 1))
+    saliency_2d = stft * attr_2d
+    max_val_2d = np.max(saliency_2d)
+    if max_val_2d > 0:
+        saliency_2d = saliency_2d / max_val_2d
+
+    mel_saliency = np.zeros_like(log_mel_spect)
+    fft_bins_per_mel = stft.shape[0] // log_mel_spect.shape[0] + 1 if log_mel_spect.shape[0] > 0 else 1
+    for i in range(log_mel_spect.shape[0]):
+        start = i * fft_bins_per_mel
+        end = min(start + fft_bins_per_mel, stft.shape[0])
+        if start < end:
+            mel_saliency[i, :] = np.mean(saliency_2d[start:end, :], axis=0)
+
+    prov = Provenance.FALLBACK if (use_energy_fallback or shap_fallback_reason is not None) else Provenance.MEASURED
+    res_reason = fallback_reason if prov == Provenance.FALLBACK else None
+    return {
+        "model": model_name,
+        "method": method,
+        "predicted_label": predicted_label,
+        "segments": segments,
+        "total_duration": segment_duration,
+        "series": series.tolist(),
+        "base_spectrogram": log_mel_spect_norm.tolist(),
+        "saliency_matrix": mel_saliency.tolist(),
+        **provenance_fields(prov, reason=res_reason),
+    }
+
+
 def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam", existing_prediction: Dict = None) -> Dict:
     model_type = detect_model_type(model)
 
     # Lock keyed by the actual shared nn.Module identity each branch below
-    # will mutate (see _lock_for_model's docstring comment above), not by the
+    # will mutate (see lock_for_model's docstring comment above), not by the
     # raw `model` string - whisper aliases ("whisper-base" / "openai/whisper-
     # base") must serialize against each other since they resolve to the same
     # cached instance, and every wav2vec2/SER call shares the one emo_model
-    # singleton regardless of `model`.
-    if model_type == "whisper":
-        lock_key = f"whisper:{resolve_whisper_model_id(model)}"
-    elif model_type == "wav2vec2":
-        lock_key = "wav2vec2:ser-emotion"
-    elif model_type == "add":
-        lock_key = f"add:{model}"
-    else:
+    # singleton regardless of `model`. Shared with inference_service.
+    # run_inference via model_lock_key() - see its docstring for why plain
+    # inference must serialize against this too, not just saliency-vs-saliency.
+    lock_key = model_lock_key(model)
+    if lock_key is None:
         raise ValueError(f"Unsupported model: {model}")
 
-    with _lock_for_model(lock_key):
+    with lock_for_model(lock_key):
         if method == "gradcam" and model_type == "add":
             return generate_add_gradcam_saliency(audio_file_path, model)
 
@@ -793,9 +1015,7 @@ def generate_saliency(audio_file_path: str, model: str, method: str = "gradcam",
         elif model_type == "wav2vec2":
             return generate_wav2vec2_saliency(audio_file_path, method, existing_prediction)
         else:  # model_type == "add", method != "gradcam"
-            raise ValueError(
-                f"Saliency method '{method}' is not supported for deepfake-detection models ({model})."
-            )
+            return generate_add_saliency(audio_file_path, model, method)
 
 
 # --- Grad-CAM (LIT-148, FR8) --------------------------------------------------

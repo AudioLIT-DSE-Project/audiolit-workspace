@@ -43,6 +43,7 @@ class SaliencyResponse(BaseModel):
     base_spectrogram: Optional[list] = None
     saliency_matrix: Optional[list] = None
     emotion: Optional[str] = None
+    predicted_label: Optional[str] = None
     # LIT-238 contract: a string enum value, not a dict.
     provenance: Optional[str] = None
     provenance_reason: Optional[str] = None
