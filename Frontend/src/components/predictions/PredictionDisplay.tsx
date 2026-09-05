@@ -117,7 +117,7 @@ export const PredictionDisplay = ({
           </div>
         )}
         
-        {model === "wav2vec2" && wav2vecPrediction && !isLoading ? (
+        {model === "wav2vec2" && wav2vecPrediction && wav2vecPrediction.probabilities && !isLoading ? (
           // Wav2Vec2 display logic remains identical
           <div className="space-y-3">
             {!showPerturbed ? (
@@ -150,7 +150,7 @@ export const PredictionDisplay = ({
                   Perturbed Audio Prediction
                   <span className="text-xs-tight text-gray-500 border border-gray-300 px-1 rounded">Perturbed</span>
                 </div>
-                {!isLoadingPerturbed && perturbedPredictions ? (
+                {!isLoadingPerturbed && perturbedPredictions && (perturbedPredictions as Wav2Vec2Prediction).probabilities ? (
                   <div className="space-y-2">
                     {Object.entries((perturbedPredictions as Wav2Vec2Prediction).probabilities)
                       .sort(([,a], [,b]) => b - a)
@@ -232,7 +232,7 @@ export const PredictionDisplay = ({
               </div>
             )}
           </div>
-        ) : isAddModel && addPrediction && !isLoading ? (
+        ) : isAddModel && addPrediction && addPrediction.probabilities && !isLoading ? (
           <div className="space-y-3">
             {!showPerturbed ? (
               <div className="space-y-2">
