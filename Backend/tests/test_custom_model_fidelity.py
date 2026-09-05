@@ -10,6 +10,9 @@ output, and a cache entry that stays wrong until it expires.
 These tests assert the requested id reaches the loader untouched.
 """
 
+import asyncio
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -115,6 +118,56 @@ class TestRunInferenceBindsTheSelection:
             await isvc.run_inference(model, file_path="a.wav")
 
         assert loaded == [resolve_whisper_model_id(model)]
+
+
+class TestRunInferenceSerializesAgainstSaliencyLock:
+    """A plain transcription forward pass racing a saliency Grad-CAM call on
+    the same shared model corrupts both. Live-reproduced against real
+    L2-ARCTIC audio + whisper-base: concurrently firing /saliency/generate
+    and /inferences/run gave one request a Grad-CAM "size of tensor a (2)
+    must match the size of tensor b (0)" crash and the other a garbage,
+    non-matching transcript - register_forward_hook fires on ANY forward
+    pass through the hooked layer, not just the one that registered it.
+    run_inference must serialize its model calls through the exact same
+    per-model lock saliency_service.generate_saliency uses (model_lock_key /
+    lock_for_model), not just saliency-vs-saliency.
+    """
+
+    async def test_concurrent_calls_for_the_same_model_do_not_overlap(self, loaded):
+        import app.orchestration.inference_service as isvc
+
+        concurrent = 0
+        max_concurrent = 0
+        guard = threading.Lock()
+
+        def slow_transcribe(model_id, audio_file, **kw):
+            nonlocal concurrent, max_concurrent
+            with guard:
+                concurrent += 1
+                max_concurrent = max(max_concurrent, concurrent)
+            time.sleep(0.2)
+            with guard:
+                concurrent -= 1
+            return "stub"
+
+        ml.transcribe_whisper = slow_transcribe
+
+        async def no_cache(*a, **k):
+            return None
+
+        async def noop(*a, **k):
+            return None
+
+        with patch.object(isvc, "_resolve_audio_path", return_value=Path("a.wav")), \
+             patch.object(Path, "exists", return_value=True), \
+             patch.object(isvc, "get_result", new=no_cache), \
+             patch.object(isvc, "cache_result", new=noop):
+            await asyncio.gather(
+                isvc.run_inference("whisper-base", file_path="a.wav"),
+                isvc.run_inference("whisper-base", file_path="b.wav"),
+            )
+
+        assert max_concurrent == 1
 
 
 class TestForceRefreshBypassesCache:
