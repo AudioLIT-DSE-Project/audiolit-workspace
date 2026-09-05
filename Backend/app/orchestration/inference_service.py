@@ -17,6 +17,7 @@ from app.domain.model_loader_service import (
     extract_wav2vec2_embeddings,
     extract_add_embeddings,
 )
+from app.domain.saliency_service import lock_for_model, model_lock_key
 from app.infrastructure.dataset_service import resolve_file
 from app.infrastructure.redis import get_result, cache_result
 from app.infrastructure import cache_keys as ck
@@ -139,6 +140,25 @@ async def run_inference(
     if inspect.iscoroutinefunction(func):
         prediction = await func(str(resolved_path))
     else:
+        # Serialize against saliency_service.generate_saliency's Grad-CAM/
+        # Captum calls on the same shared cached model instance (see
+        # model_lock_key's docstring). Without this, a plain transcription
+        # forward pass can run while a Grad-CAM hook is registered on the
+        # very same nn.Module - register_forward_hook fires on ANY forward
+        # pass through that layer, not just the one that registered it - and
+        # corrupts both: reproduced live as a saliency "size of tensor a (2)
+        # must match the size of tensor b (0)" crash on one thread and a
+        # garbage transcript on the other, from an ordinary concurrent page
+        # load (Saliency tab + transcript fetch racing on file selection).
+        lock_key = model_lock_key(model)
+        if lock_key:
+            locked_func = func
+
+            def _run_locked(path, _func=locked_func, _key=lock_key):
+                with lock_for_model(_key):
+                    return _func(path)
+
+            func = _run_locked
         prediction = await asyncio.to_thread(func, str(resolved_path))
 
     await cache_result(model, cache_key, {"prediction": prediction}, ttl=6 * 60 * 60)

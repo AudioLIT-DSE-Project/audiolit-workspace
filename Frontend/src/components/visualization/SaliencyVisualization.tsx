@@ -249,7 +249,8 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
                   <div key={idx} className="flex items-center justify-between p-2 bg-muted/50 rounded">
                     <div className="flex items-center gap-2">
                       <Badge variant="outline" className="text-[10px]">
-                        {segment.start_time.toFixed(1)}-{segment.end_time.toFixed(1)}s
+                        {typeof segment.start_time === 'number' ? segment.start_time.toFixed(1) : '?'}-
+                        {typeof segment.end_time === 'number' ? segment.end_time.toFixed(1) : '?'}s
                       </Badge>
                       <span className="font-mono">{segment.word || 'segment'}</span>
                     </div>
