@@ -174,12 +174,12 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | FR | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|---|
-| LIT-165 | Backend mutation engine | FR12 | Rahim | 🟢 | **LIT-226** | Same file (`pertubation_service.py`) as LIT-226 — sequence to avoid conflicting edits. |
+| LIT-165 | Backend mutation engine | FR12 | Rahim | ✅ Done | **LIT-226** | Merged (PR #48). Same file (`pertubation_service.py`) as LIT-226 — sequenced to avoid conflicting edits. |
 | LIT-175 | Time-frequency slice masking | FR12 | Rahim | ✅ Done | LIT-165 (parent) | |
-| LIT-164 | Canvas selection controls (frontend+backend) | FR12 | Ravindu | 🟢 | **LIT-165** | |
-| LIT-176 | Canvas mouse drag/bbox tracker | FR12 | Ravindu | 🟡 In flight | LIT-164 (parent) | |
-| LIT-177 | 2D spectrogram grid selector | FR12 | Ravindu | 🟡 In flight | LIT-164 (parent) | |
-| LIT-178 | Mutation trigger/state dispatcher | FR12 | Ravindu | 🟡 In flight | LIT-164 (parent), LIT-165 | Needs the backend mutation endpoint contract. |
+| LIT-164 | Canvas selection controls (frontend+backend) | FR12 | Ravindu | 🟢 Implemented, Linear still says Todo | **LIT-165** | **2026-09-05 audit:** all three children below are Done + merged, and the `mutation_task` stub this issue's own comment flagged is fixed in `task_orchestrator.py` (delegates to `perturb_and_save`, covered by `TestMutationTask` in `test_task_orchestrator.py`). Every acceptance-criteria item (2D bbox selection, coordinate resolution, soundfile perturbation engine, Web Audio preview, non-destructive before/after) verified directly against the code. Added missing Jest coverage (`PerturbationTools.test.tsx`, `SpectrogramGridSelector.test.tsx`) since none existed despite the feature being live. Flagged on the issue for a human to close — see comment. |
+| LIT-176 | Canvas mouse drag/bbox tracker | FR12 | Ravindu | ✅ Done | LIT-164 (parent) | Merged (PR #75). |
+| LIT-177 | 2D spectrogram grid selector | FR12 | Ravindu | ✅ Done | LIT-164 (parent) | Merged (PR #76). |
+| LIT-178 | Mutation trigger/state dispatcher | FR12 | Ravindu | ✅ Done | LIT-164 (parent), LIT-165 | Merged (PR #77). |
 
 ### Tier 6 — Frontend integration (blocked by the backend features it binds to)
 
