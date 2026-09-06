@@ -1,8 +1,10 @@
 """Unit tests for Deterministic Cache-by-Hash Architecture (SRS FR4)."""
 import pytest
+import threading
 import time
 import numpy as np
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch, MagicMock
 from app.core.redis import cache_manager, cached_inference
 
@@ -152,3 +154,60 @@ class TestCachedInferenceInterceptor:
                 
             # Verify data integrity (byte-identical result)
             assert np.array_equal(result_miss["attribution"], result_hit["attribution"])
+
+
+class TestConcurrentCacheHitLatency:
+    """LIT-170: sub-10ms tensor return under *concurrent* system access.
+
+    The existing hit/miss test above only exercises one caller at a time and
+    accepts up to 200ms; it can't tell us whether the read path holds up once
+    several requests hit the same cached tensor at once, which is the actual
+    shape of production traffic (several browser tabs/analyses re-requesting
+    the same clip's cached attribution).
+    """
+
+    def test_concurrent_reads_of_cached_tensor_are_all_under_10ms(self):
+        original_data = {
+            "attribution": np.random.rand(128, 300).astype(np.float32),
+            "logits": np.array([0.1, 0.9], dtype=np.float64),
+        }
+        key = "audiolit:tensor:concurrent-latency-test"
+        lock = threading.Lock()
+
+        with patch.object(cache_manager, "client") as mock_client:
+            store: dict = {}
+
+            def mock_set(k, value, ex=None, nx=False):
+                with lock:
+                    if nx and k in store:
+                        return False
+                    store[k] = value
+                    return True
+
+            def mock_get(k):
+                with lock:
+                    return store.get(k)
+
+            mock_client.set.side_effect = mock_set
+            mock_client.get.side_effect = mock_get
+
+            cache_manager.set(key, original_data)
+
+            def timed_read(_):
+                start = time.perf_counter()
+                result = cache_manager.get(key)
+                duration_ms = (time.perf_counter() - start) * 1000
+                return duration_ms, result
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                outcomes = list(pool.map(timed_read, range(32)))
+
+            durations_ms = [duration for duration, _ in outcomes]
+            assert max(durations_ms) < 10.0, (
+                f"Slowest concurrent cache-hit read took {max(durations_ms):.3f}ms, "
+                f"expected every read under 10ms (all durations: {durations_ms})"
+            )
+
+            for _, result in outcomes:
+                assert np.array_equal(result["attribution"], original_data["attribution"])
+                assert np.array_equal(result["logits"], original_data["logits"])
