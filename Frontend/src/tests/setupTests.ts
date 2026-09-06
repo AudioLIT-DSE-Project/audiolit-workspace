@@ -9,6 +9,7 @@ jest.mock("@/lib/api", () => ({
 if (typeof HTMLCanvasElement !== "undefined") {
   HTMLCanvasElement.prototype.getContext = jest.fn().mockReturnValue({
     fillRect: jest.fn(),
+    strokeRect: jest.fn(),
     clearRect: jest.fn(),
     getImageData: jest.fn().mockReturnValue({ data: [] }),
     putImageData: jest.fn(),
