@@ -217,9 +217,16 @@ export const Toolbar = ({
 
   return (
     <TooltipProvider>
-      <div className="h-12 bg-card border-b border-border px-5 flex items-center justify-between">
+      {/* LIT-160: the left+right control groups' combined content width
+          exceeds the viewport below ~1400px (confirmed via cross-browser E2E
+          on chromium/firefox/webkit at 1024-1366px), previously forcing the
+          whole page to overflow horizontally instead of just this bar.
+          overflow-x-auto contains that overflow to the toolbar itself; the
+          two groups get flex-shrink-0 so they scroll as intact units rather
+          than squashing their buttons. */}
+      <div className="h-12 bg-card border-b border-border px-5 flex items-center justify-between overflow-x-auto">
         {/* Left side: Model and Dataset selectors */}
-        <div className="flex items-center gap-5">
+        <div className="flex items-center gap-5 flex-shrink-0">
           <div className="flex items-center gap-2.5">
             <span className="text-base font-bold text-foreground tracking-tight">
               AudioLIT
@@ -426,7 +433,7 @@ export const Toolbar = ({
         </div>
 
         {/* Right side: Action buttons */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-shrink-0">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
