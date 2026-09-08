@@ -13,6 +13,14 @@ router = APIRouter()
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# LIT-160: previously unbounded - shutil.copyfileobj wrote a request body to
+# disk in full before anything checked its size, so a multi-GB upload was
+# fully buffered before being rejected (if ever). Enforced by counting bytes
+# during the streamed write below rather than trusting a Content-Length
+# header, which can be absent or spoofed.
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv("AUDIOLIT_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))  # 100MB
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
 @router.get("/upload/test")
 async def test_upload_endpoint():
     """Test endpoint to verify upload service is working"""
@@ -37,24 +45,39 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
         # Generate unique filename to avoid conflicts
         unique_filename = f"{uuid.uuid4()}{file_extension}"
         file_path = UPLOAD_DIR / unique_filename
-        
-        # Save the uploaded file
+
+        # Stream to disk with a hard cap instead of shutil.copyfileobj's
+        # unbounded copy - abort as soon as the cap is crossed rather than
+        # after the whole body has already been written.
+        bytes_written = 0
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Get audio metadata
+            while True:
+                chunk = await file.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_SIZE_BYTES:
+                    buffer.close()
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds maximum upload size of {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB.",
+                    )
+                buffer.write(chunk)
+
+        # Get audio metadata; reject files librosa can't decode instead of
+        # silently accepting them with duration=0, which was indistinguishable
+        # from an actual zero-length clip.
         try:
             audio_data, sample_rate = librosa.load(file_path, sr=None)
             duration = librosa.get_duration(y=audio_data, sr=sample_rate)
             file_size = file_path.stat().st_size
-        except Exception as e:
-            # If we can't read audio metadata, use basic file info
-            duration = 0
-            sample_rate = 0
-            file_size = file_path.stat().st_size
-        
-
-        
+        except Exception:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=422,
+                detail="File could not be decoded as audio. It may be corrupted or in an unsupported format.",
+            )
 
         # FR3.2 / SAD §3.6.2: no model inference on the request path. This route
         # used to await a full forward pass and an embedding extraction before
@@ -80,7 +103,12 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
                 "prediction": None
             }
         )
-    
+
+    except HTTPException:
+        # Preserve the specific status/detail raised above (413 oversized,
+        # 422 undecodable) instead of letting the generic handler below
+        # flatten it into a 500.
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 

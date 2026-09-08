@@ -257,72 +257,102 @@ class TestAPISecurityMeasures:
                 assert response.status_code in [404, 405, 422], f"Method {method_name} should be restricted on /health"
 
 
+def _make_real_wav_bytes(duration_seconds: float = 0.5, sample_rate: int = 16000) -> bytes:
+    """A tiny but genuinely decodable WAV, for tests that need librosa.load
+    to succeed so they isolate the behavior under test (filename handling,
+    size limits) from LIT-160's corrupt-audio rejection."""
+    import io
+    import numpy as np
+    import soundfile as sf
+
+    t = np.linspace(0, duration_seconds, int(sample_rate * duration_seconds), endpoint=False)
+    samples = (0.1 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    buffer = io.BytesIO()
+    sf.write(buffer, samples, sample_rate, format="WAV")
+    return buffer.getvalue()
+
+
 class TestFileUploadSecurity:
-    """Test file upload security measures."""
-    
+    """Test file upload security measures against the real /upload route.
+
+    LIT-160: these previously posted to `/upload/audio`, which doesn't exist -
+    it accidentally matched `DELETE /upload/{file_id}`'s path template
+    (file_id="audio"), so every test here was 405ing for a reason unrelated
+    to file validation, with assertions loose enough to pass anyway.
+    """
+
     @pytest.mark.asyncio
     async def test_file_type_validation(self):
         """Test that only allowed file types are accepted."""
         async with AsyncClient(app=app, base_url="http://test") as client:
-            # Test with various file types
             malicious_files = [
                 ("malicious.exe", b"MZ\x90\x00", "application/octet-stream"),
                 ("script.php", b"<?php echo 'test'; ?>", "text/plain"),
                 ("test.bat", b"@echo off\necho test", "text/plain"),
             ]
-            
+
             for filename, content, content_type in malicious_files:
                 files = {"file": (filename, content, content_type)}
-                response = await client.post("/upload/audio", files=files)
-                
-                # Should reject dangerous file types or handle gracefully
-                # 405 = Method not allowed, 422 = Validation error, 400 = Bad request, 415 = Unsupported media type
-                assert response.status_code in [400, 405, 415, 422], f"Should reject dangerous file: {filename} (got {response.status_code})"
-    
+                response = await client.post("/upload", files=files, data={"model": "whisper-base"})
+
+                assert response.status_code == 400, f"Should reject dangerous file: {filename} (got {response.status_code})"
+
     @pytest.mark.asyncio
-    async def test_file_size_limits(self):
-        """Test file size limits are enforced."""
+    async def test_corrupted_audio_is_rejected_not_silently_accepted(self):
+        """LIT-160: a correctly-named/typed file that isn't real audio must be
+        rejected (422), not accepted with a zeroed-out duration - which was
+        indistinguishable from an actual zero-length clip."""
         async with AsyncClient(app=app, base_url="http://test") as client:
-            # Create a moderately large file content for testing (1MB)
-            large_content = b"A" * (1024 * 1024)  # 1MB
-            
-            files = {"file": ("large_file.wav", large_content, "audio/wav")}
-            response = await client.post("/upload/audio", files=files)
-            
-            # Should handle appropriately - may reject or process based on server limits
-            # 405 = Method not allowed, 413 = Payload too large, 422 = Validation error, 400 = Bad request
-            assert response.status_code in [200, 400, 405, 413, 422], f"Should handle large files appropriately (got {response.status_code})"
-    
+            files = {"file": ("corrupt.mp3", b"NOT_REAL_AUDIO_DATA" * 100, "audio/mpeg")}
+            response = await client.post("/upload", files=files, data={"model": "whisper-base"})
+
+            assert response.status_code == 422, f"Should reject undecodable audio (got {response.status_code})"
+            assert "could not be decoded" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_file_size_limit_is_enforced(self, monkeypatch):
+        """LIT-160: the route previously had no size cap at all - a file over
+        the limit must be rejected (413) rather than fully written to disk."""
+        from app.api.routes import upload as upload_module
+
+        monkeypatch.setattr(upload_module, "MAX_UPLOAD_SIZE_BYTES", 1024)
+        before = set(upload_module.UPLOAD_DIR.glob("*.wav"))
+
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            oversized_content = b"A" * (10 * 1024)
+            files = {"file": ("large_file.wav", oversized_content, "audio/wav")}
+            response = await client.post("/upload", files=files, data={"model": "whisper-base"})
+
+            assert response.status_code == 413, f"Should reject oversized upload (got {response.status_code})"
+            after = set(upload_module.UPLOAD_DIR.glob("*.wav"))
+            assert after == before, "Rejected upload should not be left on disk"
+
     @pytest.mark.asyncio
     async def test_filename_sanitization(self):
-        """Test that filenames are properly sanitized."""
+        """Test that dangerous filenames are handled safely (path traversal,
+        shell metacharacters) - the route generates its own uuid-based
+        filename, so the original filename should never affect where the
+        file is written."""
         async with AsyncClient(app=app, base_url="http://test") as client:
             dangerous_filenames = [
                 "../../../etc/passwd.wav",
                 "..\\..\\windows\\system32\\test.wav",
                 "file<script>.wav",
                 "file|pipe.wav",
-                "file;command.wav"
+                "file;command.wav",
             ]
-            
+            real_wav = _make_real_wav_bytes()
+
             for filename in dangerous_filenames:
-                files = {"file": (filename, b"fake audio content", "audio/wav")}
-                response = await client.post("/upload/audio", files=files)
-                
-                # Should handle dangerous filenames safely - may accept with sanitization or reject
-                assert response.status_code in [200, 400, 405, 422], f"Should handle dangerous filename safely: {filename} (got {response.status_code})"
-                
-                if response.status_code == 200:
-                    try:
-                        response_data = response.json()
-                        # If successful, check that filename was sanitized (if returned)
-                        if 'filename' in response_data:
-                            stored_filename = response_data['filename']
-                            # Validate that dangerous characters are handled
-                            assert stored_filename is not None, "Filename should be processed"
-                    except (ValueError, KeyError):
-                        # Response may not be JSON, that's okay for this test
-                        pass
+                files = {"file": (filename, real_wav, "audio/wav")}
+                response = await client.post("/upload", files=files, data={"model": "whisper-base"})
+
+                assert response.status_code == 200, f"Valid audio with a dangerous filename should still upload: {filename} (got {response.status_code})"
+                data = response.json()
+                # The stored path must be the generated uuid filename, never
+                # a path derived from the attacker-controlled original name.
+                assert ".." not in data["file_path"]
+                assert data["filename"] == filename  # original name is echoed back, not used as a path
 
 
 class TestSessionSecurity:
