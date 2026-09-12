@@ -447,8 +447,13 @@ def add_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[s
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "add.running", {"model": model_id})
     try:
-        from ..domain.model_loader_service import predict_deepfake
-        model_key = model_id if model_id in ("melody-machine", "wav2vec2-add") else "melody-machine"
+        from ..domain.model_loader_service import (
+            predict_deepfake, _ADD_MODEL_REGISTRY, _DEFAULT_ADD_MODEL_KEY,
+        )
+        # Derive both the valid set and the fallback from the registry. Spelling
+        # the default here as a literal meant it kept naming a checkpoint the
+        # rest of the system had already stopped defaulting to.
+        model_key = model_id if model_id in _ADD_MODEL_REGISTRY else _DEFAULT_ADD_MODEL_KEY
         res = predict_deepfake(audio_ref, model_key=model_key)
         label = res.get("predicted_label", "bona-fide")
         syn_prob = float(res.get("synthetic_probability", 0.0))
