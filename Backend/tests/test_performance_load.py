@@ -6,6 +6,7 @@ Test Plan Section 3.1.4 & 3.1.5 - Performance Profiling and Load Testing
 import pytest
 import asyncio
 import time
+import gc
 import psutil
 import json
 from pathlib import Path
@@ -93,23 +94,28 @@ class TestPerformanceProfiling:
         assert retrieval_time <= MAX_CACHE_RESPONSE_TIME, f"Cache retrieval took {retrieval_time:.3f}s, max allowed {MAX_CACHE_RESPONSE_TIME}s"
     
     def test_memory_usage_monitoring(self):
-        """Test memory usage stays within acceptable limits during operation."""
+        """Repeated inference calls must not grow the process without bound.
+
+        This asserts the *delta* across the loop, not absolute process RSS. The
+        absolute form measured the whole pytest process, which by this point in
+        a full run is holding real Whisper/wav2vec2 weights loaded by unrelated
+        tests - so it passed or failed on test ordering rather than on anything
+        this loop does, and it started failing the moment the suite loaded one
+        more model. A leak in the call path is what this can actually observe.
+        """
         process = psutil.Process()
+        gc.collect()
         initial_memory = process.memory_info().rss / 1024 / 1024  # MB
-        
-        # Simulate memory-intensive operation
+
         with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_transcriber.return_value = {"text": "memory test"}
-            
-            # Monitor memory during operations
+
             peak_memory = initial_memory
-            
             for i in range(10):
                 from app.domain import model_loader_service
                 result = model_loader_service.transcribe_whisper("test-model", "test_audio.wav")
                 current_memory = process.memory_info().rss / 1024 / 1024
                 peak_memory = max(peak_memory, current_memory)
-        
         growth = peak_memory - initial_memory
         assert growth <= MAX_MEMORY_GROWTH_MB, (
             f"Memory grew {growth:.1f}MB during 10 mocked transcribe calls, "
