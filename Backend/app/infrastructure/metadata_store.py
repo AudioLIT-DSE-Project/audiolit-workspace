@@ -31,7 +31,7 @@ in LIT-258's test tier.
 from __future__ import annotations
 
 import logging
-import time
+from datetime import datetime, timezone
 from typing import Any, Iterator, Mapping, Optional
 
 from .settings import settings
@@ -87,7 +87,7 @@ AUDIO_SAMPLES_SCHEMA: Mapping[str, Any] = {
             "duration": {"bsonType": "number"},
             "sample_rate": {"bsonType": "number"},
             "file_path_reference": {"bsonType": "string"},
-            "uploaded_at": {"bsonType": "object"},
+            "uploaded_at": {"bsonType": "date"},
         },
     }
 }
@@ -103,7 +103,7 @@ ANALYSIS_RESULTS_SCHEMA: Mapping[str, Any] = {
             "task": {"bsonType": "string"},
             "prediction": {"bsonType": "object"},
             "redis_tensor_key": {"bsonType": "string"},
-            "created_at": {"bsonType": "object"},
+            "created_at": {"bsonType": "date"},
         },
     }
 }
@@ -118,7 +118,7 @@ BIAS_REPORTS_SCHEMA: Mapping[str, Any] = {
             "cohort": {"bsonType": "string"},
             "WER": {"bsonType": "number"},
             "disparity_metrics": {"bsonType": "object"},
-            "created_at": {"bsonType": "object"},
+            "created_at": {"bsonType": "date"},
         },
     }
 }
@@ -300,13 +300,20 @@ class MetadataStore:
     # -- analysis results -------------------------------------------------- #
 
     def insert_analysis(self, analysis: Mapping[str, Any]) -> bool:
-        """Persist one analysis record (redis_tensor_key, not the tensor)."""
+        """Persist (or refresh) one analysis record (redis_tensor_key, not the
+        tensor). Keyed on ``analysis_id`` so a re-run of the same analysis
+        refreshes the document rather than stacking a duplicate against the
+        unique index (LIT-257 write rule)."""
         if not self._try_preflight():
             return False
         try:
             if "created_at" not in analysis:
-                analysis = {**analysis, "created_at": time.time()}
-            self._collection("analysis_results").insert_one(dict(analysis))
+                analysis = {**analysis, "created_at": datetime.now(timezone.utc)}
+            self._collection("analysis_results").update_one(
+                {"analysis_id": analysis["analysis_id"]},
+                {"$set": dict(analysis)},
+                upsert=True,
+            )
             return True
         except PyMongoError as exc:
             logger.warning("metadata.analysis.insert_failed: %s", exc)
@@ -324,13 +331,18 @@ class MetadataStore:
     # -- bias reports ------------------------------------------------------ #
 
     def insert_bias_report(self, report: Mapping[str, Any]) -> bool:
-        """Persist one bias report; kept permanently (no TTL index, SAD §9)."""
+        """Persist (or refresh) one bias report; kept permanently (no TTL index,
+        SAD §9). Keyed on ``report_id`` so a re-run refreshes the document."""
         if not self._try_preflight():
             return False
         try:
             if "created_at" not in report:
-                report = {**report, "created_at": time.time()}
-            self._collection("bias_reports").insert_one(dict(report))
+                report = {**report, "created_at": datetime.now(timezone.utc)}
+            self._collection("bias_reports").update_one(
+                {"report_id": report["report_id"]},
+                {"$set": dict(report)},
+                upsert=True,
+            )
             return True
         except PyMongoError as exc:
             logger.warning("metadata.bias.insert_failed: %s", exc)
@@ -381,7 +393,14 @@ class MetadataStore:
 metadata_store = MetadataStore()
 
 
-def get_metadata_store() -> MetadataStore:
+def get_metadata_store() -> Optional[MetadataStore]:
     """Module-level accessor so routes/workers can swap the store in tests by
-    rebinding the module attribute (see the LIT-229 pattern note)."""
+    rebinding the module attribute (see the LIT-229 pattern note).
+
+    Returns ``None`` when the tier is configured off (MONGO_URL unset/empty),
+    which is the callers' silent-skip signal (SAD §11.1): nothing attempts a
+    connection and nothing is written. Set MONGO_URL to enable the tier.
+    """
+    if not (settings.MONGO_URL or "").strip():
+        return None
     return metadata_store
