@@ -25,8 +25,35 @@ export default defineConfig({
     timeout: 30_000,
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "firefox", use: { ...devices["Desktop Firefox"] } },
-    { name: "webkit", use: { ...devices["Desktop Safari"] } },
+    // LIT-160's layout projects. `testIgnore` keeps the stack-dependent
+    // data-flow specs out of them, so `npm run test:e2e` stays exactly as fast
+    // and as backend-free as it was designed to be.
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      testIgnore: /dataflow\.spec\.ts/,
+    },
+    {
+      name: "firefox",
+      use: { ...devices["Desktop Firefox"] },
+      testIgnore: /dataflow\.spec\.ts/,
+    },
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+      testIgnore: /dataflow\.spec\.ts/,
+    },
+
+    // Opt-in: `npm run test:e2e:dataflow`. Requires the backend, Redis and the
+    // RQ workers to be running. Chromium only - what these assert is that data
+    // survives the round trip from model to panel, which is not a per-browser
+    // property; running it three times would triple a suite whose individual
+    // requests already take tens of seconds on CPU.
+    {
+      name: "dataflow",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: /dataflow\.spec\.ts/,
+      timeout: 180_000,
+    },
   ],
 });

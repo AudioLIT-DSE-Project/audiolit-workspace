@@ -630,6 +630,17 @@ export const PredictionPanel = ({
             <div className="p-3 space-y-4">
               {/* Dynamic XAI Method Toggle Buttons */}
               <div className="flex gap-2 mb-2 flex-wrap">
+                {/*
+                  All four methods for every model family. The deepfake
+                  detectors used to 400 on everything but Grad-CAM, so an
+                  earlier revision of this panel offered them only Grad-CAM;
+                  LIT-164/#128 then implemented Integrated Gradients, LIME and
+                  SHAP for ADD via generate_add_saliency. Both changes were
+                  correct in isolation and wrong together - the gate survived
+                  the merge and hid three working methods. Verified against this
+                  branch's backend: all four return 200 with a measured matrix
+                  for melody-machine.
+                */}
                 {(
                   [
                     "gradcam",
