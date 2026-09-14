@@ -7,6 +7,8 @@ live MongoDB server (mirrors fakeredis for the Redis tier).
 
 import pytest
 
+from datetime import datetime
+
 from app.infrastructure import metadata_store as ms
 
 
@@ -87,6 +89,16 @@ class TestAnalysisRecords:
         store.insert_analysis({"analysis_id": "a2", "sample_id": "s1", "model_id": "m1", "task": "ser"})
         row = store._collection("analysis_results").find_one({"analysis_id": "a2"})
         assert "created_at" in row
+        # A real BSON date (datetime) so the TTL index expires records, which a
+        # float (mongomock accepts, real Mongo rejects) would silently break.
+        assert isinstance(row["created_at"], datetime)
+
+    def test_re_run_refreshes_the_same_analysis_document(self, store):
+        store.insert_analysis({"analysis_id": "a3", "sample_id": "s1", "model_id": "m1", "task": "asr", "prediction": {"text": "first"}})
+        store.insert_analysis({"analysis_id": "a3", "sample_id": "s1", "model_id": "m1", "task": "asr", "prediction": {"text": "second"}})
+        rows = list(store._collection("analysis_results").find({"analysis_id": "a3"}))
+        assert len(rows) == 1
+        assert rows[0]["prediction"]["text"] == "second"
 
 
 class TestBiasReports:
@@ -99,3 +111,27 @@ class TestBiasReports:
         assert len(rows) == 2
         rows = store.list_bias_reports(model_id="m1", cohort="Arabic")
         assert len(rows) == 1
+
+    def test_re_run_refreshes_the_same_report(self, store):
+        store.insert_bias_report({"report_id": "b3", "model_id": "m1", "cohort": "Mandarin", "WER": 0.2, "disparity_metrics": {}})
+        store.insert_bias_report({"report_id": "b3", "model_id": "m1", "cohort": "Mandarin", "WER": 0.15, "disparity_metrics": {}})
+        rows = list(store._collection("bias_reports").find({"report_id": "b3"}))
+        assert len(rows) == 1
+        assert rows[0]["WER"] == 0.15
+
+
+class TestConfiguredOff:
+    """SAD §11.1 / LIT-257: unset MONGO_URL means the tier is configured off -
+    get_metadata_store() returns None and callers skip every write silently."""
+
+    def test_get_metadata_store_returns_none_when_mongo_url_empty(self, monkeypatch):
+        from app.infrastructure.settings import settings
+
+        monkeypatch.setattr(settings, "MONGO_URL", "")
+        assert ms.get_metadata_store() is None
+
+    def test_get_metadata_store_returns_store_when_configured(self, monkeypatch):
+        from app.infrastructure.settings import settings
+
+        monkeypatch.setattr(settings, "MONGO_URL", "mongodb://127.0.0.1:27017")
+        assert ms.get_metadata_store() is ms.metadata_store
