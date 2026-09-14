@@ -25,3 +25,8 @@ captum>=0.6.0
 accelerate
 jiwer>=4.0.0
 locust>=2.31,<3.0
+# SRS §3.10 / SAD §9 — durable MongoDB metadata tier (LIT-255/256/257). The
+# pymongo driver is pure-Python, no native build; mongomock backs the unit
+# tests that don't need a live server (mirrors fakeredis).
+pymongo>=4.6,<5.0
+mongomock>=4.1
