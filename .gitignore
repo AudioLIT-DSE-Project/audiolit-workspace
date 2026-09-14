@@ -79,3 +79,7 @@ Backend/data/
 ehthumbs.db
 Thumbs.db
 desktop.ini
+
+# local opencode config (holds PAT/API keys)
+opencode.jsonc
+
