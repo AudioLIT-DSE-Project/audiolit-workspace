@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
+import { HelpCircle } from "lucide-react";
 import {
   Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer,
   Tooltip as RechartsTooltip, XAxis, YAxis,
@@ -91,18 +93,37 @@ export const DeepfakeForensicPanel = ({
     : null;
 
   return (
+    <TooltipProvider>
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
           Deepfake Forensics
+          <Tooltip>
+            <TooltipTrigger><HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" /></TooltipTrigger>
+            <TooltipContent className="space-y-1">
+              <p className="text-xs">Per-window synthetic-speech probability across the clip (FR7.2),</p>
+              <p className="text-xs">so a bona-fide/spoof verdict can be traced to where suspicion peaks.</p>
+            </TooltipContent>
+          </Tooltip>
           <Badge variant="outline" className="text-[10px]">ADD</Badge>
           {clipVerdict?.predicted_label && (
-            <Badge
-              variant={clipVerdict.predicted_label === "spoof" ? "destructive" : "default"}
-              className="text-[10px]"
-            >
-              {clipVerdict.predicted_label}
-            </Badge>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge
+                  variant={clipVerdict.predicted_label === "spoof" ? "destructive" : "default"}
+                  className="text-[10px]"
+                >
+                  {clipVerdict.predicted_label}
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p className="text-xs">
+                  {clipVerdict.predicted_label === "spoof"
+                    ? "The clip-level detector classified this audio as synthetic (FR7.1)."
+                    : "The clip-level detector classified this audio as genuine human speech (FR7.1)."}
+                </p>
+              </TooltipContent>
+            </Tooltip>
           )}
         </CardTitle>
       </CardHeader>
@@ -167,5 +188,6 @@ export const DeepfakeForensicPanel = ({
         )}
       </CardContent>
     </Card>
+    </TooltipProvider>
   );
 };
