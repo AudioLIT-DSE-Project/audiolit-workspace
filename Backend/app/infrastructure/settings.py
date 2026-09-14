@@ -14,4 +14,15 @@ class Settings(BaseSettings):
     DATASET_FOOTPRINT_LIMIT_GB: float = 100.0
     DATASET_METADATA_ROW_CAP: int = 2000
 
+    # SRS §3.10 / SAD §9 — durable MongoDB metadata tier. Records must survive
+    # in MongoDB; nothing here ever touches audio bytes (constraint C4, SR4).
+    MONGO_URL: str = "mongodb://localhost:27017"
+    MONGO_DB_NAME: str = "audiolit"
+    #: Ordinary analysis records expire after a day; bias reports are retained
+    #: permanently (SAD §9).
+    MONGO_ANALYSIS_TTL_HOURS: int = 24
+    #: How long to wait for a Mongo server before declaring it unavailable and
+    #: degrading writes to no-ops (SRS §3.3.1 graceful degradation).
+    MONGO_SERVER_SELECTION_TIMEOUT_MS: int = 1500
+
 settings = Settings()
