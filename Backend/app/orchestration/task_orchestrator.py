@@ -35,7 +35,10 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from rq import Queue, SimpleWorker
 from rq.job import Job, JobStatus
 
-from ..infrastructure.rq_connection import get_redis_connection
+from ..infrastructure.rq_connection import (
+    get_redis_connection,
+    get_worker_redis_connection,
+)
 
 logger = logging.getLogger("audiolit.orchestration")
 
@@ -341,7 +344,11 @@ def make_worker(
     ``WorkerContext`` stops working - revisit §10's budget first.
     """
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
-    queue = get_queue(fam, connection=connection)
+    # A worker's connection must outlast RQ's blocking dequeue (405 s on the
+    # defaults); the shared request-path client deliberately times reads out
+    # after 10 s, which killed idle workers. See get_worker_redis_connection.
+    # An explicitly passed connection still wins, so tests can inject a fake.
+    queue = get_queue(fam, connection=connection or get_worker_redis_connection())
     return AudioLITWorker(
         family=fam, queues=[queue], connection=queue.connection
     )

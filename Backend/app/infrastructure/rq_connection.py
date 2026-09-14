@@ -65,7 +65,59 @@ def get_redis_connection() -> Redis:
     return _CONNECTION
 
 
+_WORKER_CONNECTION: Redis | None = None
+
+
+def get_worker_redis_connection() -> Redis:
+    """A separate connection for RQ workers, without the read timeout.
+
+    A worker waiting for a job sits in a blocking ``BLPOP`` for
+    ``worker_ttl - 15`` seconds - 405 s with RQ 2.10's defaults. The shared
+    connection above sets ``socket_timeout=10`` so that a hung broker fails a
+    *request* quickly, and redis-py applies that same timeout to the blocking
+    read: the socket times out 10 s into a 405 s wait, RQ sees a Redis
+    connection timeout, and the worker quits.
+
+    That is why workers here died only while idle and survived under load -
+    when jobs are queued, ``BLPOP`` returns long before 10 s. Observed twice in
+    one session, both times after a quiet period, both logged as
+    "Redis connection timeout, quitting..." while Redis itself was healthy and
+    answering PING. Nothing restarts them, so asynchronous work silently stops
+    being processed while the API still looks fine.
+
+    Raising ``socket_timeout`` on the shared connection would fix the worker and
+    break the request path, which uses the same client (acoustic, health and
+    inference routes all call ``get_redis_connection``); a stalled broker would
+    hang a request for seven minutes instead of failing in ten seconds. So the
+    worker gets its own client, with no read deadline, and the request path
+    keeps its fail-fast one.
+
+    ``socket_keepalive`` asks the OS to notice a genuinely dead peer, which is
+    the failure the removed timeout would otherwise have masked.
+    """
+    global _WORKER_CONNECTION
+    if _WORKER_CONNECTION is None:
+        url = settings.REDIS_URL
+        connection = Redis.from_url(
+            url,
+            decode_responses=False,
+            socket_connect_timeout=5,
+            socket_timeout=None,      # must outlast RQ's blocking dequeue
+            socket_keepalive=True,
+            health_check_interval=30,
+        )
+        try:
+            connection.ping()
+        except RedisConnectionError as exc:
+            logger.error("broker.unreachable url=%s err=%s", sanitize_redis_url(url), exc)
+            raise
+        logger.info("broker.connected.worker url=%s", sanitize_redis_url(url))
+        _WORKER_CONNECTION = connection
+    return _WORKER_CONNECTION
+
+
 def reset_connection() -> None:
-    """Drop the cached connection. For tests that swap in a fake Redis."""
-    global _CONNECTION
+    """Drop the cached connections. For tests that swap in a fake Redis."""
+    global _CONNECTION, _WORKER_CONNECTION
     _CONNECTION = None
+    _WORKER_CONNECTION = None

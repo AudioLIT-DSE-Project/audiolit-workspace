@@ -986,8 +986,21 @@ def generate_add_saliency(audio_file_path: str, model_name: str = "melody-machin
             internal_batch_size=1,
         )
     elif method == "lime":
-        lime = Lime(model_forward)
-        attributions = lime.attribute(input_values, additional_forward_args=(attention_mask, target_idx))
+        # Same treatment as the Whisper and SER paths. Unmasked, this asked
+        # Captum to fit a surrogate over ~60,000 individual waveform samples
+        # from its default 50 draws - Captum emits its own >10000-features
+        # warning - and the default Lasso(0.01) then shrank almost all of them
+        # to zero. It cleared the "empty or constant" guard so it reported
+        # MEASURED, but the map held 69 distinct values across 61,824 points
+        # (Integrated Gradients on the same clip: 56,113) and took 63 s. A
+        # coarse artefact of regularisation, not an explanation.
+        lime = Lime(model_forward, interpretable_model=_lime_surrogate())
+        attributions = lime.attribute(
+            input_values,
+            feature_mask=_time_band_feature_mask(input_values, n_bands=LIME_TIME_BANDS),
+            n_samples=max(LIME_TIME_BANDS * 4, 64),
+            additional_forward_args=(attention_mask, target_idx),
+        )
     elif method == "shap":
         gs = GradientShap(model_forward)
         baseline = torch.zeros_like(input_values)

@@ -26,7 +26,12 @@ import { test, expect, type Page } from "@playwright/test";
  * message saying so.
  */
 
-const API = process.env.AUDIOLIT_API ?? "http://localhost:8000";
+// 127.0.0.1, not localhost: on Windows `localhost` resolves to ::1 first while
+// the backend binds IPv4 only (`--host 0.0.0.0`), so each new connection waits
+// out an IPv6 connect timeout first - measured 2063 ms per fresh connection
+// against 23 ms via 127.0.0.1. These tests open fresh connections, so the wrong
+// name silently adds two seconds to every direct API call below.
+const API = process.env.AUDIOLIT_API ?? "http://127.0.0.1:8000";
 
 /** Measured on an idle CPU box: Grad-CAM ~17 s, IG ~21 s, SHAP ~34 s, LIME ~110 s. */
 const SALIENCY_TIMEOUT_MS = 150_000;

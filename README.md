@@ -93,7 +93,20 @@ redis-server --port 6379
    ```bash
    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
-   The backend API will be available at `http://localhost:8000`. You can inspect the OpenAPI documentation at `http://localhost:8000/docs`.
+   The backend API will be available at `http://127.0.0.1:8000`.
+
+   > **Windows: use `127.0.0.1`, not `localhost`, for API calls from scripts
+   > and tools.** `--host 0.0.0.0` binds IPv4 only, while Windows resolves
+   > `localhost` to `::1` (IPv6) first — so every *new* TCP connection waits out
+   > an IPv6 connect timeout before falling back. Measured on this repo:
+   > **2063 ms** per fresh connection via `localhost` against **23 ms** via
+   > `127.0.0.1` (a reused keep-alive connection is 13 ms either way, which is
+   > why it hides so easily). `--host ::` is not a fix on Windows: it binds IPv6
+   > *only*, which breaks IPv4 clients. The browser app is unaffected because it
+   > keeps connections alive and its session cookie is `SameSite=Lax`, which
+   > requires the page and the API to share a host name.
+
+   Interactive OpenAPI docs: `http://127.0.0.1:8000/docs`.
 
 ---
 
@@ -160,7 +173,9 @@ curl http://localhost:8000/health/workers
    ```bash
    npm run dev
    ```
-   Open your browser and navigate to `http://localhost:5173`.
+   Open your browser and navigate to `http://localhost:8080`.
+   (`vite.config.ts` sets `server.port` to 8080; Vite's own 5173 default
+   does not apply here.)
 
 ---
 

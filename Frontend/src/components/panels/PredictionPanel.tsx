@@ -319,24 +319,6 @@ export const PredictionPanel = ({
 
   const hasAttention = !!model && model.includes("whisper");
 
-  // The saliency service implements Grad-CAM only for the deepfake detectors
-  // and answers 400 for the other three. Offering all four regardless meant
-  // three of the four buttons were a guaranteed error whenever an ADD model was
-  // selected, which reads as the panel being broken.
-  const isDeepfakeModel = !!model && (
-    ['melody-machine', 'wav2vec2-add'].includes(model) ||
-    model.toLowerCase().includes('deepfake')
-  );
-  const availableXAIMethods: XAIMethod[] = isDeepfakeModel
-    ? ['gradcam']
-    : ['gradcam', 'integrated_gradients', 'lime', 'shap'];
-
-  useEffect(() => {
-    if (!availableXAIMethods.includes(activeXAIMethod)) {
-      setActiveXAIMethod('gradcam');
-    }
-  }, [isDeepfakeModel, activeXAIMethod]);
-
   // Synchronize ADD (Deepfake Warning Banner & Card)
   const rawAdd = unifiedResult?.tasks?.add || cachedTaskResults?.add;
   const addResult =
@@ -648,7 +630,25 @@ export const PredictionPanel = ({
             <div className="p-3 space-y-4">
               {/* Dynamic XAI Method Toggle Buttons */}
               <div className="flex gap-2 mb-2 flex-wrap">
-                {availableXAIMethods.map((m) => (
+                {/*
+                  All four methods for every model family. The deepfake
+                  detectors used to 400 on everything but Grad-CAM, so an
+                  earlier revision of this panel offered them only Grad-CAM;
+                  LIT-164/#128 then implemented Integrated Gradients, LIME and
+                  SHAP for ADD via generate_add_saliency. Both changes were
+                  correct in isolation and wrong together - the gate survived
+                  the merge and hid three working methods. Verified against this
+                  branch's backend: all four return 200 with a measured matrix
+                  for melody-machine.
+                */}
+                {(
+                  [
+                    "gradcam",
+                    "integrated_gradients",
+                    "lime",
+                    "shap",
+                  ] as XAIMethod[]
+                ).map((m) => (
                   <button
                     key={m}
                     onClick={() => setActiveXAIMethod(m)}
