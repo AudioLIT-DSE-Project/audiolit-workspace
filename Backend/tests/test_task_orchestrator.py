@@ -232,6 +232,55 @@ class TestWorkers:
         assert isinstance(w, SimpleWorker)
         assert not isinstance(w, Worker)
 
+    def test_worker_read_timeout_outlasts_the_blocking_dequeue(self, conn):
+        """A worker's socket must not time out while it waits for a job.
+
+        An idle RQ worker sits in a blocking BLPOP for ``worker_ttl - 15`` -
+        405 s on RQ 2.10's defaults. The request-path connection sets
+        ``socket_timeout=10`` so a hung broker fails a request fast, and
+        redis-py applies that same deadline to the blocking read: the socket
+        times out 10 s into a 405 s wait, RQ reports "Redis connection timeout,
+        quitting...", and the worker exits. Observed twice in one session, both
+        times after a quiet period, while Redis itself answered PING.
+
+        Nothing restarts a worker that quits, so async work stops being
+        processed while the API still reports healthy - which is why this is
+        pinned rather than left to a comment.
+        """
+        from app.infrastructure.rq_connection import get_worker_redis_connection
+
+        w = make_worker(WorkerFamily.ASR, connection=conn)
+        worker_conn = get_worker_redis_connection()
+        read_timeout = worker_conn.connection_pool.connection_kwargs.get("socket_timeout")
+
+        assert read_timeout is None or read_timeout > w.dequeue_timeout, (
+            f"worker socket_timeout={read_timeout}s would fire during a "
+            f"{w.dequeue_timeout}s blocking dequeue and kill an idle worker"
+        )
+
+    def test_request_path_connection_keeps_its_fail_fast_timeout(self):
+        """The other half: raising the worker's timeout must not raise the API's.
+
+        `get_redis_connection` is shared by the acoustic, health and inference
+        routes. Without a read deadline there, a stalled broker would hang a
+        request for minutes instead of failing in seconds.
+        """
+        from app.infrastructure.rq_connection import (
+            get_redis_connection,
+            reset_connection,
+        )
+
+        reset_connection()
+        try:
+            conn = get_redis_connection()
+        except Exception:
+            pytest.skip("no broker reachable to inspect the request-path client")
+        timeout = conn.connection_pool.connection_kwargs.get("socket_timeout")
+        assert timeout is not None and timeout <= 30, (
+            f"request-path socket_timeout={timeout} - the API should fail fast, "
+            "only the worker connection may block indefinitely"
+        )
+
 
 class TestGpuWorkerLock:
     def test_lock_is_released_after_the_worker_exits(self, broker, stub_worker):
