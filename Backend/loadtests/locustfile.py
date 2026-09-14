@@ -17,7 +17,7 @@ Running it
 Bring the stack up first (Redis, API, workers - see README section "Step-by-Step
 Execution Guide"), then from ``Backend/``::
 
-    locust -f loadtests/locustfile.py --host http://localhost:8000 \
+    locust -f loadtests/locustfile.py --host http://127.0.0.1:8000 \
            --headless -u 8 -r 2 -t 3m
 
 ``-u`` is concurrent users and ``-r`` the spawn rate. Keep ``-u`` modest on CPU:
@@ -85,6 +85,15 @@ ENFORCE_MODEL_TARGETS = os.getenv("LOADTEST_ENFORCE_MODEL_TARGETS") == "1"
 # reported but not judged. Raise the run duration, not this number.
 MIN_SAMPLES_TO_ENFORCE = int(os.getenv("LOADTEST_MIN_SAMPLES", "20"))
 
+# IPv4 loopback by name. On Windows `localhost` resolves to ::1 first and the
+# backend binds IPv4 only (`--host 0.0.0.0`), so every NEW connection tries
+# IPv6, finds nothing, and falls back only after the OS connect timeout:
+# measured 2063 ms per fresh connection via `localhost` against 23 ms via
+# `127.0.0.1` (a warm keep-alive connection is 13 ms either way). Locust opens
+# a fresh connection per user, so the wrong host name would add two seconds to
+# every user's first request and distort the tail of every statistic reported.
+DEFAULT_HOST = "http://127.0.0.1:8000"
+
 DATASET = "common-voice"
 MODEL = "whisper-base"
 SALIENCY_METHODS = ("gradcam", "integrated_gradients", "lime", "shap")
@@ -121,7 +130,7 @@ def warm_the_cache(environment, **_kwargs):
 
     import requests
 
-    host = environment.host or "http://localhost:8000"
+    host = environment.host or DEFAULT_HOST
     print(f"[warmup] priming {len(WARM_CLIPS)} clip(s) against {host} ...", flush=True)
     for clip in WARM_CLIPS:
         try:
@@ -188,6 +197,16 @@ def score_against_srs(environment, **_kwargs):
             print(f"{'':<{width}}{'':>24}   {srs}")
     print("=" * 92)
 
+    if stats.total.num_requests == 0:
+        # A run that issued nothing must not report success. Locust exits 0 by
+        # default when no user ever started (a missing --host does exactly
+        # this), and "All enforced targets met" over an empty run is the
+        # manufactured-green result this suite exists to avoid.
+        print("NO REQUESTS WERE MADE - nothing was measured. Check --host and "
+              "that the API is reachable.")
+        environment.process_exit_code = 1
+        return
+
     failures = stats.total.num_failures
     if failures:
         print(f"{failures} request failure(s) - see the table above for which endpoints.")
@@ -219,6 +238,7 @@ class CachedReadUser(HttpUser):
     cached-response target describes.
     """
 
+    host = DEFAULT_HOST
     weight = 10
     wait_time = between(0.5, 1.5)
 
@@ -248,6 +268,7 @@ class AsyncEnqueueUser(HttpUser):
     should have handed to a queue.
     """
 
+    host = DEFAULT_HOST
     weight = 6
     wait_time = between(1, 2)
 
@@ -270,6 +291,7 @@ class HeavyAnalysisUser(HttpUser):
     analysts running real analyses do to everyone else's latency.
     """
 
+    host = DEFAULT_HOST
     weight = 2
     wait_time = between(2, 5)
 
