@@ -104,6 +104,11 @@ audiolit-workspace/
 - **`main`** — production. Never receive a PR directly from a feature branch.
 - **`develop`** — integration branch. All feature work branches off `develop`;
   PRs merge **into `develop`**.
+- **`testing`** — dedicated test harness and evaluation branch. Incorporates all
+  commits from `develop` and `main`, hosting full-stack end-to-end dataflow
+  suites (Playwright `dataflow`), performance benchmarks & load testing (Locust),
+  and diagnostic evaluation scripts. Hosting testing tooling in this branch
+  ensures `develop` and `main` remain clean, lightweight, and uncluttered.
 - **`develop` → `main`** only after a full audit.
 - **One feature branch per Linear issue** (`feature/lit-xxx-...`), **one PR per
   issue**, referencing the LIT-id. CI (pytest + Jest, ruff/Black,

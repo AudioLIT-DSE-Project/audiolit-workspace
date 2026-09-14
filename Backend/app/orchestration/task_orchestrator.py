@@ -35,7 +35,10 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from rq import Queue, SimpleWorker
 from rq.job import Job, JobStatus
 
-from ..infrastructure.rq_connection import get_redis_connection
+from ..infrastructure.rq_connection import (
+    get_redis_connection,
+    get_worker_redis_connection,
+)
 
 logger = logging.getLogger("audiolit.orchestration")
 
@@ -341,7 +344,11 @@ def make_worker(
     ``WorkerContext`` stops working - revisit §10's budget first.
     """
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
-    queue = get_queue(fam, connection=connection)
+    # A worker's connection must outlast RQ's blocking dequeue (405 s on the
+    # defaults); the shared request-path client deliberately times reads out
+    # after 10 s, which killed idle workers. See get_worker_redis_connection.
+    # An explicitly passed connection still wins, so tests can inject a fake.
+    queue = get_queue(fam, connection=connection or get_worker_redis_connection())
     return AudioLITWorker(
         family=fam, queues=[queue], connection=queue.connection
     )
@@ -447,8 +454,13 @@ def add_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[s
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "add.running", {"model": model_id})
     try:
-        from ..domain.model_loader_service import predict_deepfake
-        model_key = model_id if model_id in ("melody-machine", "wav2vec2-add") else "melody-machine"
+        from ..domain.model_loader_service import (
+            predict_deepfake, _ADD_MODEL_REGISTRY, _DEFAULT_ADD_MODEL_KEY,
+        )
+        # Derive both the valid set and the fallback from the registry. Spelling
+        # the default here as a literal meant it kept naming a checkpoint the
+        # rest of the system had already stopped defaulting to.
+        model_key = model_id if model_id in _ADD_MODEL_REGISTRY else _DEFAULT_ADD_MODEL_KEY
         res = predict_deepfake(audio_ref, model_key=model_key)
         label = res.get("predicted_label", "bona-fide")
         syn_prob = float(res.get("synthetic_probability", 0.0))

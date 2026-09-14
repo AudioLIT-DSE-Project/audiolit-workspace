@@ -189,8 +189,9 @@ class TestWarmupWritesCorrectShapes:
                     f"{ns}:{key} holds a dict - ADD overwrote the transcript"
                 )
         # and the ADD result still landed, under its own checkpoint
+        from app.domain.model_loader_service import _DEFAULT_ADD_MODEL_KEY
         add_written = any(
-            k in writes for k in ck.deepfake_keys("melody-machine", (h,))
+            k in writes for k in ck.deepfake_keys(_DEFAULT_ADD_MODEL_KEY, (h,))
         )
         assert add_written, "ADD result was not cached under its own model key"
 
