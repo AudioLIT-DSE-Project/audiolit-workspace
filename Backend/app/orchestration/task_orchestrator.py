@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence
@@ -406,6 +407,169 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
 # per-family queues is the remaining step of LIT-127's follow-on, and needs the
 # `/upload` contract change that LIT-227/LIT-157 deliberately deferred.
 
+# --------------------------------------------------------------------------- #
+# Metadata write-through (SRS §3.10 / SAD §9 / SAD §11.1, LIT-257)
+# --------------------------------------------------------------------------- #
+# The fan-in aggregator and the bias-diagnostic task each write their results
+# through to the durable MongoDB tier *before* the Redis cache write so that
+# model registrations, analysis records, and bias reports survive a cache flush
+# or restart (SAD §6.2 write-order). Every write is try/except logged and
+# swallowed: metadata degradation is observable but never fatal.
+
+
+#: Arrays at or above this length are treated as tensors/heatmaps and dropped
+#: before a result reaches the durable tier (C4/SR4: no tensor payloads).
+_MAX_PERSISTED_LIST_LEN: int = 16
+
+_DROP = object()
+
+
+def _strip_array_fields(value: Any) -> Any:
+    """Recursively drop array-shaped payloads from a result before writing it
+    to the durable tier.
+
+    Saliency/attention heatmaps and embedding vectors live in Redis under
+    ``redis_tensor_key``; MongoDB records a reference, never the tensor
+    (SRS §3.10, C4/SR4). Lists beyond ``_MAX_PERSISTED_LIST_LEN`` or anything
+    NumPy/tensor-shaped are dropped; short plain lists survive.
+    """
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            cleaned = _strip_array_fields(v)
+            if cleaned is not _DROP:
+                out[k] = cleaned
+        return out
+    if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_PERSISTED_LIST_LEN:
+            return _DROP
+        cleaned = [_strip_array_fields(v) for v in value]
+        return [c for c in cleaned if c is not _DROP]
+    if type(value).__name__ in ("ndarray", "Tensor") and hasattr(value, "shape"):
+        return _DROP
+    return value
+
+
+def _sample_id(audio_ref: str) -> str:
+    """Deterministic id for an audio sample derived from its path reference."""
+    return hashlib.sha256(audio_ref.encode("utf-8")).hexdigest()
+
+
+def _audio_sample_details(audio_ref: str) -> dict[str, Any] | None:
+    """Duration/sample-rate metadata for a sample path, or None if unreadable.
+
+    Uses ``soundfile.info`` only -- the file's header -- never reads audio
+    samples into memory (constraint C4/SR4: metadata tier touches no bytes).
+    """
+    try:
+        import soundfile as sf
+        import os as _os
+
+        info = sf.info(audio_ref)
+        return {
+            "filename": _os.path.basename(audio_ref),
+            "duration": info.duration,
+            "sample_rate": info.samplerate,
+            "uploaded_at": datetime.now(timezone.utc),
+        }
+    except Exception as exc:
+        logger.warning("metadata.sample.info_failed ref=%s: %s", audio_ref, exc)
+        return None
+
+
+def _write_analysis_metadata(
+    combined: Mapping[str, Any],
+    cache_key: str | None,
+    audio_ref: str | None,
+) -> None:
+    """Fan-in write-through to the durable MongoDB metadata tier (LIT-257).
+
+    Records the sample once and one ``analysis_results`` document per task,
+    then carries on regardless. ``get_metadata_store()`` returning ``None``
+    means the tier is configured off and this is a silent no-op; any
+    individual failure is logged as ``metadata.write_failed`` and swallowed,
+    so metadata can never fail an analysis (SRS §3.3.1 / SAD §11.1).
+
+    Write order follows SAD §6.2: MongoDB *before* the Redis cache write in
+    ``aggregator_task``.
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    sample_id: str | None = None
+    if audio_ref:
+        sample_id = _sample_id(audio_ref)
+        details = _audio_sample_details(audio_ref)
+        if details is not None:
+            try:
+                store.upsert_audio_sample(
+                    {"sample_id": sample_id, "file_path_reference": audio_ref, **details}
+                )
+            except Exception as exc:
+                logger.warning("metadata.write_failed collection=audio_samples: %s", exc)
+
+    for key, result in combined.get("tasks", {}).items():
+        if not isinstance(result, Mapping) or not result.get("task"):
+            # A failed sibling reached the fan-in as {"status": "failed"} keyed
+            # by job id - there is nothing reproducible to record for it.
+            continue
+        task_name = result.get("task", key)
+        analysis_id = f"{cache_key or _sample_id(audio_ref or '')}:{task_name}"
+        try:
+            store.insert_analysis(
+                {
+                    "analysis_id": analysis_id,
+                    "sample_id": sample_id,
+                    "model_id": result.get("model_id"),
+                    "task": task_name,
+                    "prediction": _strip_array_fields(dict(result)),
+                    "redis_tensor_key": cache_key,
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=analysis_results: %s", exc)
+
+
+def _write_bias_report(model_id: str, report: Any) -> None:
+    """Write-through one ``bias_reports`` document per cohort (retained
+    permanently, SAD §9; LIT-257).
+
+    Never raises: a failed write is logged and skipped, so metadata lag never
+    shadows an accent-bias diagnostic (SRS §3.3.1 / SAD §11.1).
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    corpus = getattr(report, "corpus", "l2-arctic")
+    for cohort in getattr(report, "cohorts", []) or []:
+        try:
+            store.insert_bias_report(
+                {
+                    "report_id": f"{model_id}:{corpus}:{getattr(cohort, 'accent', '')}",
+                    "model_id": model_id,
+                    "cohort": getattr(cohort, "accent", ""),
+                    "WER": getattr(cohort, "mean_wer", None),
+                    "disparity_metrics": {
+                        "sample_count": getattr(cohort, "sample_count", 0),
+                        "scored_count": getattr(cohort, "scored_count", 0),
+                        "median_wer": getattr(cohort, "median_wer", None),
+                        "stdev_wer": getattr(cohort, "stdev_wer", None),
+                        "min_wer": getattr(cohort, "min_wer", None),
+                        "max_wer": getattr(cohort, "max_wer", None),
+                        "corpus": corpus,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=bias_reports: %s", exc)
+
+
 def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "asr.running", {"model": model_id})
@@ -542,14 +706,22 @@ def accent_bias_task(
         model_id=model_id,
         samples_per_cohort=samples_per_cohort,
     )
+    _write_bias_report(model_id, report)
     publish_progress(_current_job_id(), "accent_bias.completed", {"model": model_id})
     return report.to_json_dict()
 
 
-def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dict[str, Any]:
+def aggregator_task(
+    family_job_ids: Sequence[str],
+    cache_key: str | None,
+    audio_ref: str | None = None,
+) -> dict[str, Any]:
     """Fan-in: combine the family jobs' results once they have all finished.
 
-    A failed sibling never loses the others' results (SAD §11.1).
+    A failed sibling never loses the others' results (SAD §11.1). Once the
+    combined result is assembled it is written through to the durable metadata
+    tier *before* the Redis cache write (SAD §6.2 write order), so metadata
+    lag can never shadow the cache (LIT-257).
     """
     conn = get_redis_connection()
     combined: dict[str, Any] = {"tasks": {}, "cache_key": cache_key, "schema_version": "1.0"}
@@ -560,6 +732,8 @@ def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dic
             continue
         result = job.result or {}
         combined["tasks"][result.get("task", "unknown")] = result
+
+    _write_analysis_metadata(combined, cache_key, audio_ref)
 
     if cache_key is not None:
         # TODO(LIT-163): write the combined result to the content-addressed cache.
@@ -635,6 +809,7 @@ def enqueue_multitask_analysis(
         aggregator_task,
         [j.id for j in family_job_objs],
         cache_key,
+        audio_ref,
         depends_on=family_job_objs,
         job_timeout=DEFAULT_AGGREGATOR_TIMEOUT,
         result_ttl=DEFAULT_RESULT_TTL,
