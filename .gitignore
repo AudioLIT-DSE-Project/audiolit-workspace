@@ -1,4 +1,15 @@
-# Python environment files
+# Repository-wide ignores.
+#
+# Backend/.gitignore and Frontend/.gitignore hold the rules specific to each
+# stack; this file covers the repository root and anything that can appear in
+# either tree.
+#
+# Deliberately NOT listed here: .antigravity/, .agents/ and GEMINI.md. Those are
+# per-developer tooling and are excluded via .git/info/exclude, which is
+# repo-local and never committed — putting them here would push one developer's
+# tool choice onto the whole team. See .antigravity/docs/SEPARATION.md.
+
+# --- Python -----------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,5 +17,65 @@ venv/
 .venv/
 env/
 .env
+.env.local
+.env.*.local
+
+# --- Node / frontend --------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Test, coverage and type-check caches -----------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+
+# --- Application runtime output ---------------------------------------------
+# upload.py writes to Path("uploads") relative to the working directory, so this
+# appears at the repo root or under Backend/ depending on where the server was
+# started. Every developer generates these; none of them belong in git.
+uploads/
 scratch/
 logs/
+*.log
+
+# --- Datasets and model caches ----------------------------------------------
+# Corpora are pulled via datasets.lock, not committed (see also Backend/.gitignore).
+Backend/data/
+.cache/
+
+# --- Editors ----------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# --- Claude Code ------------------------------------------------------------
+# Project-level .claude/settings.json is shareable; the .local. variant is
+# per-developer and must not be committed.
+.claude/settings.local.json
+
+# --- OS junk ----------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
