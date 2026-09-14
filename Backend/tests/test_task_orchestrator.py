@@ -232,7 +232,7 @@ class TestWorkers:
         assert isinstance(w, SimpleWorker)
         assert not isinstance(w, Worker)
 
-    def test_worker_read_timeout_outlasts_the_blocking_dequeue(self, conn):
+    def test_worker_read_timeout_outlasts_the_blocking_dequeue(self, conn, monkeypatch):
         """A worker's socket must not time out while it waits for a job.
 
         An idle RQ worker sits in a blocking BLPOP for ``worker_ttl - 15`` -
@@ -246,17 +246,35 @@ class TestWorkers:
         Nothing restarts a worker that quits, so async work stops being
         processed while the API still reports healthy - which is why this is
         pinned rather than left to a comment.
-        """
-        from app.infrastructure.rq_connection import get_worker_redis_connection
 
-        w = make_worker(WorkerFamily.ASR, connection=conn)
-        worker_conn = get_worker_redis_connection()
+        The assertion is about configuration, not connectivity, so we capture the
+        kwargs passed to ``Redis.from_url`` without making a real connection.
+        """
+        import unittest.mock as mock
+        from app.infrastructure import rq_connection
+
+        captured_kwargs: dict = {}
+
+        def _fake_from_url(url, **kwargs):
+            captured_kwargs.update(kwargs)
+            fake = mock.MagicMock()
+            fake.connection_pool.connection_kwargs = kwargs
+            return fake
+
+        rq_connection.reset_connection()
+        monkeypatch.setattr("app.infrastructure.rq_connection.Redis.from_url", _fake_from_url)
+
+        worker_conn = rq_connection.get_worker_redis_connection()
         read_timeout = worker_conn.connection_pool.connection_kwargs.get("socket_timeout")
 
+        w = make_worker(WorkerFamily.ASR, connection=conn)
         assert read_timeout is None or read_timeout > w.dequeue_timeout, (
             f"worker socket_timeout={read_timeout}s would fire during a "
             f"{w.dequeue_timeout}s blocking dequeue and kill an idle worker"
         )
+
+        # Restore the global so the MagicMock doesn't leak into other tests.
+        rq_connection.reset_connection()
 
     def test_request_path_connection_keeps_its_fail_fast_timeout(self):
         """The other half: raising the worker's timeout must not raise the API's.
