@@ -8,6 +8,12 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = "lax"  # use "none" on cross-site + https
     COOKIE_DOMAIN: str | None = None
 
+    # SRS §3.6.3 / SAD §11.3 (LIT-223) - the inherited /debug/session
+    # diagnostic was reachable unauthenticated and echoed cookies + request
+    # headers back to any caller. Now disabled unless explicitly enabled, and
+    # when enabled it returns only the session id.
+    DEBUG_ENABLED: bool = False
+
     # FR2.2 — active dataset working footprint bound (~100 GB across all
     # seven corpora per the SRS) and the per-request row cap that keeps
     # `/{dataset}/metadata` from materializing an entire large corpus.
