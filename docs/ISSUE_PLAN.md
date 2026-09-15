@@ -255,7 +255,7 @@ Not Tier-C stamped (per LIT-228 rule 2 — process/deliverable issues carry no F
 | LIT-195 | GitHub landing page | — |
 | LIT-202 | Landing page deployment | LIT-195 (parent) |
 | LIT-196 | Package source, finalize report | LIT-194 |
-| LIT-203 | Production containerization | LIT-196 (parent) |
+| LIT-203 | Production containerization | LIT-196 (parent) — **PR #145 open (In review, CI green)** |
 | LIT-204 | Final IEEE-style report | LIT-196 (parent) |
 | LIT-205 | Academic portal submission | LIT-196 (parent) |
 
