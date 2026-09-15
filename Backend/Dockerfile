@@ -21,9 +21,12 @@ RUN /opt/venv/bin/pip install --no-cache-dir -r /build/requirements.txt
 FROM python:3.11-slim AS runtime
 # libsndfile1: soundfile's native library (LIT-226 keeps audio I/O on
 # soundfile; torchaudio is intentionally absent). libgomp1: torch OpenMP.
+# apt-get upgrade hardens the base tag against freshly-published CRITICALs
+# (Trivy gate, LIT-203) without a base-image rebuild.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
         libgomp1 \
+    && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/venv /opt/venv
