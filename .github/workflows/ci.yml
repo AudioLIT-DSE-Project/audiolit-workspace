@@ -82,14 +82,14 @@ jobs:
       - name: Build frontend image
         run: docker build --build-arg VITE_API_BASE_URL=http://127.0.0.1:8000 -f Frontend/Dockerfile -t audiolit-frontend:ci .
       - name: Scan backend image (CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: audiolit-backend:ci
           severity: CRITICAL
           exit-code: '1'
           ignore-unfixed: true
       - name: Scan frontend image (CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: audiolit-frontend:ci
           severity: CRITICAL
