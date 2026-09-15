@@ -1,0 +1,114 @@
+# LIT-203 — full-stack AudioLIT (SAD §7 Deployment View).
+#
+# One command brings up the web UI (Vite build on nginx:8080), the FastAPI
+# gateway (8000), the RQ worker fleet, Redis (queue + cache, 2 GB LRU per
+# SRS §3.4.3) and MongoDB (durable metadata tier, SRS §3.10). Runs on CPU-only
+# machines by default; `docker compose -f docker-compose.yml -f
+# docker-compose.gpu.yml up --build` grants the worker containers the host GPU.
+#
+# All messages/options deliberately stay on the 127.0.0.1 host bus: the session
+# cookie is SameSite=Lax, and http://127.0.0.1:8080 -> http://127.0.0.1:8000 is
+# same-site (ports do not change the site), so the browser keeps sending it.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: audiolit-redis
+    # 2 GB per SRS 3.4.3 ("Redis cache | 2 GB cap (configurable) | LRU eviction;
+    # persistence disabled since every entry is recomputable"). This was 256 MB,
+    # eight times under the committed budget, which a single load-test run
+    # exhausted: saliency payloads carry a full base spectrogram plus an
+    # attribution matrix, so a handful of them fill it. When it filled, writes
+    # started failing with "OutOfMemoryError: command not allowed when used
+    # memory > 'maxmemory'" - and because RQ registers and heartbeats workers
+    # through the same Redis, that killed the workers rather than merely missing
+    # a cache entry. LRU eviction cannot save a write larger than what it can
+    # free in one pass.
+    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mongo:
+    image: mongo:6
+    container_name: audiolit-mongo
+    # Durable metadata tier (SRS §3.10 / SAD §9, LIT-255/256/257). Volumed so
+    # records survive restarts; nothing here ever touches audio bytes (C4).
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok == 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  api:
+    build:
+      context: .
+      dockerfile: Backend/Dockerfile
+    image: audiolit-backend:latest
+    container_name: audiolit-api
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MONGO_URL: mongodb://mongo:27017
+      HF_HOME: /models
+    ports:
+      - "8000:8000"
+    volumes:
+      - model-cache:/models
+      - ./Backend/data:/data
+      - ./uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Backend/Dockerfile
+    image: audiolit-backend:latest
+    container_name: audiolit-worker
+    command: ["python", "-m", "app.orchestration.worker", "all"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MONGO_URL: mongodb://mongo:27017
+      HF_HOME: /models
+    volumes:
+      - model-cache:/models
+      - ./Backend/data:/data
+      - ./uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Frontend/Dockerfile
+      args:
+        # Same host name as the API bus above (cookie same-site); never switch
+        # to localhost here while the API address stays 127.0.0.1.
+        VITE_API_BASE_URL: http://127.0.0.1:8000
+    image: audiolit-frontend:latest
+    container_name: audiolit-web
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  model-cache:

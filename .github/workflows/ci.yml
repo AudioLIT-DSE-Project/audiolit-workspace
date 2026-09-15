@@ -42,10 +42,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          # Cache pip's wheel downloads, keyed on requirements.txt. On a cache
-          # hit the heavy wheels (torch/transformers/umap/...) aren't re-fetched.
+          # Cache pip's wheel downloads, keyed on the dev requirements (which
+          # includes requirements.txt). On a cache hit the heavy wheels
+          # (torch/transformers/umap/...) aren't re-fetched.
           cache: 'pip'
-          cache-dependency-path: Backend/requirements.txt
+          cache-dependency-path: |
+            Backend/requirements.txt
+            Backend/requirements-dev.txt
       - name: Install Dependencies
         run: |
           cd Backend
@@ -56,7 +59,7 @@ jobs:
           # torch>=2.6.0 is then already satisfied, so the -r install won't
           # re-fetch it. This shrinks both the download and the cache entry.
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-          python -m pip install -r requirements.txt pytest httpx
+          python -m pip install -r requirements-dev.txt
       - name: Verify torch is the CPU build
         run: |
           cd Backend
@@ -65,3 +68,30 @@ jobs:
         run: |
           cd Backend
           pytest
+
+  # LIT-203 acceptance: both production images build and scan clean at
+  # CRITICAL severity. ignore-unfixed keeps the gate opinionated: only a
+  # fixable CRITICAL CVE fails the run (an unfixable one in a pinned base
+  # image is a bump-the-tag decision, not a red CI).
+  docker-image-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -f Backend/Dockerfile -t audiolit-backend:ci .
+      - name: Build frontend image
+        run: docker build --build-arg VITE_API_BASE_URL=http://127.0.0.1:8000 -f Frontend/Dockerfile -t audiolit-frontend:ci .
+      - name: Scan backend image (CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: audiolit-backend:ci
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Scan frontend image (CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: audiolit-frontend:ci
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
