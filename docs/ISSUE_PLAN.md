@@ -195,7 +195,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|
-| LIT-223 | Remediate inherited security gaps | — | 🟢 | 🟡 In flight         | Touches `dataset_service.py`, which LIT-227 also restructures — sequence to avoid rework. |
+| LIT-223 | Remediate inherited security gaps | Rahim | 🔵 In Review | — | **PR #142 opened, CI green** (backend-test 4m14s, frontend-lint 1m5s). `DEBUG_ENABLED` gate on `/debug/session`, route-level CORS removed from `datasets.py`/`upload.py`/`dataset_management.py`, cross-session custom-dataset access denied in `dataset_service`. |
 
 ---
 
@@ -256,6 +256,9 @@ Not Tier-C stamped (per LIT-228 rule 2 — process/deliverable issues carry no F
 | LIT-202 | Landing page deployment | LIT-195 (parent) |
 | LIT-196 | Package source, finalize report | LIT-194 |
 | LIT-203 | Production containerization | LIT-196 (parent) |
+| LIT-259 | Emit structured JSON task logs and export operational metrics | — (next after LIT-263) |
+| LIT-263 | Viva prep (Rahim): code ownership map, walkthrough, question bank | — |
+| LIT-265 | IEEE report §4: system architecture, infrastructure & data tier | LIT-196 (parent) |
 | LIT-204 | Final IEEE-style report | LIT-196 (parent) |
 | LIT-205 | Academic portal submission | LIT-196 (parent) |
 
