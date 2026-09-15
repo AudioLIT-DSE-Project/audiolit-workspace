@@ -195,7 +195,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|
-| LIT-223 | Remediate inherited security gaps | — | 🟢 | 🟡 In flight         | Touches `dataset_service.py`, which LIT-227 also restructures — sequence to avoid rework. |
+| LIT-223 | Remediate inherited security gaps | — | 🟡 In Review | — | **PR #142** (base `develop`). `/debug/session` gated behind `DEBUG_ENABLED` (default off) + returns session_id only (no cookies/headers); route-level `Access-Control-Allow-Origin: *` removed from `datasets.py`/`upload.py`/`dataset_management.py` so CORS is governed solely by main.py's restricted CORSMiddleware; `dataset_service.load_metadata`/`resolve_file` deny cross-session custom-dataset access instead of falling through to the embedded session's directory. CI green (backend-test 4m14s, frontend-lint-and-build 1m5s). |
 
 ---
 
