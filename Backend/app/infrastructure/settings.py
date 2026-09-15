@@ -2,6 +2,11 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    # LIT-259 — structured task logs. "json" makes every audiolit.* log record a
+    # single JSON line ({"ts","level","logger","event",...extra}); "text" falls
+    # back to the default human-readable formatting for local dev.
+    LOG_FORMAT: str = "json"
     SESSION_COOKIE_NAME: str = "sid"
     SESSION_TTL_SECONDS: int = 24 * 60 * 60
     COOKIE_SECURE: bool = False
