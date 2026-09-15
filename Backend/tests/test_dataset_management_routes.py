@@ -17,6 +17,7 @@ real on-disk state.
 from __future__ import annotations
 
 import io
+from urllib.parse import quote
 
 import numpy as np
 import pytest
@@ -435,3 +436,131 @@ class TestGroundTruthUpload:
         )
         meta = await client.get("/upload/dataset/gt-none/metadata", cookies=cookies)
         assert "ground_truth" not in meta.json()["files"][0]
+
+
+class TestLIT223CrossSessionAndCorsRemediation:
+    """LIT-223: the inherited security gaps that were remediated at the
+    route level - cross-session custom-dataset access through the
+    ``/datasets/`` surface, and route-level wildcard CORS on file routes.
+
+    The cross-session weakness lived in dataset_service.load_metadata() /
+    resolve_file(): a custom dataset name embeds the owning session
+    ('custom:<sid>:<name>'), and the old code logged a warning for a
+    mismatching session but kept serving the dataset from the *embedded*
+    session anyway. These hit the real HTTP surface instead of the service
+    functions directly.
+
+    Each session needs its own httpx cookie jar, so the cross-session tests
+    build a fresh AsyncClient per agent rather than reusing the shared
+    ``client`` fixture, whose single jar would make everyone the same session.
+    """
+
+    @pytest.mark.asyncio
+    async def test_metadata_for_other_sessions_dataset_is_denied(self, client):
+        from httpx import AsyncClient
+        from app.main import app
+
+        owner_cookies = await _session_cookies(client)
+        r = await client.post("/upload/dataset/create", data={"dataset_name": "x"}, cookies=owner_cookies)
+        dsn = r.json()["dataset_name"]  # custom:<owner sid>:x
+        assert dsn.startswith("custom:")
+
+        # A different session requests the dataset by its embedded name via
+        # the /datasets/ metadata surface - must be denied, not served.
+        async with AsyncClient(app=app, base_url="http://test") as intruder:
+            intruder_cookies = await _session_cookies(intruder)
+            intruder_sid = intruder_cookies.get("sid")
+            assert intruder_sid != dsn.split(":")[1], "fixture: the two sessions must differ"
+            resp = await intruder.get(f"/{quote(dsn, safe='')}/metadata", cookies=intruder_cookies)
+            assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_file_for_other_sessions_dataset_is_denied(self, client):
+        from httpx import AsyncClient
+        from app.main import app
+
+        owner_cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "y"}, cookies=owner_cookies)
+
+        # Owner uploads a file into the dataset.
+        upload = await client.post(
+            "/upload/dataset/y/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=owner_cookies,
+        )
+        dsn = upload.json()["dataset_name"]
+
+        async with AsyncClient(app=app, base_url="http://test") as intruder:
+            intruder_cookies = await _session_cookies(intruder)
+            resp = await intruder.get(
+                f"/{quote(dsn, safe='')}/file/clip.wav", cookies=intruder_cookies
+            )
+            assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_owners_own_dataset_and_file_still_served(self, client):
+        # Guard rail: remediating cross-session access must not lock the
+        # legit owner out of their own dataset / files.
+        owner_cookies = await _session_cookies(client)
+        created = await client.post("/upload/dataset/create", data={"dataset_name": "z"}, cookies=owner_cookies)
+        dsn = created.json()["dataset_name"]  # custom:<owner sid>:z
+        await client.post(
+            "/upload/dataset/z/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=owner_cookies,
+        )
+
+        md = await client.get(f"/{quote(dsn, safe='')}/metadata", cookies=owner_cookies)
+        assert md.status_code == 200
+
+        f = await client.get(f"/{quote(dsn, safe='')}/file/clip.wav", cookies=owner_cookies)
+        assert f.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_file_routes_no_longer_set_wildcard_cors(self, client):
+        # LIT-223: file routes used to hand back
+        # Access-Control-Allow-Origin: * themselves, bypassing the app's
+        # restricted CORSMiddleware. Asserting via the dataset_management
+        # serve route (which has no working alternative access path) exercises
+        # the shared fix.
+        cookies = await _session_cookies(client)
+        await client.post("/upload/dataset/create", data={"dataset_name": "cors"}, cookies=cookies)
+        await client.post(
+            "/upload/dataset/cors/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+
+        response = await client.get("/upload/dataset/cors/files/clip.wav", cookies=cookies)
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers, (
+            "No route-level ACAO header should be set; the app-level "
+            "CORSMiddleware is the single source of truth for CORS."
+        )
+
+    @pytest.mark.asyncio
+    async def test_datasets_file_route_no_wildcard_cors(self, client):
+        cookies = await _session_cookies(client)
+        created = await client.post("/upload/dataset/create", data={"dataset_name": "cors2"}, cookies=cookies)
+        dsn = created.json()["dataset_name"]
+        await client.post(
+            "/upload/dataset/cors2/files",
+            files=[("files", ("clip.wav", _wav_bytes(), "audio/wav"))],
+            cookies=cookies,
+        )
+
+        resp = await client.get(f"/{quote(dsn, safe='')}/file/clip.wav", cookies=cookies)
+        assert resp.status_code == 200
+        assert "access-control-allow-origin" not in resp.headers
+
+    @pytest.mark.asyncio
+    async def test_same_session_but_embedded_id_is_still_honoured_at_route_level(self, client):
+        # The embedded session id in "custom:<sid>:name" must match the real
+        # session making the request. Same session, crafted name format - OK.
+        cookies = await _session_cookies(client)
+        sid = cookies.get("sid")
+        await client.post("/upload/dataset/create", data={"dataset_name": "mine"}, cookies=cookies)
+        dsn = f"custom:{sid}:mine"
+
+        md = await client.get(f"/{quote(dsn, safe='')}/metadata", cookies=cookies)
+        assert md.status_code == 200
