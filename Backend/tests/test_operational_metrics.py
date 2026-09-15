@@ -218,6 +218,23 @@ class TestCacheCounters:
         assert counts == {"hits": 1, "misses": 1}
         assert metrics_module.hit_ratio(1, 1) == 0.5
 
+    def test_tensor_cache_counts_use_its_own_client(self):
+        """RedisCacheManager.get records hits/misses via its in-scope client -
+        never a separate broker connection that may be down (LIT-259 hot-path
+        note: a connect attempt on every read is what the ECHO 10ms cache-read
+        SLA rejects)."""
+        from app.core.redis import RedisCacheManager
+
+        caches = RedisCacheManager()
+        fake = FakeStrictRedis(server=FakeServer())
+        caches.client = fake
+        caches.set("audiolit:tensor:k", {"t": 1})
+        assert caches.get("audiolit:tensor:k") == {"t": 1}
+        assert caches.get("audiolit:tensor:nope") is None
+
+        counts = _decoded(fake.hgetall(metrics_module.CACHE_HASH))
+        assert counts == {"hits": 1, "misses": 1}
+
 
 class TestMetricsEndpoint:
     async def test_returns_five_keys_with_zero_hit_ratio(self, client, monkeypatch):
