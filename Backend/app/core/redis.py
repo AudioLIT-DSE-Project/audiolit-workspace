@@ -130,21 +130,20 @@ class RedisCacheManager:
 
     def get(self, key: str) -> Optional[Any]:
         """Fetch and deserialize tensors. Treats corrupt entries as misses."""
-        from app.infrastructure.metrics import record_cache_via
-        from app.infrastructure.rq_connection import get_redis_connection as _broker
+        from app.infrastructure.metrics import record_cache
 
         packed_data = self.client.get(key)
         if packed_data is None:
-            record_cache_via(_broker, False)
+            record_cache(self.client, False)
             return None
         try:
             value = self._deserialize(packed_data)
-            record_cache_via(_broker, True)
+            record_cache(self.client, True)
             return value
         except Exception as e:
             logger.warning(f"Corrupt cache entry detected for key {key}: {e}. Deleting and treating as miss.")
             self.client.delete(key)
-            record_cache_via(_broker, False)
+            record_cache(self.client, False)
             return None
 
     def set(self, key: str, value: Any, ttl: int = CACHE_TTL) -> None:

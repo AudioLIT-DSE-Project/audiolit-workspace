@@ -27,7 +27,7 @@ and ``RedisCacheManager.get`` in ``app/core/redis.py``).
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 logger = logging.getLogger("audiolit.metrics")
 
@@ -82,19 +82,6 @@ def record_cache(conn: Any, hit: bool) -> None:
         conn.hincrby(CACHE_HASH, "hits" if hit else "misses", 1)
     except Exception:
         logger.debug("metrics.cache.record_failed hit=%s", hit, exc_info=True)
-
-
-def record_cache_via(conn_getter: Callable[[], Any], hit: bool) -> None:
-    """``record_cache`` behind a lazy connection getter.
-
-    For a caller that does not already hold a connection (e.g. the FR4 tensor
-    cache manager): the getter is invoked inside the guard, so a broker that
-    raises at connect time still cannot leak an exception onto the lookup path.
-    """
-    try:
-        record_cache(conn_getter(), hit)
-    except Exception:
-        logger.debug("metrics.cache.record_failed_via hit=%s", hit, exc_info=True)
 
 
 async def arecord_cache(client: Any, hit: bool) -> None:
