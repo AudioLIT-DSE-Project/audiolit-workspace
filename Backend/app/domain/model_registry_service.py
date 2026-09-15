@@ -176,6 +176,38 @@ def _is_vram_exhaustion(exc: BaseException) -> bool:
     return "out of memory" in str(exc).lower()
 
 
+def _record_model_load(loaded: LoadedModel) -> None:
+    """Write-through the loaded model's reproducibility record (LIT-257).
+
+    ``models`` records the resolved revision + weight digest so a model can be
+    reproduced exactly later (SRS §3.10); the document maps the tier's fields
+    onto the registry's: weight_digest <- weights_sha256, architecture <-
+    family, hf_model_id <- model_id, and the unique model_id is
+    ``hf_model_id@revision`` (one document per model+revision).
+
+    Never raises: a failed write is logged and the load proceeds (SRS §3.3.1
+    graceful degradation; SAD §11.1).
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+    try:
+        store.upsert_model(
+            {
+                "model_id": f"{loaded.model_id}@{loaded.revision}",
+                "name": loaded.model_id,
+                "architecture": loaded.family,
+                "revision": loaded.revision,
+                "weight_digest": loaded.weights_sha256,
+                "hf_model_id": loaded.model_id,
+            }
+        )
+    except Exception as exc:
+        logger.warning("metadata.write_failed collection=models: %s", exc)
+
+
 def download_and_load(
     resolved: ResolvedModel,
     attn_implementation: str = "eager",
@@ -259,7 +291,7 @@ def download_and_load(
         len(available_layers),
     )
 
-    return LoadedModel(
+    loaded = LoadedModel(
         model_id=resolved.model_id,
         revision=resolved.revision,
         family=resolved.family,
@@ -270,6 +302,8 @@ def download_and_load(
         device_fallback=device_fallback_reason is not None,
         device_fallback_reason=device_fallback_reason,
     )
+    _record_model_load(loaded)
+    return loaded
 
 
 import threading
