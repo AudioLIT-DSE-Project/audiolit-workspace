@@ -1,0 +1,36 @@
+# LIT-203 — shared build context for both images (context: . in compose).
+# Keeps the context small and, crucially, keeps secrets out of the build.
+
+**/.git
+**/.github
+**/.venv
+**/.pytest_cache
+**/.mypy_cache
+**/__pycache__
+**/*.py[cod]
+**/*.pyo
+**/node_modules
+**/dist
+**/coverage
+
+opencode.jsonc
+opencode.json
+*.log
+*.lock
+datasets.lock
+
+Backend/data
+Backend/.venv
+Backend/tests
+Backend/loadtests
+Backend/scripts
+Backend/uploads
+
+Frontend/e2e
+
+uploads
+scratch
+plans
+docs
+viva
+*.md
