@@ -359,3 +359,54 @@ class TestVramFallback:
                 mrs.ResolvedModel(model_id="openai/whisper-base", revision="d", family="whisper"),
                 model_class=_Model,
             )
+
+
+class TestModelLoadMetadataWriteThrough:
+    """LIT-257: each model load writes a `models` reproducibility record
+    (revision + weight digest) to the durable metadata tier."""
+
+    @staticmethod
+    def _mongomock_store():
+        import mongomock
+
+        from app.infrastructure import metadata_store as ms
+
+        mock_db = mongomock.MongoClient().db
+        store = ms.MetadataStore(client=mock_db.client, db=mock_db)
+        store.ensure_schema()
+        return store
+
+    def test_records_a_loaded_model(self, tmp_path, monkeypatch):
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        store = self._mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        docs = list(store._collection("models").find())
+        assert len(docs) == 1
+        doc = docs[0]
+        assert doc["model_id"] == "fake/whisper@abc123"
+        assert doc["name"] == "fake/whisper"
+        assert doc["architecture"] == "whisper"
+        assert doc["revision"] == "abc123"
+        assert doc["hf_model_id"] == "fake/whisper"
+        assert doc["weight_digest"] == loaded.weights_sha256
+
+    def test_loading_the_same_model_twice_leaves_one_document(self, tmp_path, monkeypatch):
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        store = self._mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+            mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        assert len(list(store._collection("models").find())) == 1
