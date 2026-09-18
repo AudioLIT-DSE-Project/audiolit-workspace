@@ -15,7 +15,7 @@ import {
   TooltipTrigger,
   TooltipProvider,
 } from "@/components/ui/tooltip";
-import { Upload, HelpCircle, Sun, Moon, Flame } from "lucide-react";
+import { Upload, HelpCircle, Sun, Moon, Flame, Rocket } from "lucide-react";
 import { useTheme } from "next-themes";
 import { API_BASE } from "@/lib/api";
 import { CustomDatasetManager } from "@/components/dataset/CustomDatasetManager";
@@ -53,6 +53,7 @@ interface ToolbarProps {
   setSelectedTasks: (tasks: SelectedTasks) => void;
   onWarmupClick?: () => void;
   warmupJobId?: string | null;
+  onQuickStartClick?: () => void;
 }
 
 interface CustomDataset {
@@ -123,6 +124,7 @@ export const Toolbar = ({
   selectedTasks,
   setSelectedTasks,
   onWarmupClick,
+  onQuickStartClick,
 }: ToolbarProps) => {
   const handleTaskToggle = (task: keyof SelectedTasks) => {
     setSelectedTasks({ ...selectedTasks, [task]: !selectedTasks[task] });
@@ -434,6 +436,23 @@ export const Toolbar = ({
 
         {/* Right side: Action buttons */}
         <div className="flex items-center gap-2.5 flex-shrink-0">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={onQuickStartClick}
+                data-testid="quickstart-reopen-button"
+              >
+                <Rocket className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>Quick start</p>
+            </TooltipContent>
+          </Tooltip>
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
