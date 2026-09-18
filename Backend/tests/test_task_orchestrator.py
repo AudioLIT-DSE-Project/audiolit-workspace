@@ -17,7 +17,7 @@ import sys
 import pytest
 from fakeredis import FakeServer, FakeStrictRedis
 from rq import Queue, SimpleWorker, Worker
-from rq.job import Job
+from rq.job import Job, JobStatus
 
 from app.infrastructure import rq_connection
 from app.orchestration import task_orchestrator
@@ -172,6 +172,213 @@ class TestMultiTaskFanOut:
         # they were previously "/ws/jobs" vs "/api/ws/tasks".
         result = enqueue_multitask_analysis("audio://sha256/abc", tasks=[WorkerFamily.ASR])
         assert result.websocket_url == f"/api/ws/tasks/{result.job_id}"
+
+    def test_aggregator_dependency_receives_audio_ref(self, broker):
+        # LIT-257: the fan-in needs the path ref to write the sample + analysis
+        # records, so enqueue_multitask_analysis must thread it into the
+        # aggregator job (family_job_ids, cache_key, audio_ref).
+        result = enqueue_multitask_analysis(
+            "uploads/test_sample.wav",
+            tasks=[WorkerFamily.ASR],
+            cache_key="sha256:deadbeef",
+        )
+        aggregator = Job.fetch(result.job_id, connection=broker)
+        assert aggregator.args[1] == "sha256:deadbeef"
+        assert aggregator.args[2] == "uploads/test_sample.wav"
+
+
+class _StubFinishedJob:
+    """Enough of an RQ Job for the aggregator's fan-in: finished with a result."""
+
+    def __init__(self, result):
+        self.result = result
+
+    def get_status(self):
+        return JobStatus.FINISHED
+
+
+class _StubFailedJob:
+    """The failed-sibling shape the aggregator's fan-in tolerates."""
+
+    def get_status(self):
+        return JobStatus.FAILED
+
+
+def _mongomock_store():
+    """A MetadataStore bound to an in-memory mongomock db."""
+    import mongomock
+
+    from app.infrastructure import metadata_store as ms
+
+    mock_db = mongomock.MongoClient().db
+    store = ms.MetadataStore(client=mock_db.client, db=mock_db)
+    store.ensure_schema()
+    return store
+
+
+class TestAggregatorMetadataWriteThrough:
+    """LIT-257: the fan-in aggregator writes each task's result and the audio
+    sample through to the durable MongoDB metadata tier, without ever letting
+    a metadata failure fail the analysis."""
+
+    @staticmethod
+    def _stub_outputs():
+        # Second result carries a tensor-like array that must be stripped before
+        # it reaches the durable tier (C4/SR4).
+        return {
+            "j-asr": {
+                "task": "asr",
+                "model_id": "openai/whisper-base",
+                "transcript": "hello",
+            },
+            "j-ser": {
+                "task": "ser",
+                "model_id": "wav2vec2-base",
+                "predicted_emotion": "neutral",
+                "probabilities": {"neutral": 0.9, "happy": 0.1},
+                "attention": [0.5] * 500,
+            },
+        }
+
+    @staticmethod
+    def _install_stub_jobs(monkeypatch, outputs):
+        class _StubJobRegistry:
+            @staticmethod
+            def fetch(job_id, connection=None):
+                return _StubFinishedJob(outputs[job_id])
+
+        monkeypatch.setattr(task_orchestrator, "Job", _StubJobRegistry)
+
+    def test_writes_one_analysis_doc_per_task_and_one_sample_doc(
+        self, broker, monkeypatch, sample_audio_file
+    ):
+        from app.infrastructure import metadata_store as ms
+
+        outputs = self._stub_outputs()
+        self._install_stub_jobs(monkeypatch, outputs)
+        store = _mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        combined = task_orchestrator.aggregator_task(
+            list(outputs), "sha256:deadbeef", str(sample_audio_file)
+        )
+
+        assert set(combined["tasks"]) == {"asr", "ser"}
+
+        analyses = list(store._collection("analysis_results").find())
+        assert len(analyses) == 2
+        by_task = {a["task"]: a for a in analyses}
+        assert by_task["asr"]["model_id"] == "openai/whisper-base"
+        assert by_task["asr"]["redis_tensor_key"] == "sha256:deadbeef"
+        assert by_task["ser"]["redis_tensor_key"] == "sha256:deadbeef"
+
+        samples = list(store._collection("audio_samples").find())
+        assert len(samples) == 1
+        assert samples[0]["file_path_reference"] == str(sample_audio_file)
+        assert samples[0]["sample_rate"] == 16000
+        assert samples[0]["duration"] == pytest.approx(5.0, abs=0.2)
+        # Only file-path metadata is stored, never audio bytes (C4/SR4).
+        assert "audio_bytes" not in samples[0]
+
+    def test_no_document_contains_a_list_longer_than_the_bound(
+        self, broker, monkeypatch, sample_audio_file
+    ):
+        from app.infrastructure import metadata_store as ms
+
+        outputs = self._stub_outputs()
+        self._install_stub_jobs(monkeypatch, outputs)
+        store = _mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        task_orchestrator.aggregator_task(
+            list(outputs), "sha256:deadbeef", str(sample_audio_file)
+        )
+
+        docs = list(store._collection("analysis_results").find())
+        assert len(docs) == 2
+
+        def _any_long_list(value):
+            if isinstance(value, list):
+                if len(value) > task_orchestrator._MAX_PERSISTED_LIST_LEN:
+                    return True
+                return any(_any_long_list(v) for v in value)
+            if isinstance(value, dict):
+                return any(_any_long_list(v) for v in value.values())
+            return False
+
+        for doc in docs:
+            assert not _any_long_list(doc)
+
+    def test_a_failing_metadata_tier_never_fails_the_fan_in(
+        self, broker, monkeypatch, sample_audio_file
+    ):
+        from app.infrastructure import metadata_store as ms
+
+        outputs = self._stub_outputs()
+        self._install_stub_jobs(monkeypatch, outputs)
+
+        class _FailingStore:
+            def upsert_audio_sample(self, *args, **kwargs):
+                raise RuntimeError("mongo down")
+
+            def insert_analysis(self, *args, **kwargs):
+                raise RuntimeError("mongo down")
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: _FailingStore())
+
+        combined = task_orchestrator.aggregator_task(
+            list(outputs), "sha256:deadbeef", str(sample_audio_file)
+        )
+
+        assert set(combined["tasks"]) == {"asr", "ser"}
+        assert combined["tasks"]["asr"]["transcript"] == "hello"
+
+    def test_skips_writes_when_metadata_tier_is_configured_off(
+        self, broker, monkeypatch, sample_audio_file
+    ):
+        from app.infrastructure import metadata_store as ms
+
+        outputs = self._stub_outputs()
+        self._install_stub_jobs(monkeypatch, outputs)
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: None)
+
+        combined = task_orchestrator.aggregator_task(
+            list(outputs), "sha256:deadbeef", str(sample_audio_file)
+        )
+
+        assert combined["tasks"]["ser"]["predicted_emotion"] == "neutral"
+
+    def test_failed_sibling_records_no_analysis_doc(
+        self, broker, monkeypatch, sample_audio_file
+    ):
+        from app.infrastructure import metadata_store as ms
+
+        class _StubJobRegistry:
+            @staticmethod
+            def fetch(job_id, connection=None):
+                jobs = {
+                    "j-asr": _StubFinishedJob(
+                        {"task": "asr", "model_id": "openai/whisper-base", "transcript": "hi"}
+                    ),
+                    "j-failed": _StubFailedJob(),
+                }
+                return jobs[job_id]
+
+        monkeypatch.setattr(task_orchestrator, "Job", _StubJobRegistry)
+        store = _mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        combined = task_orchestrator.aggregator_task(
+            ["j-asr", "j-failed"], "sha256:deadbeef", str(sample_audio_file)
+        )
+
+        assert combined["tasks"]["j-failed"] == {"status": "failed"}
+        # The finished task is recorded; the failed sibling is not - it has no
+        # reproducible (task, model) identity to persist.
+        analyses = list(store._collection("analysis_results").find())
+        assert len(analyses) == 1
+        assert analyses[0]["task"] == "asr"
+        assert list(store._collection("audio_samples").find())[0]["sample_rate"] == 16000
 
 
 class TestProgressChannel:
@@ -371,6 +578,192 @@ class TestMutationTask:
         assert "_scaffold" not in result
 
 
+class TestStripArrayPayloads:
+    """LIT-258: `_strip_array_fields` is the C4/SR4 boundary - tensor/heatmap
+    payloads must never reach the durable tier; short plain lists survive."""
+
+    def test_short_plain_list_survives(self):
+        out = task_orchestrator._strip_array_fields({"prediction": [1, 2, 3]})
+        assert out == {"prediction": [1, 2, 3]}
+
+    def test_list_under_the_bound_survives(self):
+        near = list(range(task_orchestrator._MAX_PERSISTED_LIST_LEN))
+        assert task_orchestrator._strip_array_fields({"p": near}) == {"p": near}
+
+    def test_list_at_the_bound_survives(self):
+        exactly = list(range(task_orchestrator._MAX_PERSISTED_LIST_LEN))
+        out = task_orchestrator._strip_array_fields({"p": exactly})
+        assert list(out["p"]) == exactly
+
+    def test_long_list_is_dropped(self):
+        long = list(range(task_orchestrator._MAX_PERSISTED_LIST_LEN + 1))
+        assert task_orchestrator._strip_array_fields(long) is task_orchestrator._DROP
+
+    def test_numpy_array_is_dropped(self):
+        import numpy as np
+
+        assert task_orchestrator._strip_array_fields(np.zeros((4, 4))) is task_orchestrator._DROP
+
+    def test_tensorlike_object_is_dropped(self):
+        class Tensor:
+            shape = (4, 4)
+
+        assert task_orchestrator._strip_array_fields(Tensor()) is task_orchestrator._DROP
+
+    def test_string_longer_than_the_bound_survives(self):
+        # A 100-char string is not an array payload.
+        s = "x" * 100
+        assert task_orchestrator._strip_array_fields({"p": s}) == {"p": s}
+
+    def test_tuple_becomes_plain_list(self):
+        assert task_orchestrator._strip_array_fields((1, "a")) == [1, "a"]
+
+    def test_nested_payload_drops_only_the_array(self):
+        value = {
+            "transcript": "hello",
+            "probabilities": {"neutral": 0.9, "happy": 0.1},
+            "attention": [0.5] * 500,
+        }
+        out = task_orchestrator._strip_array_fields(value)
+        assert out["transcript"] == "hello"
+        assert out["probabilities"] == {"neutral": 0.9, "happy": 0.1}
+        assert "attention" not in out
+
+    def test_nested_list_entries_are_cleaned(self):
+        value = {"rows": [{"keep": 1, "drop": [0] * 100}, {"keep": 2}]}
+        out = task_orchestrator._strip_array_fields(value)
+        assert out == {"rows": [{"keep": 1}, {"keep": 2}]}
+
+    def test_scalar_types_survive(self):
+        for scalar in (None, 0, 1.5, "text", True):
+            assert task_orchestrator._strip_array_fields(scalar) == scalar
+
+
+class TestSampleIdHash:
+    """LIT-258: `_sample_id` must be deterministic and collision-favourable."""
+
+    def test_is_sha256_hex(self):
+        import hashlib
+
+        sid = task_orchestrator._sample_id("uploads/a.wav")
+        assert len(sid) == 64
+        assert sid == hashlib.sha256("uploads/a.wav".encode("utf-8")).hexdigest()
+
+    def test_deterministic_across_calls(self):
+        assert task_orchestrator._sample_id("uploads/a.wav") == task_orchestrator._sample_id("uploads/a.wav")
+
+    def test_different_paths_differ(self):
+        assert task_orchestrator._sample_id("uploads/a.wav") != task_orchestrator._sample_id("uploads/b.wav")
+
+
+class TestAudioSampleDetails:
+    """LIT-258: `_audio_sample_details` reads only the header (soundfile.info),
+    and degrades to None - never raising - when the file is unreadable."""
+
+    def test_returns_metadata_for_a_real_file(self, sample_audio_file):
+        details = task_orchestrator._audio_sample_details(str(sample_audio_file))
+        assert details is not None
+        assert details["sample_rate"] == 16000
+        assert details["duration"] == pytest.approx(5.0, abs=0.2)
+        assert details["filename"] == "test_sample.wav"
+        assert "uploaded_at" in details
+
+    def test_returns_none_for_a_missing_file(self, tmp_path):
+        assert task_orchestrator._audio_sample_details(str(tmp_path / "nope.wav")) is None
+
+    def test_returns_none_for_an_unreadable_ref(self):
+        assert task_orchestrator._audio_sample_details("") is None
+
+
+class TestWriteAnalysisMetadataEdgeCases:
+    """LIT-258: the fan-in write-through degrades per record - a missing sample
+    only skips the sample document, a malformed task only skips that analysis -
+    and can never raise out of the aggregator."""
+
+    @staticmethod
+    def _install_store(monkeypatch, store):
+        from app.infrastructure import metadata_store as ms
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+    def test_no_audio_ref_writes_analyses_but_no_sample_doc(self, monkeypatch):
+        from app.infrastructure import metadata_store as ms
+
+        store = _mongomock_store()
+        self._install_store(monkeypatch, store)
+
+        combined = {
+            "tasks": {"asr": {"task": "asr", "model_id": "m1", "transcript": "hi"}}
+        }
+        task_orchestrator._write_analysis_metadata(combined, "sha256:key", None)
+
+        assert len(list(store._collection("analysis_results").find())) == 1
+        assert len(list(store._collection("audio_samples").find())) == 0
+
+    def test_missing_audio_file_writes_analyses_but_skips_sample_doc(
+        self, monkeypatch, tmp_path
+    ):
+        from app.infrastructure import metadata_store as ms
+
+        store = _mongomock_store()
+        self._install_store(monkeypatch, store)
+        missing = str(tmp_path / "missing.wav")
+
+        combined = {
+            "tasks": {"ser": {"task": "ser", "model_id": "m1", "predicted_emotion": "neutral"}}
+        }
+        task_orchestrator._write_analysis_metadata(combined, "sha256:key", missing)
+
+        # The analysis is still recorded (its reproducibility lives in the
+        # redis_tensor_key), only the sample metadata row is skipped.
+        analyses = list(store._collection("analysis_results").find())
+        assert len(analyses) == 1
+        assert analyses[0]["task"] == "ser"
+        assert len(list(store._collection("audio_samples").find())) == 0
+
+    def test_task_without_task_field_is_skipped(self, monkeypatch):
+        from app.infrastructure import metadata_store as ms
+
+        store = _mongomock_store()
+        self._install_store(monkeypatch, store)
+
+        combined = {
+            "tasks": {
+                "good": {"task": "asr", "model_id": "m1", "transcript": "hi"},
+                "anon": {"not_a_task": True},
+            }
+        }
+        task_orchestrator._write_analysis_metadata(combined, "sha256:key", None)
+
+        analyses = list(store._collection("analysis_results").find())
+        assert [a["task"] for a in analyses] == ["asr"]
+
+    def test_store_raising_on_the_sample_write_still_records_analyses(
+        self, monkeypatch, sample_audio_file
+    ):
+        from app.infrastructure import metadata_store as ms
+
+        calls = []
+
+        class _FailingSampleStore:
+            def upsert_audio_sample(self, *args, **kwargs):
+                raise RuntimeError("mongo down")
+
+            def insert_analysis(self, *args, **kwargs):
+                calls.append(kwargs or args)
+                return True
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: _FailingSampleStore())
+
+        combined = {
+            "tasks": {"asr": {"task": "asr", "model_id": "m1", "transcript": "hi"}}
+        }
+        task_orchestrator._write_analysis_metadata(combined, "sha256:key", str(sample_audio_file))
+
+        # The sample write failed; the analysis write still happened, and nothing raised.
+        assert len(calls) == 1
+
+
 class TestAccentBiasTask:
     def test_runs_diagnostic_and_returns_json_dict(self, broker, monkeypatch):
         from app.domain import accent_bias_profiler, accent_bias_runner
@@ -398,6 +791,132 @@ class TestAccentBiasTask:
         assert result == {"corpus": "l2-arctic", "model_id": "openai/whisper-base", "cohorts": []}
         assert captured["model_id"] == "openai/whisper-base"
         assert captured["samples_per_cohort"] == 5
+
+    def test_writes_bias_report_after_a_run(self, broker, monkeypatch):
+        # LIT-257: an accent-bias run writes one `bias_reports` document per
+        # cohort (retained permanently, SAD §9).
+        from app.domain import accent_bias_profiler, accent_bias_runner
+        from app.infrastructure import metadata_store as ms
+
+        store = _mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        class _Cohort:
+            accent = "Arabic"
+            sample_count = 10
+            scored_count = 8
+            mean_wer = 0.142
+            median_wer = 0.13
+            stdev_wer = 0.03
+            min_wer = 0.05
+            max_wer = 0.2
+
+        class _FakeReport:
+            corpus = "l2-arctic"
+            model_id = "openai/whisper-base"
+            cohorts = [_Cohort()]
+
+            def to_json_dict(self):
+                return {"corpus": "l2-arctic", "model_id": "openai/whisper-base", "cohorts": []}
+
+        monkeypatch.setattr(accent_bias_profiler, "make_whisper_transcriber", lambda m: None)
+        monkeypatch.setattr(
+            accent_bias_runner, "run_accent_bias_diagnostic", lambda *a, **k: _FakeReport()
+        )
+
+        accent_bias_task("openai/whisper-base", "l2-arctic", 5)
+
+        docs = list(store._collection("bias_reports").find())
+        assert len(docs) == 1
+        assert docs[0]["model_id"] == "openai/whisper-base"
+        assert docs[0]["cohort"] == "Arabic"
+        assert docs[0]["WER"] == 0.142
+        assert docs[0]["disparity_metrics"]["sample_count"] == 10
+        assert docs[0]["disparity_metrics"]["median_wer"] == 0.13
+        assert "created_at" in docs[0]
+
+
+class TestBiasReportWriteDegrades:
+    """LIT-258: the bias-report write-through is never allowed to fail or
+    halt the diagnostic (SRS §3.3.1); failures surface as `metadata.write_failed`
+    warnings only."""
+
+    class _Cohort:
+        accent = "Arabic"
+        sample_count = 10
+        scored_count = 8
+        mean_wer = 0.142
+        median_wer = 0.13
+        stdev_wer = 0.03
+        min_wer = 0.05
+        max_wer = 0.2
+
+    @staticmethod
+    def _report():
+        class _Report:
+            corpus = "l2-arctic"
+            model_id = "openai/whisper-base"
+            cohorts = [TestBiasReportWriteDegrades._Cohort()]
+
+            def to_json_dict(self):
+                return {"corpus": self.corpus, "model_id": self.model_id, "cohorts": []}
+
+        return _Report()
+
+    def test_store_raising_never_fails_the_write_through(self, monkeypatch):
+        from app.infrastructure import metadata_store as ms
+
+        class _FailingStore:
+            def insert_bias_report(self, *args, **kwargs):
+                raise RuntimeError("mongo down")
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: _FailingStore())
+
+        # Does not raise - the diagnostic proceeds without its durable record.
+        task_orchestrator._write_bias_report("openai/whisper-base", self._report())
+
+    def test_skips_writes_when_configured_off(self, monkeypatch):
+        from app.infrastructure import metadata_store as ms
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: None)
+        task_orchestrator._write_bias_report("openai/whisper-base", self._report())
+
+    def test_report_with_no_cohorts_writes_nothing(self, monkeypatch):
+        from app.infrastructure import metadata_store as ms
+
+        store = _mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        class _EmptyReport:
+            corpus = "l2-arctic"
+            model_id = "openai/whisper-base"
+            cohorts = []
+
+        task_orchestrator._write_bias_report("openai/whisper-base", _EmptyReport())
+        assert len(list(store._collection("bias_reports").find())) == 0
+
+    def test_accent_bias_task_survives_a_failing_metadata_write(
+        self, broker, monkeypatch
+    ):
+        # The full accent_bias_task path (not just the helper): even when the
+        # metadata store is down, the task still returns its report.
+        from app.domain import accent_bias_profiler, accent_bias_runner
+        from app.infrastructure import metadata_store as ms
+
+        class _FailingStore:
+            def insert_bias_report(self, *args, **kwargs):
+                raise RuntimeError("mongo down")
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: _FailingStore())
+
+        report = self._report()
+        monkeypatch.setattr(accent_bias_profiler, "make_whisper_transcriber", lambda m: None)
+        monkeypatch.setattr(
+            accent_bias_runner, "run_accent_bias_diagnostic", lambda *a, **k: report
+        )
+
+        result = accent_bias_task("openai/whisper-base", "l2-arctic", 5)
+        assert result == report.to_json_dict()
 
 
 class TestEnqueueAccentBias:
