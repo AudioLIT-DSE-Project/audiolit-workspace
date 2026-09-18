@@ -141,12 +141,16 @@ def load_metadata(
             raise ValueError("session_id is required for custom datasets")
 
         session_id_from_name, dataset_name = parse_custom_dataset_name(dataset)
-        logger.info(f"Custom dataset metadata: session_id_from_name='{session_id_from_name}', current_session_id='{session_id}'")
         if session_id_from_name != session_id:
-            logger.warning(f"Session ID mismatch in metadata: dataset has '{session_id_from_name}' but request has '{session_id}'")
-            # Use the dataset's session ID instead
-            manager = get_custom_dataset_manager(session_id_from_name)
-            return manager.get_dataset_files_as_csv_format(dataset_name)
+            # LIT-223: the weak inherited check merely logged a warning and
+            # continued using the dataset's own session id, so any caller who
+            # knew (or guessed) another session's id could read its custom
+            # datasets. Deny cross-session access instead.
+            logger.warning(
+                "Session ID mismatch in metadata: dataset has '%s' but request has '%s'",
+                session_id_from_name, session_id,
+            )
+            raise ValueError("Cross-session access to a custom dataset is not allowed")
 
         manager = get_custom_dataset_manager(session_id)
         return manager.get_dataset_files_as_csv_format(dataset_name)
@@ -184,17 +188,16 @@ def resolve_file(dataset: str, file_path: str, session_id: Optional[str] = None)
             raise ValueError("session_id is required for custom datasets")
         
         session_id_from_name, dataset_name = parse_custom_dataset_name(dataset)
-        logger.info(f"Custom dataset: session_id_from_name='{session_id_from_name}', current_session_id='{session_id}'")
         if session_id_from_name != session_id:
-            logger.warning(f"Session ID mismatch: dataset has '{session_id_from_name}' but request has '{session_id}'")
-            # For debugging, let's check if the file exists with the dataset's session ID
-            manager = get_custom_dataset_manager(session_id_from_name)
-            try:
-                return manager.resolve_file_path(dataset_name, file_path)
-            except Exception as e:
-                logger.error(f"Could not resolve file with dataset session ID: {e}")
-                raise ValueError(f"Session ID mismatch for custom dataset. Dataset session: {session_id_from_name}, Request session: {session_id}")
-        
+            # LIT-223: same inherited weakness as load_metadata() above - deny
+            # cross-session file access rather than falling through to the
+            # embedded session's directory.
+            logger.warning(
+                "Custom dataset: dataset has session '%s' but request has '%s'",
+                session_id_from_name, session_id,
+            )
+            raise ValueError("Cross-session access to a custom dataset is not allowed")
+
         manager = get_custom_dataset_manager(session_id)
         return manager.resolve_file_path(dataset_name, file_path)
     

@@ -41,6 +41,7 @@ Before running AudioLIT locally, ensure your system has:
 - **Node.js**: `18.0` or higher (with `npm`)
 - **Redis Server**: `7.0+` (running via Docker or local installation on port `6379`)
 - **FFmpeg**: Required for audio decoding & resampling
+- **MongoDB**: `6.0+` — **optional** (Step 1b); the durable metadata tier degrades gracefully when absent
 
 ---
 
@@ -51,6 +52,37 @@ Before running AudioLIT locally, ensure your system has:
 git clone https://github.com/AudioLIT-DSE-Project/audiolit-workspace.git
 cd audiolit-workspace
 ```
+
+---
+
+### Step 1b: (Optional) Start the MongoDB Metadata Tier
+
+AudioLIT uses MongoDB as an **optional durable metadata tier** (SRS §3.10 / SAD §9):
+it keeps model registrations, analysis records, and accent-bias reports that must
+survive a cache flush or restart. It is **not** required for local development —
+every write-through degrades silently when the tier is off (SRS §3.3.1), so you
+can skip this step and the rest of the guide still works. See
+[`docs/MONGODB_METADATA_TIER.md`](docs/MONGODB_METADATA_TIER.md) for the full
+operations and degradation guide.
+
+```bash
+docker run -d --name lit-mongo --rm -p 27017:27017 mongo:6
+```
+
+Then tell the backend about it when you start it (Step 3) by setting `MONGO_URL`:
+
+```bash
+# Windows (PowerShell):
+$env:MONGO_URL = "mongodb://127.0.0.1:27017"
+# Linux / macOS:
+export MONGO_URL="mongodb://127.0.0.1:27017"
+```
+
+> **Use `127.0.0.1`, not `localhost`**, in `MONGO_URL` and any `mongosh`
+> connection string on Windows — `localhost` resolves to `::1` (IPv6) first and
+> every fresh connection waits out an IPv6 connect timeout before falling back
+> (measured ~2 s per connection on this repo). Leave `MONGO_URL` unset to run
+> without the tier.
 
 ---
 
