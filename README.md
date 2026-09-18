@@ -45,6 +45,41 @@ Before running AudioLIT locally, ensure your system has:
 
 ---
 
+## 🌐 Run with Docker (full stack)
+
+The quickest way to bring up the whole system — web UI, FastAPI gateway, RQ
+workers, Redis and MongoDB — is Docker Compose from the repo root:
+
+```bash
+docker compose up --build
+```
+
+Then open **http://127.0.0.1:8080** and run a transcription or explanation on
+a bundled corpus clip. All five containers start together; the worker counts
+on the same Redis, so jobs enqueue and complete without any manual setup
+(`docker compose ps` should show every service healthy).
+
+- **First run** downloads the models into a named volume (`model-cache`, i.e.
+  `HF_HOME=/models`) and reads corpora from `Backend/data/` — provision those
+  corpora locally as usual, they are not baked into any image.
+- **`.env`-free by design**: Redis/Mongo URLs and the HF cache path come from
+  the compose environment block; no secrets are baked into an image.
+- **GPU machine?** Add the override (needs the NVIDIA Container Toolkit):
+
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+  ```
+
+- **Persistence**: `docker compose down && docker compose up` keeps
+  downloaded models and Mongo records (named volumes), so nothing re-downloads.
+- **Data in `uploads/`** is a bind mount shared by the gateway and the workers,
+  so a session's files survive restarts and are visible to both.
+- Non-root container user: on Linux hosts, `./uploads` and `./Backend/data`
+  must be readable (and uploads writable) by UID 1000. Docker Desktop
+  (macOS/Windows) handles this transparently.
+
+---
+
 ## 🚀 Step-by-Step Execution Guide
 
 ### Step 1: Clone the Repository
@@ -89,7 +124,7 @@ export MONGO_URL="mongodb://127.0.0.1:27017"
 ### Step 2: Start the Redis Infrastructure Broker
 AudioLIT requires a running Redis instance for background RQ task queues, session tracking, and prediction/XAI result caching.
 
-**Option A: Using Docker (Recommended)**
+**Option A: Using Docker (Recommended)** — prefer the full stack from the repo root (`docker compose up --build`, see "Run with Docker" above); this Redis-only file is for local development where you run the gateway and workers by hand:
 ```bash
 cd Backend
 docker compose up -d
