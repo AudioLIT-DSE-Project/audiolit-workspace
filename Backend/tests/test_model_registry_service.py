@@ -410,3 +410,38 @@ class TestModelLoadMetadataWriteThrough:
             mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
 
         assert len(list(store._collection("models").find())) == 1
+
+    def test_failing_store_never_fails_the_model_load(self, tmp_path, monkeypatch):
+        """LIT-258 (SRS §3.3.1): a dead metadata tier must not prevent a model
+        loading. `_record_model_load` logs-and-swallows; download_and_load still
+        returns the loaded model and its reproducibility data."""
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        class _FailingStore:
+            def upsert_model(self, *args, **kwargs):
+                raise RuntimeError("mongo down")
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: _FailingStore())
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        assert loaded.model_id == "fake/whisper"
+        assert loaded.revision == "abc123"
+        assert loaded.weights_sha256
+
+    def test_skips_the_record_when_metadata_tier_is_configured_off(self, tmp_path, monkeypatch):
+        """LIT-258: get_metadata_store() -> None means no write is even attempted,
+        and the load never notices either way."""
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: None)
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        assert loaded.model_id == "fake/whisper"
