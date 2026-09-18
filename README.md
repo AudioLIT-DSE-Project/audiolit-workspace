@@ -187,6 +187,36 @@ Check worker status and active queue depth via HTTP:
 curl http://localhost:8000/health/workers
 ```
 
+#### Observability: structured JSON task logs & operational metrics
+Worker events are emitted as structured JSON logs (`LOG_FORMAT=json`, the
+default; set `LOG_FORMAT=text` for plain logs) with fields like
+`ts`, `level`, `logger`, `event` (`task.processing` / `task.success` /
+`task.failure`) plus `job_id`, `family`, `queue`, `model_id`, `duration_s`
+and `worker`. Audio file references, transcripts and session identifiers are
+never logged (SR6).
+
+Operational counters (task runs per family, success/failure totals, inference
+duration sums, cache hits/misses) are aggregated in Redis and exposed at:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+Example response:
+
+```json
+{
+  "tasks": { "ser:success": 41, "ser:failed": 2, "asr:success": 63, "total": 106 },
+  "durations": {
+    "ser": { "count": 43, "sum_ms": 312014, "avg_ms": 7256.1 },
+    "asr": { "count": 63, "sum_ms": 887311, "avg_ms": 14084.3 }
+  },
+  "queues": { "asr": 0, "ser": 1, "add": 0, "xai": 0, "mutation": 0 },
+  "cache": { "hits": 512, "misses": 118, "hit_ratio": 0.81 },
+  "gpu": { "cuda_available": false, "device": "cpu", "families_locked": [] }
+}
+```
+
 ---
 
 ### Step 5: Setup & Launch the Frontend Web UI
