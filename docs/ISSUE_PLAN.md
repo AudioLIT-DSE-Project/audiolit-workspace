@@ -256,6 +256,9 @@ Not Tier-C stamped (per LIT-228 rule 2 — process/deliverable issues carry no F
 | LIT-202 | Landing page deployment | LIT-195 (parent) |
 | LIT-196 | Package source, finalize report | LIT-194 |
 | LIT-203 | Production containerization | LIT-196 (parent) |
+| LIT-259 | Emit structured JSON task logs and export operational metrics | — (next after LIT-263) |
+| LIT-263 | Viva prep (Rahim): code ownership map, walkthrough, question bank | — |
+| LIT-265 | IEEE report §4: system architecture, infrastructure & data tier | LIT-196 (parent) |
 | LIT-204 | Final IEEE-style report | LIT-196 (parent) |
 | LIT-205 | Academic portal submission | LIT-196 (parent) |
 | LIT-259 | Structured JSON task logs + operational metrics | — (Rahim) — **PR #144 open (In review)** |
