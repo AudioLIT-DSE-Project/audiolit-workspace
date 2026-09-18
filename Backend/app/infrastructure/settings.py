@@ -16,7 +16,11 @@ class Settings(BaseSettings):
 
     # SRS §3.10 / SAD §9 — durable MongoDB metadata tier. Records must survive
     # in MongoDB; nothing here ever touches audio bytes (constraint C4, SR4).
-    MONGO_URL: str = "mongodb://localhost:27017"
+    # Empty by default = the tier is "configured off": `get_metadata_store()`
+    # returns None and every write-through is a logged no-op, so local
+    # development and CI never need a MongoDB server (SAD §11.1 degradation).
+    # Set MONGO_URL (e.g. mongodb://127.0.0.1:27017) to enable the tier.
+    MONGO_URL: str = ""
     MONGO_DB_NAME: str = "audiolit"
     #: Ordinary analysis records expire after a day; bias reports are retained
     #: permanently (SAD §9).
