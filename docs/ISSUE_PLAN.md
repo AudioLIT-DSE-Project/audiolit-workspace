@@ -195,7 +195,7 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|
-| LIT-223 | Remediate inherited security gaps | Rahim | 🔵 In Review | — | **PR #142 opened, CI green** (backend-test 4m14s, frontend-lint 1m5s). `DEBUG_ENABLED` gate on `/debug/session`, route-level CORS removed from `datasets.py`/`upload.py`/`dataset_management.py`, cross-session custom-dataset access denied in `dataset_service`. |
+| LIT-223 | Remediate inherited security gaps | — | 🟡 PR #142 open | In flight         | Implemented (commit merged-ready, CI green on PR #142); awaiting review. Touches `dataset_service.py`, which LIT-227 also restructures — sequence to avoid rework. |
 
 ---
 
@@ -261,6 +261,9 @@ Not Tier-C stamped (per LIT-228 rule 2 — process/deliverable issues carry no F
 | LIT-265 | IEEE report §4: system architecture, infrastructure & data tier | LIT-196 (parent) |
 | LIT-204 | Final IEEE-style report | LIT-196 (parent) |
 | LIT-205 | Academic portal submission | LIT-196 (parent) |
+| LIT-259 | Structured JSON task logs + operational metrics | — (Rahim) — **PR #144 open (In review)** |
+| LIT-263 | Viva-doc evidence: conversations + claims checklist | — (Rahim) — **PR #143 open (In review)** |
+| LIT-265 | IEEE report §4 (Authored work) drafting | — not started |
 
 ---
 

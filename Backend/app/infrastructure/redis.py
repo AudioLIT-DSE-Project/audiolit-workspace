@@ -3,6 +3,7 @@ from typing import Any
 from redis.asyncio import from_url
 from redis.exceptions import RedisError
 from .settings import settings
+from . import metrics as metrics_module
 
 # Initialize Redis connection with connection pool
 redis = from_url(
@@ -44,8 +45,10 @@ async def cache_result(model: str, h: str, payload: dict, ttl: int = 6*60*60) ->
 async def get_result(model: str, h: str) -> dict | None:
     try:
         raw = await redis.get(k_result(model, h))
+        await metrics_module.arecord_cache(redis, raw is not None)
         return json.loads(raw) if raw else None
     except Exception:
+        await metrics_module.arecord_cache(redis, False)
         return None
 
 def cache_result_sync(model: str, h: str, payload: dict, ttl: int = 6*60*60) -> None:
@@ -63,6 +66,7 @@ def get_result_sync(model: str, h: str) -> dict | None:
         raw = conn.get(k_result(model, h))
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
+        metrics_module.record_cache(conn, raw is not None)
         return json.loads(raw) if raw else None
     except Exception:
         return None
