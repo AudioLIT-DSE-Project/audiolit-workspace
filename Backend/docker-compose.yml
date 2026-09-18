@@ -1,4 +1,26 @@
 services:
+  # MongoDB 6.0+ metadata tier (SRS §3.10, §3.6.1; SAD §9, constraint R8).
+  # Audit-only: model registrations, analysis records, audio-sample references
+  # and accent-bias reports. Never holds audio bytes or tensors (C4/SR4).
+  # Optional for local development - with MONGO_URL unset every write-through
+  # degrades silently, so inference never depends on it (SAD §11.1).
+  mongo:
+    image: mongo:6
+    container_name: lit-mongo
+    ports:
+      - "27017:27017"
+    restart: unless-stopped
+    # Named volume so the audit tier survives `docker compose down`; use
+    # `docker compose down -v` to reset. Matches the standalone
+    # `docker run --name lit-mongo` alternative in the README.
+    volumes:
+      - lit-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   redis:
     image: redis:7-alpine
     container_name: lit-redis
@@ -21,3 +43,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+volumes:
+  lit-mongo-data:
