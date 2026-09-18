@@ -259,6 +259,8 @@ class MetadataStore:
             return False
 
     def get_model(self, model_id: str) -> Optional[dict[str, Any]]:
+        if not _PYMONGO_AVAILABLE:
+            return None
         try:
             return self._collection("models").find_one({"model_id": model_id})
         except PyMongoError as exc:
@@ -266,6 +268,8 @@ class MetadataStore:
             return None
 
     def list_models(self) -> list[dict[str, Any]]:
+        if not _PYMONGO_AVAILABLE:
+            return []
         try:
             return list(self._collection("models").find())
         except PyMongoError as exc:
@@ -291,6 +295,8 @@ class MetadataStore:
             return False
 
     def get_audio_sample(self, sample_id: str) -> Optional[dict[str, Any]]:
+        if not _PYMONGO_AVAILABLE:
+            return None
         try:
             return self._collection("audio_samples").find_one({"sample_id": sample_id})
         except PyMongoError as exc:
@@ -320,6 +326,8 @@ class MetadataStore:
             return False
 
     def list_analyses_for_sample(self, sample_id: str) -> list[dict[str, Any]]:
+        if not _PYMONGO_AVAILABLE:
+            return []
         try:
             return list(
                 self._collection("analysis_results").find({"sample_id": sample_id})
@@ -351,6 +359,8 @@ class MetadataStore:
     def list_bias_reports(
         self, model_id: str | None = None, cohort: str | None = None
     ) -> list[dict[str, Any]]:
+        if not _PYMONGO_AVAILABLE:
+            return []
         query: dict[str, Any] = {}
         if model_id:
             query["model_id"] = model_id
