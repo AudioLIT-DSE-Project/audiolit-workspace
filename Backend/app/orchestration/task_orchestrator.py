@@ -40,6 +40,8 @@ from ..infrastructure.rq_connection import (
     get_redis_connection,
     get_worker_redis_connection,
 )
+from ..infrastructure.logging_config import configure_logging
+from ..infrastructure import metrics as metrics_module
 
 logger = logging.getLogger("audiolit.orchestration")
 
@@ -205,6 +207,33 @@ def _current_job_id() -> str:
     return job.id if job is not None else "unknown"
 
 
+# LIT-259: where each task function keeps its ``model_id`` argument, for the
+# structured task-event logs. The slot is the *only* argument ever read - never
+# the ``audio_ref`` position (SR6: no audio identities, filenames, session ids
+# or transcripts in logs). Unknown functions simply log ``model_id: null``.
+_TASK_MODEL_ID_ARG_INDEX: dict[str, int | None] = {
+    "asr_task": 1,
+    "ser_task": 1,
+    "add_task": 1,
+    "xai_task": 1,
+    "accent_bias_task": 0,
+    "mutation_task": None,
+    "aggregator_task": None,
+}
+
+
+def _task_model_id(job: Job) -> str | None:
+    """Best-effort ``model_id`` for the log extra, from the reserved arg slot."""
+    if job is None or not job.func_name or not job.args:
+        return None
+    leaf = job.func_name.split(".")[-1]
+    index = _TASK_MODEL_ID_ARG_INDEX.get(leaf)
+    if index is None or len(job.args) <= index:
+        return None
+    value = job.args[index]
+    return str(value) if value is not None else None
+
+
 # --------------------------------------------------------------------------- #
 # Worker
 # --------------------------------------------------------------------------- #
@@ -286,27 +315,91 @@ class AudioLITWorker(SimpleWorker):
         finally:
             _WORKER_CTX = None
 
+    def _task_event_extra(
+        self,
+        job: Job,
+        queue: Queue,
+        duration_s: float | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """The structured-event fields. Only ever reads the job's reserved
+        model-id slot - never the audio_ref position (SR6: no audio identities,
+        filenames, session ids or transcripts in logs)."""
+        extra: dict[str, Any] = {
+            "job_id": job.id,
+            "family": self.family.value,
+            "queue": queue.name,
+            "worker": os.getpid(),
+            "model_id": _task_model_id(job),
+        }
+        if duration_s is not None:
+            extra["duration_s"] = round(duration_s, 3)
+        if error is not None:
+            extra["error"] = error
+        return extra
+
+    def _record_task_failure(self, job: Job, queue: Queue, started: float, error: str) -> None:
+        """Emit the ``task.failure`` event and bump the ``<family>:<state>``
+        counter. Best-effort on the Redis side. Call from inside an ``except``
+        so ``exc_info=True`` resolves to the live traceback."""
+        state = "retrying" if (getattr(job, "retries_left", 0) or 0) > 0 else "failed"
+        duration_s = time.monotonic() - (started or time.monotonic())
+        logger.error(
+            "task.failure",
+            extra=self._task_event_extra(job, queue, duration_s, error),
+            exc_info=True,
+        )
+        try:
+            metrics_module.record_task(
+                get_redis_connection(), self.family.value, state, duration_s=duration_s
+            )
+        except Exception:
+            logger.debug("task.failure.metric_record_failed", exc_info=True)
+
     def perform_job(self, job: Job, queue: Queue, *args: Any, **kwargs: Any) -> Any:
         publish_progress(job.id, "PROCESSING", {"family": self.family.value})
         started = time.monotonic()
         try:
             assert self._ctx is not None
             self._ctx.load_libraries()
+            try:
+                metrics_module.record_task(
+                    get_redis_connection(), self.family.value, "processing"
+                )
+            except Exception:
+                logger.debug("task.processing.metric_record_failed", exc_info=True)
+            logger.info("task.processing", extra=self._task_event_extra(job, queue))
             result = super().perform_job(job, queue, *args, **kwargs)
+            # RQ's perform_job swallows a job-func failure: it marks the job
+            # FAILED in its own except and returns False. Record that failure
+            # here (job.exc_info holds the traceback RQ captured) and never log
+            # a task.success for it - only a True return is a success.
+            if result is False:
+                error = getattr(job, "exc_info", None) or "job failed (no traceback captured)"
+                self._record_task_failure(job, queue, started, error)
+                return result
+            duration_s = time.monotonic() - started
+            try:
+                metrics_module.record_task(
+                    get_redis_connection(), self.family.value, "success", duration_s=duration_s
+                )
+            except Exception:
+                logger.debug("task.success.metric_record_failed", exc_info=True)
+            logger.info("task.success", extra=self._task_event_extra(job, queue, duration_s))
             publish_progress(
-                job.id, "SUCCESS", {"duration_s": round(time.monotonic() - started, 3)}
+                job.id, "SUCCESS", {"duration_s": round(duration_s, 3)}
             )
             return result
         except Exception as exc:
             # RQ retries a transient failure a few times before giving up, and the
             # user is told which of the two happened (SAD §11.1).
-            state = "RETRYING" if job.retries_left else "FAILURE"
+            state = "RETRYING" if getattr(job, "retries_left", 0) > 0 else "FAILURE"
+            self._record_task_failure(job, queue, started, str(exc))
             publish_progress(
                 job.id,
                 state,
                 {"duration_s": round(time.monotonic() - started, 3), "error": str(exc)},
             )
-            logger.exception("job.failed id=%s", job.id)
             raise
 
     def handle_job_success(self, *args: Any, **kwargs: Any) -> Any:
@@ -362,6 +455,7 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     cannot start and double the VRAM footprint (SAD C2). The CPU-only mutation
     family is exempt and may scale out.
     """
+    configure_logging()
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
     conn = get_redis_connection()
 
