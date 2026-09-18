@@ -8,6 +8,12 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = "lax"  # use "none" on cross-site + https
     COOKIE_DOMAIN: str | None = None
 
+    # SRS §3.6.3 / SAD §11.3 (LIT-223) - the inherited /debug/session
+    # diagnostic was reachable unauthenticated and echoed cookies + request
+    # headers back to any caller. Now disabled unless explicitly enabled, and
+    # when enabled it returns only the session id.
+    DEBUG_ENABLED: bool = False
+
     # FR2.2 — active dataset working footprint bound (~100 GB across all
     # seven corpora per the SRS) and the per-request row cap that keeps
     # `/{dataset}/metadata` from materializing an entire large corpus.
@@ -16,7 +22,11 @@ class Settings(BaseSettings):
 
     # SRS §3.10 / SAD §9 — durable MongoDB metadata tier. Records must survive
     # in MongoDB; nothing here ever touches audio bytes (constraint C4, SR4).
-    MONGO_URL: str = "mongodb://localhost:27017"
+    # Empty by default = the tier is "configured off": `get_metadata_store()`
+    # returns None and every write-through is a logged no-op, so local
+    # development and CI never need a MongoDB server (SAD §11.1 degradation).
+    # Set MONGO_URL (e.g. mongodb://127.0.0.1:27017) to enable the tier.
+    MONGO_URL: str = ""
     MONGO_DB_NAME: str = "audiolit"
     #: Ordinary analysis records expire after a day; bias reports are retained
     #: permanently (SAD §9).

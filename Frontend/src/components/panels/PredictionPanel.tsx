@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { SaliencyVisualization } from "../visualization/SaliencyVisualization";
 import { AttentionVisualization } from "../visualization/AttentionVisualization";
 import { PerturbationTools } from "../analysis/PerturbationTools";
@@ -641,28 +642,45 @@ export const PredictionPanel = ({
                   branch's backend: all four return 200 with a measured matrix
                   for melody-machine.
                 */}
-                {(
-                  [
-                    "gradcam",
-                    "integrated_gradients",
-                    "lime",
-                    "shap",
-                  ] as XAIMethod[]
-                ).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => setActiveXAIMethod(m)}
-                    className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-                      activeXAIMethod === m
-                        ? "bg-primary text-primary-foreground border-primary"
-                        : "bg-muted text-muted-foreground border-border hover:bg-accent"
-                    }`}
-                  >
-                    {m === "integrated_gradients"
-                      ? "INTEGRATED GRADIENTS"
-                      : m.toUpperCase()}
-                  </button>
-                ))}
+                <TooltipProvider>
+                  {(
+                    [
+                      "gradcam",
+                      "integrated_gradients",
+                      "lime",
+                      "shap",
+                    ] as XAIMethod[]
+                  ).map((m) => (
+                    <Tooltip key={m}>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={() => setActiveXAIMethod(m)}
+                          className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                            activeXAIMethod === m
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-muted text-muted-foreground border-border hover:bg-accent"
+                          }`}
+                        >
+                          {m === "integrated_gradients"
+                            ? "INTEGRATED GRADIENTS"
+                            : m.toUpperCase()}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="text-xs max-w-[220px]">
+                          {m === "gradcam" &&
+                            "Gradient-weighted class activation: which time-frequency regions most raised the predicted class's score."}
+                          {m === "integrated_gradients" &&
+                            "Integrates gradients along a path from a baseline (silence) to the input, attributing the prediction to each input region."}
+                          {m === "lime" &&
+                            "Fits a local surrogate model over perturbed versions of the clip to approximate which regions drove this prediction."}
+                          {m === "shap" &&
+                            "Shapley-value attribution: each region's fair-share contribution to the prediction, based on cooperative game theory."}
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                </TooltipProvider>
               </div>
 
               {/* Overlay opacity (FR8.4) */}

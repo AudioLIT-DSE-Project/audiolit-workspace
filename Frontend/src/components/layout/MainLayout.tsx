@@ -12,6 +12,7 @@ import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
+import { QuickStartDialog, readQuickStartDismissed } from "./QuickStartDialog";
 
 interface UploadedFile {
   file_id: string;
@@ -87,6 +88,14 @@ export const MainLayout = () => {
   const { state, result } = useTaskStatus(activeTaskId);
 
   // Global Warmup Runner State
+  const [isQuickStartOpen, setIsQuickStartOpen] = useState(false);
+  // Auto-open once per browser, gated by localStorage - never runs a second
+  // time in the same session so it doesn't re-fight a user who reopened it
+  // manually via the toolbar and then dismissed it.
+  useEffect(() => {
+    if (!readQuickStartDismissed()) setIsQuickStartOpen(true);
+  }, []);
+
   const [isWarmupModalOpen, setIsWarmupModalOpen] = useState(false);
   const [warmupJobId, setWarmupJobId] = useState<string | null>(null);
   const [warmupProgress, setWarmupProgress] = useState<WarmupProgress | null>(null);
@@ -617,7 +626,10 @@ export const MainLayout = () => {
           selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
           onWarmupClick={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
           warmupJobId={warmupJobId}
+          onQuickStartClick={() => setIsQuickStartOpen(true)}
         />
+
+        <QuickStartDialog open={isQuickStartOpen} onOpenChange={setIsQuickStartOpen} />
         
         {/* Global Dataset Warmup Modal (Confirmation & Active Progress) */}
         <WarmupModal
