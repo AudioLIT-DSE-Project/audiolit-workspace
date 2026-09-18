@@ -41,6 +41,7 @@ Before running AudioLIT locally, ensure your system has:
 - **Node.js**: `18.0` or higher (with `npm`)
 - **Redis Server**: `7.0+` (running via Docker or local installation on port `6379`)
 - **FFmpeg**: Required for audio decoding & resampling
+- **MongoDB**: `6.0+` — **optional** (Step 1b); the durable metadata tier degrades gracefully when absent
 
 ---
 
@@ -86,6 +87,37 @@ on the same Redis, so jobs enqueue and complete without any manual setup
 git clone https://github.com/AudioLIT-DSE-Project/audiolit-workspace.git
 cd audiolit-workspace
 ```
+
+---
+
+### Step 1b: (Optional) Start the MongoDB Metadata Tier
+
+AudioLIT uses MongoDB as an **optional durable metadata tier** (SRS §3.10 / SAD §9):
+it keeps model registrations, analysis records, and accent-bias reports that must
+survive a cache flush or restart. It is **not** required for local development —
+every write-through degrades silently when the tier is off (SRS §3.3.1), so you
+can skip this step and the rest of the guide still works. See
+[`docs/MONGODB_METADATA_TIER.md`](docs/MONGODB_METADATA_TIER.md) for the full
+operations and degradation guide.
+
+```bash
+docker run -d --name lit-mongo --rm -p 27017:27017 mongo:6
+```
+
+Then tell the backend about it when you start it (Step 3) by setting `MONGO_URL`:
+
+```bash
+# Windows (PowerShell):
+$env:MONGO_URL = "mongodb://127.0.0.1:27017"
+# Linux / macOS:
+export MONGO_URL="mongodb://127.0.0.1:27017"
+```
+
+> **Use `127.0.0.1`, not `localhost`**, in `MONGO_URL` and any `mongosh`
+> connection string on Windows — `localhost` resolves to `::1` (IPv6) first and
+> every fresh connection waits out an IPv6 connect timeout before falling back
+> (measured ~2 s per connection on this repo). Leave `MONGO_URL` unset to run
+> without the tier.
 
 ---
 
@@ -188,6 +220,36 @@ python -m app.orchestration.worker mutation
 Check worker status and active queue depth via HTTP:
 ```bash
 curl http://localhost:8000/health/workers
+```
+
+#### Observability: structured JSON task logs & operational metrics
+Worker events are emitted as structured JSON logs (`LOG_FORMAT=json`, the
+default; set `LOG_FORMAT=text` for plain logs) with fields like
+`ts`, `level`, `logger`, `event` (`task.processing` / `task.success` /
+`task.failure`) plus `job_id`, `family`, `queue`, `model_id`, `duration_s`
+and `worker`. Audio file references, transcripts and session identifiers are
+never logged (SR6).
+
+Operational counters (task runs per family, success/failure totals, inference
+duration sums, cache hits/misses) are aggregated in Redis and exposed at:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+Example response:
+
+```json
+{
+  "tasks": { "ser:success": 41, "ser:failed": 2, "asr:success": 63, "total": 106 },
+  "durations": {
+    "ser": { "count": 43, "sum_ms": 312014, "avg_ms": 7256.1 },
+    "asr": { "count": 63, "sum_ms": 887311, "avg_ms": 14084.3 }
+  },
+  "queues": { "asr": 0, "ser": 1, "add": 0, "xai": 0, "mutation": 0 },
+  "cache": { "hits": 512, "misses": 118, "hit_ratio": 0.81 },
+  "gpu": { "cuda_available": false, "device": "cpu", "families_locked": [] }
+}
 ```
 
 ---
