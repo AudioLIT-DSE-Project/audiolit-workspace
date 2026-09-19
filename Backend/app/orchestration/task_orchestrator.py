@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence
@@ -39,6 +40,8 @@ from ..infrastructure.rq_connection import (
     get_redis_connection,
     get_worker_redis_connection,
 )
+from ..infrastructure.logging_config import configure_logging
+from ..infrastructure import metrics as metrics_module
 
 logger = logging.getLogger("audiolit.orchestration")
 
@@ -204,6 +207,33 @@ def _current_job_id() -> str:
     return job.id if job is not None else "unknown"
 
 
+# LIT-259: where each task function keeps its ``model_id`` argument, for the
+# structured task-event logs. The slot is the *only* argument ever read - never
+# the ``audio_ref`` position (SR6: no audio identities, filenames, session ids
+# or transcripts in logs). Unknown functions simply log ``model_id: null``.
+_TASK_MODEL_ID_ARG_INDEX: dict[str, int | None] = {
+    "asr_task": 1,
+    "ser_task": 1,
+    "add_task": 1,
+    "xai_task": 1,
+    "accent_bias_task": 0,
+    "mutation_task": None,
+    "aggregator_task": None,
+}
+
+
+def _task_model_id(job: Job) -> str | None:
+    """Best-effort ``model_id`` for the log extra, from the reserved arg slot."""
+    if job is None or not job.func_name or not job.args:
+        return None
+    leaf = job.func_name.split(".")[-1]
+    index = _TASK_MODEL_ID_ARG_INDEX.get(leaf)
+    if index is None or len(job.args) <= index:
+        return None
+    value = job.args[index]
+    return str(value) if value is not None else None
+
+
 # --------------------------------------------------------------------------- #
 # Worker
 # --------------------------------------------------------------------------- #
@@ -285,27 +315,91 @@ class AudioLITWorker(SimpleWorker):
         finally:
             _WORKER_CTX = None
 
+    def _task_event_extra(
+        self,
+        job: Job,
+        queue: Queue,
+        duration_s: float | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """The structured-event fields. Only ever reads the job's reserved
+        model-id slot - never the audio_ref position (SR6: no audio identities,
+        filenames, session ids or transcripts in logs)."""
+        extra: dict[str, Any] = {
+            "job_id": job.id,
+            "family": self.family.value,
+            "queue": queue.name,
+            "worker": os.getpid(),
+            "model_id": _task_model_id(job),
+        }
+        if duration_s is not None:
+            extra["duration_s"] = round(duration_s, 3)
+        if error is not None:
+            extra["error"] = error
+        return extra
+
+    def _record_task_failure(self, job: Job, queue: Queue, started: float, error: str) -> None:
+        """Emit the ``task.failure`` event and bump the ``<family>:<state>``
+        counter. Best-effort on the Redis side. Call from inside an ``except``
+        so ``exc_info=True`` resolves to the live traceback."""
+        state = "retrying" if (getattr(job, "retries_left", 0) or 0) > 0 else "failed"
+        duration_s = time.monotonic() - (started or time.monotonic())
+        logger.error(
+            "task.failure",
+            extra=self._task_event_extra(job, queue, duration_s, error),
+            exc_info=True,
+        )
+        try:
+            metrics_module.record_task(
+                get_redis_connection(), self.family.value, state, duration_s=duration_s
+            )
+        except Exception:
+            logger.debug("task.failure.metric_record_failed", exc_info=True)
+
     def perform_job(self, job: Job, queue: Queue, *args: Any, **kwargs: Any) -> Any:
         publish_progress(job.id, "PROCESSING", {"family": self.family.value})
         started = time.monotonic()
         try:
             assert self._ctx is not None
             self._ctx.load_libraries()
+            try:
+                metrics_module.record_task(
+                    get_redis_connection(), self.family.value, "processing"
+                )
+            except Exception:
+                logger.debug("task.processing.metric_record_failed", exc_info=True)
+            logger.info("task.processing", extra=self._task_event_extra(job, queue))
             result = super().perform_job(job, queue, *args, **kwargs)
+            # RQ's perform_job swallows a job-func failure: it marks the job
+            # FAILED in its own except and returns False. Record that failure
+            # here (job.exc_info holds the traceback RQ captured) and never log
+            # a task.success for it - only a True return is a success.
+            if result is False:
+                error = getattr(job, "exc_info", None) or "job failed (no traceback captured)"
+                self._record_task_failure(job, queue, started, error)
+                return result
+            duration_s = time.monotonic() - started
+            try:
+                metrics_module.record_task(
+                    get_redis_connection(), self.family.value, "success", duration_s=duration_s
+                )
+            except Exception:
+                logger.debug("task.success.metric_record_failed", exc_info=True)
+            logger.info("task.success", extra=self._task_event_extra(job, queue, duration_s))
             publish_progress(
-                job.id, "SUCCESS", {"duration_s": round(time.monotonic() - started, 3)}
+                job.id, "SUCCESS", {"duration_s": round(duration_s, 3)}
             )
             return result
         except Exception as exc:
             # RQ retries a transient failure a few times before giving up, and the
             # user is told which of the two happened (SAD §11.1).
-            state = "RETRYING" if job.retries_left else "FAILURE"
+            state = "RETRYING" if getattr(job, "retries_left", 0) > 0 else "FAILURE"
+            self._record_task_failure(job, queue, started, str(exc))
             publish_progress(
                 job.id,
                 state,
                 {"duration_s": round(time.monotonic() - started, 3), "error": str(exc)},
             )
-            logger.exception("job.failed id=%s", job.id)
             raise
 
     def handle_job_success(self, *args: Any, **kwargs: Any) -> Any:
@@ -361,6 +455,7 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     cannot start and double the VRAM footprint (SAD C2). The CPU-only mutation
     family is exempt and may scale out.
     """
+    configure_logging()
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
     conn = get_redis_connection()
 
@@ -405,6 +500,169 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
 # live in `multitask_orchestrator_service.py` (LIT-150); wiring them onto these
 # per-family queues is the remaining step of LIT-127's follow-on, and needs the
 # `/upload` contract change that LIT-227/LIT-157 deliberately deferred.
+
+# --------------------------------------------------------------------------- #
+# Metadata write-through (SRS §3.10 / SAD §9 / SAD §11.1, LIT-257)
+# --------------------------------------------------------------------------- #
+# The fan-in aggregator and the bias-diagnostic task each write their results
+# through to the durable MongoDB tier *before* the Redis cache write so that
+# model registrations, analysis records, and bias reports survive a cache flush
+# or restart (SAD §6.2 write-order). Every write is try/except logged and
+# swallowed: metadata degradation is observable but never fatal.
+
+
+#: Arrays at or above this length are treated as tensors/heatmaps and dropped
+#: before a result reaches the durable tier (C4/SR4: no tensor payloads).
+_MAX_PERSISTED_LIST_LEN: int = 16
+
+_DROP = object()
+
+
+def _strip_array_fields(value: Any) -> Any:
+    """Recursively drop array-shaped payloads from a result before writing it
+    to the durable tier.
+
+    Saliency/attention heatmaps and embedding vectors live in Redis under
+    ``redis_tensor_key``; MongoDB records a reference, never the tensor
+    (SRS §3.10, C4/SR4). Lists beyond ``_MAX_PERSISTED_LIST_LEN`` or anything
+    NumPy/tensor-shaped are dropped; short plain lists survive.
+    """
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            cleaned = _strip_array_fields(v)
+            if cleaned is not _DROP:
+                out[k] = cleaned
+        return out
+    if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_PERSISTED_LIST_LEN:
+            return _DROP
+        cleaned = [_strip_array_fields(v) for v in value]
+        return [c for c in cleaned if c is not _DROP]
+    if type(value).__name__ in ("ndarray", "Tensor") and hasattr(value, "shape"):
+        return _DROP
+    return value
+
+
+def _sample_id(audio_ref: str) -> str:
+    """Deterministic id for an audio sample derived from its path reference."""
+    return hashlib.sha256(audio_ref.encode("utf-8")).hexdigest()
+
+
+def _audio_sample_details(audio_ref: str) -> dict[str, Any] | None:
+    """Duration/sample-rate metadata for a sample path, or None if unreadable.
+
+    Uses ``soundfile.info`` only -- the file's header -- never reads audio
+    samples into memory (constraint C4/SR4: metadata tier touches no bytes).
+    """
+    try:
+        import soundfile as sf
+        import os as _os
+
+        info = sf.info(audio_ref)
+        return {
+            "filename": _os.path.basename(audio_ref),
+            "duration": info.duration,
+            "sample_rate": info.samplerate,
+            "uploaded_at": datetime.now(timezone.utc),
+        }
+    except Exception as exc:
+        logger.warning("metadata.sample.info_failed ref=%s: %s", audio_ref, exc)
+        return None
+
+
+def _write_analysis_metadata(
+    combined: Mapping[str, Any],
+    cache_key: str | None,
+    audio_ref: str | None,
+) -> None:
+    """Fan-in write-through to the durable MongoDB metadata tier (LIT-257).
+
+    Records the sample once and one ``analysis_results`` document per task,
+    then carries on regardless. ``get_metadata_store()`` returning ``None``
+    means the tier is configured off and this is a silent no-op; any
+    individual failure is logged as ``metadata.write_failed`` and swallowed,
+    so metadata can never fail an analysis (SRS §3.3.1 / SAD §11.1).
+
+    Write order follows SAD §6.2: MongoDB *before* the Redis cache write in
+    ``aggregator_task``.
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    sample_id: str | None = None
+    if audio_ref:
+        sample_id = _sample_id(audio_ref)
+        details = _audio_sample_details(audio_ref)
+        if details is not None:
+            try:
+                store.upsert_audio_sample(
+                    {"sample_id": sample_id, "file_path_reference": audio_ref, **details}
+                )
+            except Exception as exc:
+                logger.warning("metadata.write_failed collection=audio_samples: %s", exc)
+
+    for key, result in combined.get("tasks", {}).items():
+        if not isinstance(result, Mapping) or not result.get("task"):
+            # A failed sibling reached the fan-in as {"status": "failed"} keyed
+            # by job id - there is nothing reproducible to record for it.
+            continue
+        task_name = result.get("task", key)
+        analysis_id = f"{cache_key or _sample_id(audio_ref or '')}:{task_name}"
+        try:
+            store.insert_analysis(
+                {
+                    "analysis_id": analysis_id,
+                    "sample_id": sample_id,
+                    "model_id": result.get("model_id"),
+                    "task": task_name,
+                    "prediction": _strip_array_fields(dict(result)),
+                    "redis_tensor_key": cache_key,
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=analysis_results: %s", exc)
+
+
+def _write_bias_report(model_id: str, report: Any) -> None:
+    """Write-through one ``bias_reports`` document per cohort (retained
+    permanently, SAD §9; LIT-257).
+
+    Never raises: a failed write is logged and skipped, so metadata lag never
+    shadows an accent-bias diagnostic (SRS §3.3.1 / SAD §11.1).
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    corpus = getattr(report, "corpus", "l2-arctic")
+    for cohort in getattr(report, "cohorts", []) or []:
+        try:
+            store.insert_bias_report(
+                {
+                    "report_id": f"{model_id}:{corpus}:{getattr(cohort, 'accent', '')}",
+                    "model_id": model_id,
+                    "cohort": getattr(cohort, "accent", ""),
+                    "WER": getattr(cohort, "mean_wer", None),
+                    "disparity_metrics": {
+                        "sample_count": getattr(cohort, "sample_count", 0),
+                        "scored_count": getattr(cohort, "scored_count", 0),
+                        "median_wer": getattr(cohort, "median_wer", None),
+                        "stdev_wer": getattr(cohort, "stdev_wer", None),
+                        "min_wer": getattr(cohort, "min_wer", None),
+                        "max_wer": getattr(cohort, "max_wer", None),
+                        "corpus": corpus,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=bias_reports: %s", exc)
+
 
 def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
     ctx = get_worker_context()
@@ -542,14 +800,22 @@ def accent_bias_task(
         model_id=model_id,
         samples_per_cohort=samples_per_cohort,
     )
+    _write_bias_report(model_id, report)
     publish_progress(_current_job_id(), "accent_bias.completed", {"model": model_id})
     return report.to_json_dict()
 
 
-def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dict[str, Any]:
+def aggregator_task(
+    family_job_ids: Sequence[str],
+    cache_key: str | None,
+    audio_ref: str | None = None,
+) -> dict[str, Any]:
     """Fan-in: combine the family jobs' results once they have all finished.
 
-    A failed sibling never loses the others' results (SAD §11.1).
+    A failed sibling never loses the others' results (SAD §11.1). Once the
+    combined result is assembled it is written through to the durable metadata
+    tier *before* the Redis cache write (SAD §6.2 write order), so metadata
+    lag can never shadow the cache (LIT-257).
     """
     conn = get_redis_connection()
     combined: dict[str, Any] = {"tasks": {}, "cache_key": cache_key, "schema_version": "1.0"}
@@ -560,6 +826,8 @@ def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dic
             continue
         result = job.result or {}
         combined["tasks"][result.get("task", "unknown")] = result
+
+    _write_analysis_metadata(combined, cache_key, audio_ref)
 
     if cache_key is not None:
         # TODO(LIT-163): write the combined result to the content-addressed cache.
@@ -635,6 +903,7 @@ def enqueue_multitask_analysis(
         aggregator_task,
         [j.id for j in family_job_objs],
         cache_key,
+        audio_ref,
         depends_on=family_job_objs,
         job_timeout=DEFAULT_AGGREGATOR_TIMEOUT,
         result_ttl=DEFAULT_RESULT_TTL,
