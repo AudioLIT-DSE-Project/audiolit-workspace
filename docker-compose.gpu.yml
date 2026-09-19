@@ -1,0 +1,17 @@
+# LIT-203 — optional GPU override (SAD §7: workers use the GPU when present,
+# CPU otherwise). Enable with:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#
+# Requires the NVIDIA Container Toolkit on the host. Only the worker fleet
+# runs inference; the gateway, Redis and MongoDB do not need the GPU.
+
+services:
+  worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

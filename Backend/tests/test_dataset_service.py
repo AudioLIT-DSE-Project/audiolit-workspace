@@ -17,6 +17,7 @@ import pytest
 import soundfile as sf
 
 from app.infrastructure import dataset_ingestion, dataset_service
+from app.infrastructure.custom_dataset_service import format_custom_dataset_name
 from app.infrastructure.dataset_ingestion import DatasetLoader, SampleMetadata, TaskFamily
 
 
@@ -225,6 +226,65 @@ class TestResolveAudioReference:
         resolved = dataset_service.resolve_audio_reference(dataset="cv-valid-dev", dataset_file="sample-000775.mp3")
         assert resolved.exists()
         assert resolved.name == "sample-000775.mp3"
+
+
+class TestCrossSessionCustomDatasetDenied:
+    """LIT-223: custom datasets embed the owning session in their name
+    ('custom:<session_id>:<name>'). The inherited check logged a warning for a
+    mismatching session and *kept serving the dataset from the embedded
+    session*, so anyone who knew another session's id could read its files.
+    Both entry points must now deny the mismatch outright."""
+
+    def test_load_metadata_denies_other_sessions_dataset(self):
+        dataset = format_custom_dataset_name("other-session-123", "victim-set")
+        with pytest.raises(ValueError, match="Cross-session access"):
+            dataset_service.load_metadata(dataset, session_id="my-session-456")
+
+    def test_load_metadata_denies_even_when_file_would_exist(self, monkeypatch, tmp_path):
+        # Regression for the old fall-through: the mismatch used to resolve
+        # using the embedded session's manager and served the file. It must be
+        # denied even if a matching dataset actually exists on disk.
+        import app.infrastructure.custom_dataset_service as cds
+
+        monkeypatch.setattr(cds, "SESSIONS_BASE_DIR", tmp_path / "sessions")
+        manager = cds.get_custom_dataset_manager("other-session-123")
+        manager.create_dataset("victim-set")
+
+        dataset = format_custom_dataset_name("other-session-123", "victim-set")
+        with pytest.raises(ValueError, match="Cross-session access"):
+            dataset_service.load_metadata(dataset, session_id="my-session-456")
+
+    def test_resolve_file_denies_other_sessions_dataset(self):
+        dataset = format_custom_dataset_name("other-session-123", "victim-set")
+        with pytest.raises(ValueError, match="Cross-session access"):
+            dataset_service.resolve_file(dataset, "secret.wav", session_id="my-session-456")
+
+    def test_resolve_file_denies_even_when_file_would_exist(self, monkeypatch, tmp_path):
+        import app.infrastructure.custom_dataset_service as cds
+
+        monkeypatch.setattr(cds, "SESSIONS_BASE_DIR", tmp_path / "sessions")
+        manager = cds.get_custom_dataset_manager("other-session-123")
+        manager.create_dataset("victim-set")
+        (manager.datasets_dir / "victim-set" / "secret.wav").write_bytes(b"data")
+
+        dataset = format_custom_dataset_name("other-session-123", "victim-set")
+        with pytest.raises(ValueError, match="Cross-session access"):
+            dataset_service.resolve_file(dataset, "secret.wav", session_id="my-session-456")
+
+    def test_a_sessions_own_dataset_still_resolves(self, monkeypatch, tmp_path):
+        # The matching session must be unaffected - deny the mismatch, don't
+        # deny custom datasets entirely.
+        import app.infrastructure.custom_dataset_service as cds
+
+        monkeypatch.setattr(cds, "SESSIONS_BASE_DIR", tmp_path / "sessions")
+        manager = cds.get_custom_dataset_manager("my-session-456")
+        manager.create_dataset("my-set")
+        (manager.datasets_dir / "my-set" / "clip.wav").write_bytes(b"data")
+
+        dataset = format_custom_dataset_name("my-session-456", "my-set")
+        resolved = dataset_service.resolve_file(dataset, "clip.wav", session_id="my-session-456")
+        assert resolved.exists()
+        assert resolved.name == "clip.wav"
 
 
 
