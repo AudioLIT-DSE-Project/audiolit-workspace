@@ -16,6 +16,7 @@ then the SAD and SRS, before making architectural or scope decisions.
 |------|------------|--------|
 | `SAD.md` | Software Architecture Document (v1.0) | **Final — authoritative** |
 | `SRS.md` | Software Requirements Specification (v1.0) | **Final — authoritative** |
+| `MONGODB_METADATA_TIER.md` | MongoDB metadata tier — operations, configuration, degradation (SRS §3.10 / SAD §9) | Living |
 | `README.md` | This file — conventions and errata | Living |
 
 > Export both from Google Docs as Markdown and commit them here as `SAD.md` and

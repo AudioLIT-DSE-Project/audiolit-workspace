@@ -133,7 +133,6 @@ async def delete_uploaded_file(file_id: str):
 
 @router.get("/upload/file/{file_id}")
 @router.head("/upload/file/{file_id}")
-@router.options("/upload/file/{file_id}")
 async def serve_audio_file(file_id: str):
     """
     Serve an uploaded audio file for playback
@@ -153,15 +152,14 @@ async def serve_audio_file(file_id: str):
     }
     media_type = media_type_map.get(file_extension, 'audio/*')
     
+    # LIT-223: remove the route-level Access-Control-Allow-Origin: "*" here -
+    # CORS is the app's CORSMiddleware's job, with a restricted origin allow-list.
     return FileResponse(
         path=file_path,
         media_type=media_type,
         headers={
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'public, max-age=3600',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-            'Access-Control-Allow-Headers': 'Range, Accept-Encoding',
             'Content-Disposition': f'inline; filename="{file_id}"'
         }
     )
