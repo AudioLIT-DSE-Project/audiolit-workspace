@@ -103,7 +103,7 @@ ANALYSIS_RESULTS_SCHEMA: Mapping[str, Any] = {
             "task": {"bsonType": "string"},
             "prediction": {"bsonType": "object"},
             "redis_tensor_key": {"bsonType": "string"},
-            "created_at": {"bsonType": "object"},
+            "created_at": {"bsonType": "double"},
         },
     }
 }
@@ -116,9 +116,9 @@ BIAS_REPORTS_SCHEMA: Mapping[str, Any] = {
             "report_id": {"bsonType": "string"},
             "model_id": {"bsonType": "string"},
             "cohort": {"bsonType": "string"},
-            "WER": {"bsonType": "number"},
+            "WER": {"bsonType": "double"},
             "disparity_metrics": {"bsonType": "object"},
-            "created_at": {"bsonType": "object"},
+            "created_at": {"bsonType": "double"},
         },
     }
 }
