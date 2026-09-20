@@ -31,17 +31,17 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
-      testIgnore: /dataflow\.spec\.ts/,
+      testIgnore: /(dataflow|accessibility)\.spec\.ts/,
     },
     {
       name: "firefox",
       use: { ...devices["Desktop Firefox"] },
-      testIgnore: /dataflow\.spec\.ts/,
+      testIgnore: /(dataflow|accessibility)\.spec\.ts/,
     },
     {
       name: "webkit",
       use: { ...devices["Desktop Safari"] },
-      testIgnore: /dataflow\.spec\.ts/,
+      testIgnore: /(dataflow|accessibility)\.spec\.ts/,
     },
 
     // Opt-in: `npm run test:e2e:dataflow`. Requires the backend, Redis and the
@@ -49,6 +49,16 @@ export default defineConfig({
     // survives the round trip from model to panel, which is not a per-browser
     // property; running it three times would triple a suite whose individual
     // requests already take tens of seconds on CPU.
+    // Axe-core WCAG 2.1 AA scan. Backend-free like the layout suite, but run
+    // once on Chromium rather than per-browser: axe evaluates the same DOM and
+    // the same computed styles in each engine, so tripling it would treble the
+    // runtime for near-identical findings.
+    {
+      name: "accessibility",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: /accessibility\.spec\.ts/,
+    },
+
     {
       name: "dataflow",
       use: { ...devices["Desktop Chrome"] },
