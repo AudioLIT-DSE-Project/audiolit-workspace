@@ -1118,6 +1118,10 @@ def run_batch_dataset_warmup_task(
                     "percent": round((i / total) * 100, 1) if total > 0 else 0,
                     "eta_seconds": eta_sec,
                     "eta_formatted": eta_str,
+                    # Carried on every update so a client reattaching mid-run
+                    # (GET /inference/warmup/active) knows what is being warmed.
+                    "dataset": dataset,
+                    "model": model,
                 }
                 conn.set(f"job_progress_{job_id}", json.dumps(p_data), ex=86400)
 
@@ -1318,6 +1322,8 @@ def run_batch_dataset_warmup_task(
         "total": total,
         "current_file": "Done" if not cancelled else "Cancelled",
         "status": final_status,
+        "dataset": dataset,
+        "model": model,
         "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
         "cached_files": warmed_files,
         "failed_subtasks": len(failures),
