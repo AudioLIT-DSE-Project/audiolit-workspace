@@ -25,7 +25,12 @@ test.describe("Quick-start walkthrough", () => {
     // dialog entirely, so absence from the DOM (not just non-visibility) is
     // the correct check.
     await page.reload();
-    await page.waitForLoadState("networkidle");
+    // Wait for the workbench shell, not `networkidle`. The workbench holds a
+    // task WebSocket open and polls warmup progress, so the network never goes
+    // idle while the backend is running: this line passed only because the
+    // suite is usually run backend-free, and timed out as soon as the stack
+    // was up. The panel group is the anchor the layout suite already uses.
+    await page.waitForSelector("[data-panel-group]", { timeout: 20_000 });
     await expect(page.locator('[data-testid="quickstart-dialog"]')).toHaveCount(0);
 
     // The toolbar button reopens it on demand regardless of dismissal.

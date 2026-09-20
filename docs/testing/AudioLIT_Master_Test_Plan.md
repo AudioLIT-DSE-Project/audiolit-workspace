@@ -27,6 +27,7 @@
 | Date       | Version | Description                                                                                                                                        | Author                                                                                          |
 | ---------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | 2026-09-13 | 1.0     | Initial Master Test Plan, built from `TEST_PLAN_DESIGN.md`; §4.1 populated with real backend/frontend/e2e execution evidence from commit `a3a78fa` | Ravindu Pathirana (drafted with Claude Code); to be reviewed by Tharusha Perera and Rahim Iqbal |
+| 2026-09-19 | 1.1     | Re-verification against `origin/testing` `c9fbd46` after PRs #138–#145. **MongoDB exclusion withdrawn** — the SRS §3.10 tier is implemented, so §2, §3.1.1 and §5 are rewritten to cover it, including live-server index/TTL verification. §4.1 gains a second execution pass (Windows 11: backend 715/722, Jest 55/55, ESLint 0 errors, build green) alongside the retained macOS pass. New coverage added for LIT-203 containerisation + Trivy (§3.1.6, §3.1.8), LIT-259 metrics (§3.1.4), LIT-261 quick-start (§3.1.3) and LIT-223 security remediation (§3.1.6). Branch-model divergence (`testing` 31 ahead of `develop`) recorded in §2 and §5. Two new defects recorded: compose `mongo` publishes no host port, and part of the suite's skip behaviour is governed by an undocumented `TEST_REDIS_URL`. | Tharusha Perera (re-verified with Claude Code) |
 
 ---
 
@@ -128,17 +129,38 @@ The table below lists the items — software, models, corpora, and environment �
 identified as targets for testing, grouped by category with a relative
 criticality ranking.
 
-**Target-of-test branch:** `origin/testing`. This branch is a strict superset
-of `origin/develop` (verified via `git log`): it carries every commit merged
-to `develop`, plus three testing-only commits adding
-`Backend/tests/test_inference_consistency.py` (24 cross-cutting wiring
-assertions), `Frontend/e2e/dataflow.spec.ts` (full-stack E2E), and
-`Backend/loadtests/locustfile.py` (Locust load tests). Declaring `testing` as
-the target-of-test, rather than `develop`, is what makes §3.1.5 Load Testing
-answerable at all — `develop` alone carries no load-test harness.
-**Commit referenced throughout this report's executed evidence: `a3a78fa`**
-(the tip of `develop` at drafting time; the `testing`-only commits sit on top
-of it for load and full-stack E2E).
+**Target-of-test branch:** `origin/testing`.
+
+**Re-verified 2026-09-19 — the branch relationship has changed materially
+since this plan was drafted, and the change is recorded here rather than left
+implicit.** At drafting (2026-09-13) `testing` was a strict superset of
+`develop` carrying three testing-only commits. As of 2026-09-19 `testing` is
+**31 commits ahead of `develop`, and `develop` is 0 commits ahead of
+`testing`** (`git log origin/develop..origin/testing` / the reverse). Eight
+pull requests (#138–#145) merged during that window, and every one of them
+took `testing` as its base; `develop` has not moved since `555b413`. PR #136
+merged `develop` into `testing`. In practice `testing` is now the integration
+branch and `develop` is frozen.
+
+This is a deviation from the branch model documented in `CLAUDE.md`, which
+still describes `develop` as the integration branch and `testing` as a
+dedicated test-harness superset. **Flagged, not resolved here** — which branch
+is authoritative is a team convention decision, not a testing one, and per
+this project's conflict-handling rule (`CLAUDE.md` step 10) it belongs in
+Linear. §5's assumptions list already anticipated exactly this, requiring the
+superset claim to be re-verified before being relied on.
+
+Declaring `testing` as the target-of-test remains correct, and is now correct
+for a stronger reason than at drafting: it is where all integration work
+lands, and it is what makes §3.1.5 Load Testing answerable at all — `develop`
+alone carries no load-test harness.
+
+**Commits referenced by this report's executed evidence:**
+
+| Evidence | Commit | Host | Date |
+| -------- | ------ | ---- | ---- |
+| Original pass (§4.1 macOS run) | `a3a78fa` | macOS (`platform darwin`), Python 3.11.15 | 2026-09-13 |
+| Re-verification pass | `c9fbd46` (tip of `origin/testing`) | Windows 11, Python 3.11.0 | 2026-09-19 |
 
 | Group                                | Items                                                                                                                                                                                                                                                                           | Criticality                                                                                                       |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -150,18 +172,40 @@ of it for load and full-stack E2E).
 | **Third-party dependencies**         | PyTorch ≥2.6 (installed: 2.13.0), Transformers ≥4.30, Captum ≥0.6, Librosa ≥0.10, soundfile, RQ 2.10, Redis 7, fakeredis 2.23.2, FastAPI 0.111, httpx 0.27, React 18.3, Vite 5.4, Playwright 1.63, Jest 29                                                                      | Medium — not authored by the team, but failures surface through them                                              |
 | **Models under test**                | Whisper (ASR, family default); Wav2Vec2 SER pinned at `firdhokk/speech-emotion-recognition-with-facebook-wav2vec2-large-xlsr-53`, revision `611e6db8ee667aa07fe66596f9fc761e036ff5b9`; deepfake detector (Wav2Vec2-family, ASVspoof-trained)                                    | High                                                                                                              |
 | **Corpora**                          | Common Voice, LibriSpeech, RAVDESS, CREMA-D, L2-ARCTIC, ASVspoof 2021 DF, ESD                                                                                                                                                                                                   | Medium — licence-gated, streamed/sub-sampled under the ~100 GB footprint bound (FR2.2)                            |
-| **Environment / configuration axes** | Python 3.10 (CI, `ubuntu-latest`) vs 3.11 (this evaluation's local venv); Node 20; Redis 7-alpine (`Backend/docker-compose.yml`); CPU-only torch wheel on CI vs GPU-capable dev hardware; Chromium/Firefox/WebKit; desktop viewports 1024×768–1920×1080                         | Medium — the CPU/GPU split governs whether FR1.4's fallback path is ever exercised                                |
+| **Environment / configuration axes** | **Host OS: Ubuntu (CI, `ubuntu-latest`), macOS (original §4.1 evidence host, `platform darwin`), Windows 11 (re-verification host)** — all three now have executed evidence. Python 3.10 (CI) vs 3.11 (both evaluation hosts); Node 20; Redis 7-alpine and **MongoDB 6** (`Backend/docker-compose.yml` and root `docker-compose.yml`); **containerised full stack — `Backend/Dockerfile`, `Frontend/Dockerfile` + `nginx.conf`, `docker-compose.yml`, `docker-compose.gpu.yml` (LIT-203)**; CPU-only torch wheel on CI vs GPU-capable dev hardware; Chromium/Firefox/WebKit; desktop viewports 1024×768–1920×1080 | Medium — the CPU/GPU split governs whether FR1.4's fallback path is ever exercised; the container matrix is new and is covered in §3.1.8 |
 
 **Explicitly excluded from this test effort:** Hugging Face Hub availability
 and the pretrained models' own training-time accuracy (both third-party,
-outside AudioLIT's control); browser engine internals below the DOM/rendering
-level Playwright can observe; and the SRS §3.10 MongoDB metadata tier —
-**it is specified but not implemented** (no `pymongo`/`motor` in
-`Backend/requirements.txt`, no Mongo reference anywhere under `Backend/app/`,
-confirmed by direct search of the tree on 2026-09-13). This is a genuine
-SRS/repository conflict, not a testing gap; it is raised again in §3.1.1 and
-§5, and must be flagged in Linear per this project's own conflict-handling
-convention (`CLAUDE.md`, step 10) rather than silently designed around.
+outside AudioLIT's control); and browser engine internals below the
+DOM/rendering level Playwright can observe.
+
+**The SRS §3.10 MongoDB metadata tier is no longer excluded — this plan's
+previous exclusion is withdrawn.** At drafting, direct inspection of the tree
+on 2026-09-13 found no `pymongo`, no `motor`, and no Mongo reference under
+`Backend/app/`, and the tier was recorded here as a specified-but-unimplemented
+SRS/repository conflict. That finding was correct at the time and is now
+obsolete: the tier landed across LIT-255/256/257/258 (PRs #135, #138, #140,
+#141). Re-verified on `origin/testing` 2026-09-19:
+
+- `pymongo>=4.6,<5.0` in `Backend/requirements.txt`; `mongomock` in
+  `Backend/requirements-dev.txt`
+- `Backend/app/infrastructure/metadata_store.py` implements the tier
+- Mongo referenced in `app/infrastructure/settings.py`,
+  `app/orchestration/task_orchestrator.py`, `Backend/docker-compose.yml` and
+  the root `docker-compose.yml` (service `mongo`, image `mongo:6`)
+- `Backend/tests/test_metadata_store.py` carries 17 tests across schema,
+  privacy-boundary, model, sample, analysis and bias-report collections
+
+MongoDB integrity is therefore now **in scope** and is covered in §3.1.1.
+
+**Newly merged work now in scope, added at re-verification.** Four merged PRs
+introduced capability this plan did not anticipate, each folded into the
+technique section it belongs to rather than appended as an afterthought:
+full-stack containerisation with Trivy image scanning (LIT-203, §3.1.6 and
+§3.1.8); structured JSON task logs and operational metrics (LIT-259, §3.1.4);
+the in-app quick-start walkthrough (LIT-261, §3.1.3); and the inherited
+security-gap remediation covering debug routes, CORS and cross-session dataset
+access (LIT-223, §3.1.6).
 
 ---
 
@@ -249,34 +293,67 @@ are named here once rather than re-derived eight times:
 
 AudioLIT has no SQL database and no ORM. Its persistence surface is (a) a
 Redis 7 keyspace used for the result cache, the FR4 content-addressed cache
-manager, task pub/sub progress, and the RQ queues themselves, and (b) a
-read-only, licence-gated corpus of seven audio datasets on disk. This section
-is reinterpreted accordingly: "database integrity" means **cache-value
-integrity and keyspace correctness**, and **corpus-loader integrity**.
+manager, task pub/sub progress, and the RQ queues themselves, (b) **a MongoDB
+6 metadata tier (SRS §3.10)**, and (c) a read-only, licence-gated corpus of
+seven audio datasets on disk. This section is reinterpreted accordingly:
+"database integrity" means **cache-value integrity and keyspace
+correctness**, **metadata-document and index integrity**, and **corpus-loader
+integrity**.
 
-**A specification gap is recorded here rather than silently worked around.**
-SRS §3.10 specifies a MongoDB 6.0+ metadata tier (four collections:
-`models`, `audio_samples`, `analysis_results`, `bias_reports`; TTL and
-compound indexes). Direct inspection of `Backend/requirements.txt` and every
-file under `Backend/app/` on 2026-09-13 found no `pymongo`, no `motor`, and no
-reference to Mongo anywhere in the codebase. **This tier is specified but not
-implemented.** This is not a testing omission; it is an SRS/repository
-conflict that predates this test plan, and per this project's own
-conflict-handling rule it must be raised in Linear rather than resolved
-unilaterally either by testing a tier that doesn't exist or by silently
-dropping the requirement from the SRS. It is repeated as a risk in §5.
+**The specification gap previously recorded here is closed.** At drafting,
+this section recorded SRS §3.10's MongoDB tier as specified but not
+implemented, and correctly refused either to test a tier that did not exist or
+to drop the requirement. That gap has since been closed by LIT-255/256/257/258
+(PRs #135, #138, #140, #141). Re-verified on `origin/testing` 2026-09-19:
+`pymongo>=4.6,<5.0` is a runtime dependency, `mongomock` is a dev dependency,
+`app/infrastructure/metadata_store.py` implements the tier, and all four
+specified collections — `models`, `audio_samples`, `analysis_results`,
+`bias_reports` — exist with their TTL and uniqueness indexes. The
+corresponding risk row in §5 is likewise closed.
+
+**A property of the new tier that materially helps this section:** its tests
+use `mongomock`, not a live server, so metadata-integrity tests run with **no
+MongoDB container and no Docker at all** — the same CI-friendly property the
+Redis tier gets from `fakeredis`. This was confirmed directly: the 17
+`test_metadata_store.py` tests pass on a host with the Docker engine idle.
+The corresponding caveat also carries over from Redis: `mongomock` is an
+oracle for AudioLIT's own document and index logic, **not** for MongoDB 6's
+real index enforcement, TTL eviction timing, or write-concern semantics. That
+gap is closed only against a live `mongo:6` container, and is listed as
+pending below.
 
 |                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Exercise Redis cache access methods and dataset corpus loaders independently of the UI, to observe and log incorrect functioning, cache corruption, key collisions, or value-shape violations. Accountable to **FR4.1–FR4.4**, **FR2.1–FR2.3**, **SR5**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **Technique Objective:**    | Exercise Redis cache access methods, **MongoDB metadata persistence**, and dataset corpus loaders independently of the UI, to observe and log incorrect functioning, cache corruption, key collisions, value-shape violations, **document-schema drift, index loss, or leakage of payload data into the metadata tier**. Accountable to **FR4.1–FR4.4**, **FR2.1–FR2.3**, **SRS §3.10**, **SR5**. |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Technique:**              | Drive `RedisCacheManager` (`app/core/redis.py`) directly against `fakeredis`, asserting round-trip fidelity through its msgpack/lz4 encoding. Assert key uniqueness across the (audio content, model, task, parameters) tuple and that `CACHE_SCHEMA_VERSION` participates in the key so a schema change cannot silently collide with old entries. Separately, assert the _value shape_ stored under each key family in `cache_keys.py` matches what every declared consumer route expects — this is the specific check the transcript/attention shape incident (§3, fault model 2) shows is necessary and insufficient by round-trip alone. Seed dataset loaders with valid, truncated, wrong-sample-rate, and structurally malformed audio. Force the Redis memory cap and confirm LRU eviction; force a corrupted cached value and confirm it is treated as a miss and recomputed (FR4.3). Confirm per-corpus licence metadata is retained and surfaced on load (FR2.3) and that `measure_footprint()` enforces the ~100 GB working bound (FR2.2, `app/main.py`'s startup warning). |
 | **Oracles:**                | **Deterministic** for round-trips and digests — `decode(encode(x)) == x`; identical requests must yield byte-identical cached responses (FR4.4), which is self-verifying and automatable. **Metamorphic** for warm-vs-cold — a warmed entry must equal the value the cold computation would have produced. **Stated honestly, not glossed over:** a naive round-trip oracle passes even when a key holds the _wrong-shaped_ value for its family — exactly the LIT-cache-shape incident — so shape is asserted per key family, separately from round-trip fidelity. `fakeredis` is an oracle for AudioLIT's own logic, not for Redis 7's real eviction/expiry timing; that gap is closed only where the real container is exercised (§3.1.5, §3.1.7).                                                                                                                                                                                                                                                                                                                                  |
-| **Required Tools:**         | Redis 7-alpine (`Backend/docker-compose.yml`, container `lit-redis`); `fakeredis` 2.23.2; `pytest` 8.2.0 + `pytest-asyncio` 0.23.7; `msgpack`, `lz4`; `redis-cli` for manual keyspace inspection; `soundfile` + `numpy` for audio fixture generation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| **Success Criteria:**       | Every key family declared in `cache_keys.py` has at least one shape-assertion test; every corpus loader (Common Voice, LibriSpeech, RAVDESS, ASVspoof, L2-ARCTIC) has both a valid-data and a malformed-data test; FR4.4 byte-identity is demonstrated; eviction and corrupt-value-as-miss are both demonstrated.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| **Special Considerations:** | No SQL/ORM tier, so SQL-injection and schema-normalisation concerns from the template do not apply here. **The MongoDB tier (SRS §3.10) is unimplemented — this section covers Redis and the corpus only, and cannot cover MongoDB integrity until that gap is resolved one way or the other.** Redis persistence is deliberately disabled (every cache entry is cheaply recomputable), so there is no Redis backup/restore path to test at this tier — that concern moves to §3.1.7. Tests in this category must remain green with Redis unreachable, because the project's CI has no Redis service container (see the ✅ EXECUTED evidence below, captured exactly that way).                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **Required Tools:**         | Redis 7-alpine (`Backend/docker-compose.yml`, container `lit-redis`); `fakeredis` 2.23.2; **MongoDB 6 (`mongo:6`, service `mongo`, container `audiolit-mongo`); `pymongo>=4.6,<5.0`; `mongomock` for the serverless oracle; `mongosh` for manual collection and index inspection**; `pytest` 8.2.0 + `pytest-asyncio` 0.23.7; `msgpack`, `lz4`; `redis-cli` for manual keyspace inspection; `soundfile` + `numpy` for audio fixture generation. |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **Success Criteria:**       | Every key family declared in `cache_keys.py` has at least one shape-assertion test; every corpus loader (Common Voice, LibriSpeech, RAVDESS, ASVspoof, L2-ARCTIC) has both a valid-data and a malformed-data test; FR4.4 byte-identity is demonstrated; eviction and corrupt-value-as-miss are both demonstrated. **For the metadata tier: all four SRS §3.10 collections are created; the uniqueness index on `model_id` and the TTL index on `analysis_results` are asserted present; `bias_reports` is asserted to carry no TTL; schema creation is idempotent; re-running an analysis refreshes one document rather than accumulating duplicates; and the privacy boundary — no audio bytes and no tensor payloads in any collection — is asserted explicitly, not assumed.** |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **Special Considerations:** | No SQL/ORM tier, so SQL-injection and schema-normalisation concerns from the template do not apply here. **The MongoDB tier (SRS §3.10) is now implemented and is covered by this section** — the previous "unimplemented, cannot cover" caveat is withdrawn. Redis persistence is deliberately disabled (every cache entry is cheaply recomputable), so there is no Redis backup/restore path to test at this tier — that concern moves to §3.1.7. MongoDB, by contrast, **is** durable state, so backup/restore and TTL-expiry behaviour are genuine concerns for it; both are listed as pending against a live container. Tests in this category must remain green with **both** Redis and MongoDB unreachable, because CI has neither service container — `fakeredis` and `mongomock` each supply their tier's oracle (see the ✅ EXECUTED evidence below, captured exactly that way, with `REDIS_URL` pointed at an unreachable port and the Docker engine idle). |                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 **Status: ✅ EXECUTED (subset within the full backend run) / ⏳ PENDING
-(live-Redis eviction timing).**
+(live-Redis eviction timing; live-MongoDB index enforcement and TTL expiry).**
+
+**Metadata-tier evidence added at re-verification (2026-09-19, `c9fbd46`,
+Windows 11).** `Backend/tests/test_metadata_store.py` contributes **17 tests**
+across six classes — `TestSchema` (collection creation, uniqueness index on
+`model_id`, TTL index on `analysis_results`, no TTL on `bias_reports`,
+idempotent schema creation), `TestPrivacyBoundary` (no array payload on an
+analysis record; no collection ever holds audio bytes or tensors),
+`TestModelRecords`, `TestAudioSampleRecords` (reference only, never bytes),
+`TestAnalysisRecords` (including re-run refreshing the same document rather
+than duplicating it) and `TestBiasReports`. All pass against `mongomock` with
+no MongoDB server running. `test_metrics_synthesis.py` and
+`test_model_registry_service.py` add further coverage touching this tier.
+
+**A practical caveat worth recording, found during re-verification.** These
+tests require `pymongo` and `mongomock` to be installed. On a virtualenv
+provisioned before the tier landed, the suite reports **10 failures and 17
+errors**, every one of them `ModuleNotFoundError: No module named 'mongomock'`
+— not a product defect, and specifically *not* a missing-Docker symptom, which
+is the natural first assumption. Anyone re-running this plan's evidence must
+`pip install -r requirements.txt -r requirements-dev.txt` first; a stale venv
+produces a failure signature that looks alarming and means nothing.
 The cache-key and dataset-loader unit tests below ran as part of the full
 588-passed backend suite reported in §4.1 (`test_redis_cache.py`,
 `test_results_cache.py`, `test_hashing.py`, `test_data_integrity.py`,
@@ -334,6 +411,20 @@ for accessibility/usability review.**
   reported in §4.1 (`WaveformViewer.test.tsx` ×2 files,
   `SpectrogramGridSelector.test.tsx`, `PerturbationTools.test.tsx`,
   `XAIOverlayCanvas.test.tsx`, `ui-components.test.tsx`).
+- **In-app quick-start walkthrough (LIT-261, PR #139) — added at
+  re-verification 2026-09-19.** A new first-run guided flow over the four core
+  workflows, surfaced from `Toolbar.tsx` and mounted in `MainLayout.tsx`. It is
+  the only user-facing feature shipped since drafting that a new examiner or
+  first-time user meets *before* anything else, so it carries disproportionate
+  demo and viva weight for its size. Coverage exists on both tiers and is now
+  named here rather than left to the generic component sweep:
+  `Frontend/src/tests/QuickStartDialog.test.tsx` (component behaviour) and
+  `Frontend/e2e/quickstart.spec.ts` (Playwright, end-to-end). **Technique:**
+  assert the dialog opens on first run and is dismissible; assert it does not
+  re-appear once dismissed; assert each of the four steps targets a panel that
+  actually exists in the workbench, so the walkthrough cannot drift out of sync
+  with the UI it describes. **Oracle:** deterministic — step targets are
+  compared against the rendered panel inventory (SRS §3.9.1), not screenshotted.
 - **Cross-browser layout:** ✅ EXECUTED — `npx playwright test`, commit
   `a3a78fa`, 2026-09-13:
 
@@ -408,6 +499,23 @@ performance. The honest position, per this document's own house style (§4 of
 `TEST_PLAN_DESIGN.md`: "name what you did not test, and why"), is to leave
 this section unexecuted rather than publish a misleading number.
 
+**New instrumentation changes what this section can measure (LIT-259, PR #144),
+added at re-verification 2026-09-19.** Structured JSON task logs and exported
+operational metrics now exist, with `Backend/tests/test_operational_metrics.py`
+(279 lines, 12 tests, green in the re-verification run) covering worker
+counters including the failure path, plus tensor-cache counters. This matters
+to §3.1.4 specifically: until now, every performance figure this plan could
+produce had to come from an external stopwatch around an HTTP call, which is
+what made the CPU/GPU confound so hard to state precisely. The metrics tier
+gives per-task timings and queue counters **from inside the system**, so a
+future GPU run can report where time was spent rather than only how long a
+request took end to end. **Technique when the GPU run happens:** capture the
+exported metrics alongside the wall-clock figures and reconcile the two;
+a divergence between them is itself a finding. **Caveat kept explicit:**
+instrumentation measures the system's own view and is not independent
+verification of it — the external timing still governs any SRS §3.4.1
+pass/fail claim.
+
 **What is confirmed instead, as a lower bound:** `Backend/tests/` includes
 GPU-gated tests that self-skip in this environment
 (`tests/test_function_testing.py:303` — "Requires GPU/model resources";
@@ -477,10 +585,37 @@ by direct observation of the run log, at least
 human attacker's judgement rather than a fixed assertion — forged-cookie
 cross-session probing beyond what the existing test suite covers, polyglot
 file crafting, path-traversal fuzzing across every `file_path`-accepting
-route, and a dependency vulnerability scan (`pip-audit`/`npm audit` are not
-currently wired into `Backend/requirements.txt` or CI — see §5). **Owner:**
-whoever is assigned SR6 remediation follow-up should run the manual pass and
-add `pip-audit`/`npm audit` to CI per SR7 before Phase 4 submission.
+route, and a dependency vulnerability scan. **Owner:**
+whoever is assigned SR6 remediation follow-up should run the manual pass
+before Phase 4 submission.
+
+**Two changes at re-verification (2026-09-19) materially move this section.**
+
+**Container image scanning is now wired into CI (LIT-203, PR #145).** The
+statement above that no vulnerability scanning exists in CI is **partly
+superseded**: `.github/workflows/ci.yml` now runs **Trivy** against the built
+images, and the branch carries two follow-up commits hardening the base images
+against Trivy CRITICAL findings (`8de8105`, plus `2d973cc` correcting the
+action tag to `v0.36.0`). This closes the *image-layer* half of the SR7 gap —
+OS packages and base-image CVEs are now scanned on every build. It does **not**
+close the *application-dependency* half: `pip-audit` and `npm audit` still are
+not wired in, so a vulnerable Python or npm package that ships inside an
+otherwise-clean base image is still unscanned. The distinction matters and is
+kept explicit rather than reported as "scanning: done."
+
+**Inherited security gaps have been remediated (LIT-223, PR #142).** Three
+areas this plan flagged as risk surface were fixed and now carry regression
+tests: debug-route exposure (`app/api/routes/debug.py`), CORS configuration
+(`app/infrastructure/settings.py`), and cross-session dataset access
+(`app/infrastructure/dataset_service.py`, `routes/datasets.py`,
+`routes/dataset_management.py`). Guarding tests:
+`tests/test_debug_and_tasks_routes.py`, `tests/test_dataset_management_routes.py`,
+`tests/test_dataset_service.py` — all green in the 713-passed re-verification
+run. **Technique for this tier:** assert a session cannot read another
+session's dataset by id; assert debug routes are unavailable under production
+settings; assert the CORS allow-list rejects an unlisted origin. **Oracle:**
+deterministic negative assertions — the correct result is a refusal, and a
+test that only proves the happy path would not have caught these.
 
 ---
 
@@ -534,8 +669,45 @@ and record what happens.
 | **Special Considerations:** | CI deliberately installs the **CPU-only torch wheel** (`.github/workflows/ci.yml`'s own comment: the default Linux wheel is a multi-GB CUDA build unsuited to CPU-only runners), so **CI never exercises the GPU path at all** — GPU coverage is necessarily manual and local, which this report states plainly rather than implying CI covers it. CI currently has **no Redis service container**; per this project's own tracked constraint (LIT-229, confirmed fixed on `develop` as of this report — `health.py` now imports the redis module, not the name, so the previously-documented `RuntimeError: Event loop is closed` failure mode does not reproduce), a Redis container could be added to CI, but was not attempted as part of this report. The Playwright layout suite deliberately runs backend-free to stay fast; the full-stack `dataflow` project (on `testing`) needs the whole stack live and was not run here (see §3.1.5). |
 
 **Status: ✅ EXECUTED (Python 3.11 + macOS + CPU-only + three browser
-engines) / ⏳ PENDING (Python 3.10 exact reproduction, native Windows, live
-GPU).**
+engines; ✅ native Windows added 2026-09-19) / ⏳ PENDING (Python 3.10 exact
+reproduction, live GPU, container-matrix run).**
+
+**Native Windows is no longer pending — configuration cell closed
+2026-09-19.** The full backend suite was run on **Windows 11, Python 3.11.0,
+CPU-only torch 2.13.0+cpu**, against `origin/testing` (`c9fbd46`), with
+`REDIS_URL` pointed at an unreachable port exactly as the macOS run was:
+**713 passed, 9 skipped, 0 failed, 0 errors, 318 s**. Taken with the macOS run
+and CI's Ubuntu run, all three declared host operating systems now have
+executed evidence, and the differential oracle above is satisfied across them
+— no OS-dependent divergence was observed.
+
+**A new configuration axis exists and is not yet covered: the container
+matrix (LIT-203, PR #145).** The stack is now containerised —
+`Backend/Dockerfile`, `Frontend/Dockerfile` + `nginx.conf`, a root
+`docker-compose.yml` (services `redis`, `mongo`, `api`, `worker`, `web`) and
+a `docker-compose.gpu.yml` overlay. This is a genuinely distinct configuration
+from the native dev setup every run above used, and nothing in this report has
+exercised it. **Technique when it is run:** bring the stack up from the root
+compose file, confirm all five services reach healthy, and run the functional
+suite against the containerised API rather than a native one; then repeat with
+the GPU overlay on GPU hardware. **Success criterion:** the same pass/fail
+outcome as the native configuration — any divergence is the finding.
+
+**One concrete configuration defect already found, 2026-09-19.** The compose
+`mongo` service declares **no `ports:` mapping**, so MongoDB is reachable only
+on the compose network. That is correct and deliberate for the fully
+containerised topology (the `api` service addresses it as
+`mongodb://mongo:27017`), but it means the **hybrid** configuration — the one
+developers actually use day to day, with Redis and Mongo in Docker and the API
+run natively — **cannot reach MongoDB at all** without publishing the port
+manually. Combined with `MONGO_URL` defaulting to `""` (tier disabled), a
+developer following the documented compose workflow and running the API
+natively gets a silently Mongo-less application that still appears to work,
+because LIT-258's graceful degradation hides the absence. This is a
+configuration gap, not a code defect, and is the exact class of issue §3.1.8
+exists to catch. **Recommended:** publish `27017:27017` on the `mongo` service,
+or document the hybrid workflow's `docker run -p 27017:27017` and
+`MONGO_URL=mongodb://127.0.0.1:27017` explicitly.
 
 This report itself constitutes one full configuration run:
 Python 3.11.15, macOS (Darwin), Node v26.4.0, CPU-only (no discoverable GPU),
@@ -583,8 +755,80 @@ manual pass (GPU performance, load testing, exploratory security, failover
 scenarios, accessibility) is intended per milestone and once at Phase 4
 submission.
 
-**This report's actual execution evidence — commit `a3a78fa`, `develop`
-branch, 2026-09-13:**
+**This report carries two execution passes.** The original (macOS,
+`a3a78fa`, 2026-09-13) is retained verbatim below, because superseding
+evidence should extend a record rather than overwrite it. The
+re-verification pass (Windows 11, `c9fbd46` = tip of `origin/testing`,
+2026-09-19) follows it, and the two are reconciled at the end of this
+subsection.
+
+---
+
+#### Pass 2 — re-verification, `origin/testing` `c9fbd46`, Windows 11, 2026-09-19
+
+```
+$ cd Backend
+$ REDIS_URL="redis://127.0.0.1:1/0" .venv/Scripts/python.exe -m pytest -q -rs --tb=no
+
+platform win32 -- Python 3.11.0, pytest-8.4.2
+collected 722 items
+
+========== 715 passed, 7 skipped, 406 warnings in 382.80s (0:06:22) ===========
+```
+
+**0 failures, 0 errors.** The suite has grown from 593 collected to **722**
+(+129) and from 49 to **53 backend test files** since Pass 1. The four new
+files are `test_inference_consistency.py`, `test_metadata_store.py`,
+`test_metrics_synthesis.py` and `test_operational_metrics.py`.
+
+**All seven skips, enumerated with their reasons as reported by `-rs`:**
+
+| Test | Skip reason |
+| ---- | ----------- |
+| `test_fanout_orchestrator.py:150` | No reachable Redis at `redis://localhost:6379/15` — killed-worker recovery test; the message names the exact `docker-compose` command that enables it |
+| `test_task_orchestrator.py:502` | No broker reachable to inspect the request-path client |
+| `test_function_testing.py:303` | Requires GPU/model resources |
+| `test_memory_profiling.py:35` | VRAM test requires CUDA |
+| `test_ser_checkpoint.py:139` | Hits the Hugging Face Hub, ~1.2 GB; gated behind `AUDIOLIT_HUB_TESTS=1` |
+| `test_ser_checkpoint.py:152` | Same Hub-download gate |
+| `test_ser_checkpoint.py:161` | Same Hub-download gate |
+
+Every skip is environment-gated with a stated reason. **None is a silent
+omission**, which is the property this table exists to demonstrate — a skip
+without a reason is indistinguishable from a test that was quietly disabled.
+
+**An observed variation, reported as measured rather than explained away.** An
+earlier Pass-2 run of the same command on the same commit produced **713
+passed, 9 skipped** — same 722 total, still zero failures, but two more skips.
+That run was executed with no Redis container on the host; the run reported
+above was executed while a `redis:7-alpine` container was listening on
+`localhost:6379`. The two runs used an identical `REDIS_URL` (the unreachable
+port), so `REDIS_URL` is not the variable: `test_fanout_orchestrator.py:35`
+reads a **separate** `TEST_REDIS_URL`, defaulting to
+`redis://localhost:6379/15`, and other broker-probing tests behave similarly.
+**The two additional skips in the 9-skip run were not captured with `-rs` and
+are therefore not enumerated here**; stating which tests they were would be a
+guess. The actionable finding stands on its own: **part of this suite's
+skip/run behaviour is governed by a host Redis on the default port, through an
+environment variable distinct from the one the plan's run command sets.** A
+reproducible evidence run should pin `TEST_REDIS_URL` explicitly, and a
+follow-up should determine whether a second broker-URL variable is intended.
+
+**Reconciling the two passes.** Pass 1 reported 5 skips, Pass 2 reports 7. The
+increase is not a regression: Pass 2's seven are a strict superset of Pass 1's
+five, adding only the two broker-probing skips, and no test present in Pass 1
+moved from passed to skipped.
+
+**Prerequisite for reproducing Pass 2.** `pymongo` and `mongomock` must be
+installed. Against a virtualenv provisioned before the metadata tier landed,
+this same command reports **10 failed, 17 errors**, all
+`ModuleNotFoundError: No module named 'mongomock'`. That signature looks like
+a product defect and is not one. Run
+`pip install -r requirements.txt -r requirements-dev.txt` first.
+
+---
+
+#### Pass 1 — original evidence, commit `a3a78fa`, macOS, 2026-09-13
 
 ### Backend — `pytest`
 
@@ -642,12 +886,30 @@ Time:        6.764 s
 
 **0 failures, 6/6 suites, 47/47 tests.**
 
+**Pass 2 (Windows 11, `c9fbd46`, 2026-09-19):**
+
+```
+$ cd Frontend && npm test -- --silent
+
+Test Suites: 7 passed, 7 total
+Tests:       55 passed, 55 total
+```
+
+**0 failures, 7/7 suites, 55/55 tests** — up 1 suite and 8 tests. The added
+suite is `src/tests/QuickStartDialog.test.tsx` (LIT-261), covered in §3.1.3.
+The frontend E2E surface also grew by `e2e/quickstart.spec.ts`, which is a
+Playwright project rather than a Jest suite and so is not counted in the 55.
+
 ### Frontend — ESLint
 
 ```
 $ cd Frontend && npm run lint
 ✖ 108 problems (0 errors, 108 warnings)
 ```
+
+**Pass 2 (2026-09-19): `✖ 110 problems (0 errors, 110 warnings)`** — still
+**0 errors**; the count moved 108 → 110 with the quick-start component. The
+characterisation below is unchanged and was re-confirmed.
 
 **0 errors.** All 108 warnings are `@typescript-eslint/no-explicit-any` (loose
 typing on WebSocket payloads and test mocks) and `react-hooks/exhaustive-deps`
@@ -667,6 +929,13 @@ dist/assets/index-DoDgtMUc.css     78.27 kB │ gzip:    13.35 kB
 dist/assets/index-BZ_0YlEE.js   5,906.67 kB │ gzip: 1,761.88 kB
 ✓ built in 9.16s
 ```
+
+**Pass 2 (2026-09-19):** build succeeds; `dist/assets/index-*.js`
+**5,913.76 kB / gzip 1,776.77 kB**, CSS 78.34 kB / gzip 13.38 kB, built in
+46.9 s. Vite repeats the >500 kB chunk advisory. The bundle grew ~7 kB
+(1.76 → 1.78 MB gzipped) with the quick-start component — **the
+code-splitting finding below is unchanged and still open**, and is now
+confirmed on a second host rather than resting on a single observation.
 
 **Build succeeds.** One real observation worth carrying into the risk log
 (§5): the main JS bundle is 5.9 MB unminified / 1.76 MB gzipped in a single
@@ -758,7 +1027,9 @@ skip-reason table and the warning summary).
 
 | Risk                                                                                                                                      | Mitigation Strategy                                                                                                                                                                              | Contingency (Risk is realised)                                                                                                        |
 | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| MongoDB tier (SRS §3.10) is specified but unimplemented, so §3.1.1 cannot cover it as written                                             | Flag in Linear per `CLAUDE.md`'s conflict-handling rule; scope §3.1.1 explicitly to Redis + corpora (done in this report)                                                                        | Record as a known, named scope deviation with its Linear id rather than silently testing around it                                    |
+| ~~MongoDB tier (SRS §3.10) is specified but unimplemented~~ — **CLOSED 2026-09-19.** Implemented by LIT-255/256/257/258 (PRs #135, #138, #140, #141); §3.1.1 now covers it | No longer applicable. Retained as a row rather than deleted, because the resolution is itself evidence that the flag-don't-design-around rule worked | n/a — risk realised in the favourable direction |
+| A stale virtualenv makes the metadata-tier tests fail with a signature that mimics a product defect (27 `ModuleNotFoundError` failures/errors) | Re-install `requirements.txt` + `requirements-dev.txt` before trusting any suite result; state the installed `pymongo`/`mongomock` versions alongside every reported run | Diagnose the failure signature before reporting it — read the actual exception rather than inferring a missing service container |
+| `testing` has diverged from `develop` (31 commits ahead; `develop` frozen), contradicting the branch model in `CLAUDE.md` and this plan's own superset assumption | Re-verify the branch relationship before each evidence run, as §5's assumptions already required; declare the evidence commit explicitly | Raise in Linear as a branch-model conflict; do not let two branches both be treated as authoritative |
 | No GPU available in this report's evaluation environment — FR1.4 CPU-fallback and every model-bound SRS §3.4.1 target are unmeasured here | Run §3.1.4 manually on the team's GPU dev machine before each milestone; state hardware on every figure produced                                                                                 | Report all performance figures as point-in-time with hardware named; never substitute a CPU-host number for a GPU target              |
 | Load testing (§3.1.5) may exceed the academic hardware budget at realistic concurrency                                                    | Stage the ramp; separate cache-hit from cache-miss profiles; report what was actually run vs extrapolated                                                                                        | State the executed ceiling plainly; never present an extrapolation as a measurement                                                   |
 | No ground truth exists for saliency-map correctness                                                                                       | Rely on metamorphic and deletion-score faithfulness oracles (§3, FR16.1) rather than direct equality assertions                                                                                  | Report faithfulness metrics, not accuracy claims, for every interpretability output                                                   |
@@ -778,9 +1049,25 @@ ESD, ASVspoof 2021 DF are non-commercial/research-use only); GPU access for
 
 **Assumptions:** single-tenant academic deployment with best-effort
 availability and no continuous SLA (SRS §3.3); no user authentication or
-role-based access tier exists or is planned; the `testing` branch remains a
-strict superset of `develop` (re-verify this before relying on it, since
-branches diverge — confirmed true only as of 2026-09-13).
+role-based access tier exists or is planned.
+
+~~the `testing` branch remains a strict superset of `develop`~~ — **this
+assumption was re-verified on 2026-09-19 and no longer holds in the form
+stated.** `testing` is now 31 commits ahead of `develop` and `develop` is 0
+ahead of `testing`, with all integration work landing on `testing`. The
+superset property itself is technically still true (nothing on `develop` is
+absent from `testing`), but the implied relationship — `develop` as the
+integration trunk with `testing` a thin harness layer on top — has inverted.
+The assumption is retained here in struck-through form deliberately: it was
+written with an explicit instruction to re-verify before relying on it, that
+re-verification caught a real change, and that is the behaviour this plan
+wants to encourage rather than quietly overwrite. See §2.
+
+**Dependencies (updated):** MongoDB 6 is now a runtime dependency of the
+metadata tier, though the application degrades gracefully without it
+(LIT-258) and the tier's tests need no server at all (`mongomock`). A live
+`mongo:6` container is required only for the pending index-enforcement and
+TTL-expiry checks in §3.1.1.
 
 **Constraints:** SRS constraint C2 (VRAM budget, hence GPU-family concurrency
 pinned to 1); constraint C3 (safetensors-only, no arbitrary pickle
