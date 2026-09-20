@@ -90,7 +90,13 @@ async def post_batch_warmup(req: BatchWarmupRequest):
         conn = get_redis_connection()
         if conn:
             conn.set(f"job_progress_{job_id}", json.dumps({
-                "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0
+                "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0,
+                # The dataset is recorded on the job itself so a client that has
+                # lost its job id (page reload, tab discard) can rediscover the
+                # run and rebuild the progress banner without guessing which
+                # dataset it belongs to. See GET /inference/warmup/active.
+                "dataset": req.dataset,
+                "model": req.model,
             }), ex=86400)
     except Exception as e:
         logger.warning(f"Could not initialize Redis progress for job {job_id}: {e}")
@@ -121,6 +127,56 @@ async def post_batch_warmup(req: BatchWarmupRequest):
         )
 
     return {"job_id": job_id, "status": "running", "message": "Batch warmup started"}
+
+
+@router.get("/inference/warmup/active")
+async def list_active_warmups():
+    """Warmup runs that are still in flight, so a client can reattach to one.
+
+    The job id previously existed only in React state. A reload, a navigation,
+    or the browser discarding a backgrounded tab dropped it, and because
+    cancellation is addressed by job id, the run then became both invisible and
+    uncancellable while continuing to consume CPU for up to its 24-hour job
+    timeout. This endpoint lets a client that has lost the id find the run
+    again instead of stranding it.
+
+    Returns only non-terminal runs, newest progress first. `active_job_id` is a
+    convenience for the common single-run case.
+    """
+    import json
+    from app.orchestration.task_orchestrator import get_redis_connection
+
+    try:
+        conn = get_redis_connection()
+        if not conn:
+            return {"active_job_id": None, "jobs": [], "status": "no_broker"}
+
+        jobs = []
+        # Bounded: scan_iter streams rather than materialising the keyspace, and
+        # progress keys carry a 24h TTL so this set stays small.
+        for key in conn.scan_iter(match="job_progress_*", count=100):
+            key_s = key.decode("utf-8") if isinstance(key, bytes) else key
+            raw = conn.get(key_s)
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+            except (ValueError, TypeError):
+                continue  # a malformed record must not hide the healthy ones
+            if data.get("status") not in ("running", "cancelling"):
+                continue
+            data["job_id"] = key_s[len("job_progress_"):]
+            jobs.append(data)
+
+        jobs.sort(key=lambda j: j.get("percent") or 0, reverse=True)
+        return {
+            "active_job_id": jobs[0]["job_id"] if jobs else None,
+            "jobs": jobs,
+            "status": "ok",
+        }
+    except Exception as e:
+        logger.warning(f"Could not list active warmups: {e}")
+        return {"active_job_id": None, "jobs": [], "status": "error", "error": str(e)}
 
 
 @router.get("/inference/progress/{job_id}")
