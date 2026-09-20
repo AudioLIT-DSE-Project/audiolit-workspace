@@ -22,10 +22,17 @@ All colors MUST be HSL.
     --popover: 0 0% 100%;
     --popover-foreground: 222 25% 18%;
 
-    /* Primary: AudioLIT Teal */
-    --primary: 173 80% 32%;
+    /* Primary: AudioLIT Teal.
+       Darkened from 32% to 26% to meet WCAG 2.1 AA (SRS 3.2.3). At 32% the
+       measured contrast was 3.80:1 for white text on primary and 3.37:1 for
+       primary text on the light teal badge tint, both under the 4.5:1
+       threshold for normal-size text. 26% clears both cases with margin
+       (5.43:1 and 4.75:1); 27% measured 4.45:1 against the badge tint once
+       the browser's alpha blending was taken into account, so it sat just
+       under. Hover moves down with it so the two stay visually distinct. */
+    --primary: 173 80% 26%;
     --primary-foreground: 0 0% 100%;
-    --primary-hover: 173 80% 27%;
+    --primary-hover: 173 80% 21%;
 
     --secondary: 210 20% 93%;
     --secondary-foreground: 222 25% 18%;
@@ -38,7 +45,10 @@ All colors MUST be HSL.
     --accent-foreground: 0 0% 100%;
     --accent-hover: 262 70% 52%;
 
-    --destructive: 0 84% 60%;
+    /* Darkened from 60% to 44%: the near-white destructive foreground gave
+       3.62:1 against it, under the 4.5:1 AA threshold. 44% measures 5.41:1;
+       the extra margin covers the alpha blending the browser applies. */
+    --destructive: 0 84% 44%;
     --destructive-foreground: 0 0% 98%;
 
     --border: 214 20% 89%;

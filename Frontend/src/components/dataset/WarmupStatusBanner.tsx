@@ -113,7 +113,7 @@ export const WarmupStatusBanner: React.FC<WarmupStatusBannerProps> = ({
               {warmupProgress?.active_subtask || "Processing audio clips..."}
             </span>
             {warmupProgress?.eta_formatted && (
-              <span className="font-mono text-amber-600 dark:text-amber-400 font-medium flex items-center gap-1 shrink-0">
+              <span className="font-mono text-amber-700 dark:text-amber-400 font-medium flex items-center gap-1 shrink-0">
                 <Clock className="h-3 w-3" />
                 ~{warmupProgress.eta_formatted}
               </span>
