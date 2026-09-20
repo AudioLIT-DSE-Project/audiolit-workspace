@@ -13,6 +13,11 @@ import { API_BASE } from '@/lib/api';
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
 import { QuickStartDialog, readQuickStartDismissed } from "./QuickStartDialog";
+import {
+  readActiveWarmupJobId,
+  writeActiveWarmupJobId,
+  clearActiveWarmupJobId,
+} from "@/lib/warmupJob";
 
 interface UploadedFile {
   file_id: string;
@@ -101,6 +106,62 @@ export const MainLayout = () => {
   const [warmupProgress, setWarmupProgress] = useState<WarmupProgress | null>(null);
   const [isStartingWarmup, setIsStartingWarmup] = useState(false);
   const [isWarmupMinimized, setIsWarmupMinimized] = useState(false);
+  // Dataset the running job belongs to, which is not necessarily the one
+  // currently selected in the UI when we reattach to a job after a reload.
+  const [warmupDataset, setWarmupDataset] = useState<string | null>(null);
+
+  // Reattach to a warmup that is still running.
+  //
+  // The job id used to live only in this component's state, so a reload, a
+  // navigation, or the browser discarding a backgrounded tab dropped it. The
+  // RQ job kept running (24h job timeout) with no banner and - because cancel
+  // is addressed by job id - no way to stop it. Two recovery paths, in order:
+  // the id we persisted locally, then the server's own list of live jobs,
+  // which also covers a cleared storage, a different browser, or a job another
+  // tab started.
+  useEffect(() => {
+    let cancelled = false;
+
+    const reattach = async () => {
+      const stored = readActiveWarmupJobId();
+      if (stored) {
+        try {
+          const res = await fetch(`${API_BASE}/api/inference/progress/${stored}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (!cancelled && (data.status === "running" || data.status === "cancelling")) {
+              setWarmupJobId(stored);
+              setWarmupProgress(data);
+              if (data.dataset) setWarmupDataset(data.dataset);
+              return;
+            }
+          }
+        } catch {
+          /* fall through to server discovery */
+        }
+        // Stored id is finished, unknown or unreachable - stop carrying it.
+        clearActiveWarmupJobId();
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/inference/warmup/active`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const job = data?.jobs?.[0];
+        if (!cancelled && job?.job_id) {
+          setWarmupJobId(job.job_id);
+          setWarmupProgress(job);
+          if (job.dataset) setWarmupDataset(job.dataset);
+          writeActiveWarmupJobId(job.job_id);
+        }
+      } catch (err) {
+        console.error("Failed to look up active warmups:", err);
+      }
+    };
+
+    reattach();
+    return () => { cancelled = true; };
+  }, []);
 
   // Poll for Warmup Progress
   useEffect(() => {
@@ -112,8 +173,17 @@ export const MainLayout = () => {
         if (response.ok) {
           const data = await response.json();
           setWarmupProgress(data);
+          if (data.dataset) setWarmupDataset(data.dataset);
           if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
             clearInterval(interval);
+            // Terminal: stop advertising this id so the next mount does not
+            // try to reattach to a finished run.
+            clearActiveWarmupJobId();
+          }
+          if (data.status === 'not_found') {
+            // The progress record expired or was flushed; nothing to track.
+            clearInterval(interval);
+            clearActiveWarmupJobId();
           }
         }
       } catch (err) {
@@ -141,6 +211,10 @@ export const MainLayout = () => {
       if (response.ok) {
         const data = await response.json();
         setWarmupJobId(data.job_id);
+        setWarmupDataset(dataset);
+        // Persisted immediately: if the tab is reloaded or discarded a second
+        // later, this is what lets the banner and the cancel button come back.
+        writeActiveWarmupJobId(data.job_id);
       }
     } catch (err) {
       console.error("Failed to start batch warmup:", err);
@@ -156,6 +230,10 @@ export const MainLayout = () => {
         method: "POST",
       });
       setWarmupProgress(prev => prev ? { ...prev, status: 'cancelling' } : null);
+      // The worker checks the cancel flag before each file, so the run is not
+      // dead yet; the id stays persisted until polling observes a terminal
+      // status, otherwise a reload during the cancelling window would lose
+      // track of a job that is still working through its current file.
     } catch (err) {
       console.error("Failed to cancel warmup:", err);
     }
@@ -650,11 +728,19 @@ export const MainLayout = () => {
         <WarmupStatusBanner
           warmupJobId={warmupJobId}
           warmupProgress={warmupProgress}
-          dataset={effectiveDataset || dataset}
+          dataset={warmupDataset || effectiveDataset || dataset}
           isMinimized={isWarmupMinimized || !isWarmupModalOpen}
           onExpand={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
           onCancel={handleCancelWarmup}
-          onDismiss={() => { setWarmupJobId(null); setWarmupProgress(null); }}
+          onDismiss={() => {
+            // Hides the banner. Deliberately does NOT cancel the run, and
+            // deliberately does not forget the id while the run is still
+            // going: a reload re-surfaces it, because a job burning CPU for
+            // hours should not be silently dismissable.
+            setWarmupJobId(null);
+            setWarmupProgress(null);
+            setWarmupDataset(null);
+          }}
         />
         <div className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">

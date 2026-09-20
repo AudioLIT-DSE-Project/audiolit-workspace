@@ -1,4 +1,5 @@
 import logging
+import re
 import numpy as np
 import torch
 from typing import List, Dict, Any, Optional
@@ -63,13 +64,34 @@ def compute_deletion_auc(degradation_curve: Dict[str, float]) -> float:
     auc_val = float(np.trapz(y_vals, x_vals))
     return round(auc_val, 4)
 
+def _normalise_for_wer(text: str) -> List[str]:
+    """Lowercase, strip punctuation, split into words.
+
+    ASR output carries casing and punctuation that a raw comparison scores as
+    errors on an otherwise perfect transcription: Whisper returns "a child."
+    where the reference says "a child", and the trailing full stop turns a
+    correct word into a substitution. Both sides are normalised identically
+    before scoring, matching the transform `accent_bias_profiler` already
+    applies (lowercase, remove punctuation, collapse whitespace).
+
+    Leaving this out inflated every L2-ARCTIC cohort by roughly a constant
+    amount (overall mean 0.2587 against the profiler's 0.1474) and, because
+    the inflation was near-constant across cohorts, it compressed the
+    bias-discrepancy index from 0.1091 to 0.0481 - understating the very
+    disparity the index exists to measure.
+    """
+    return re.sub(r"[^\w\s]", " ", text.lower()).split()
+
+
 def calculate_wer(reference: str, hypothesis: str) -> float:
     """
     Computes Word Error Rate (WER) using word-level Levenshtein distance.
     WER = (Substitutions + Deletions + Insertions) / Total_Reference_Words
+
+    Punctuation and casing are normalised away first; see _normalise_for_wer.
     """
-    ref_words = reference.strip().lower().split()
-    hyp_words = hypothesis.strip().lower().split()
+    ref_words = _normalise_for_wer(reference)
+    hyp_words = _normalise_for_wer(hypothesis)
     
     if not ref_words:
         return 0.0 if not hyp_words else 1.0
