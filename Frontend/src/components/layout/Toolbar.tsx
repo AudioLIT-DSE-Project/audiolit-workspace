@@ -487,7 +487,11 @@ export const Toolbar = ({
               <Button
                 variant="outline"
                 size="sm"
-                className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30 font-medium"
+                /* amber-700, not amber-600: on the amber-500/10 tint the 600
+                   shade measured 2.95:1, under the WCAG AA 4.5:1 minimum for
+                   this 11px text. 700 measures 4.65:1. The dark-mode shade is
+                   unchanged because it sits on a dark surface. */
+                className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30 font-medium"
                 onClick={onWarmupClick}
               >
                 <Flame className="h-3.5 w-3.5 mr-1 text-amber-500 fill-amber-500/20" />

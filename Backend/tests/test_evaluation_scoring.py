@@ -117,3 +117,45 @@ def test_compute_multi_task_performance_summary():
     assert summary["evaluation_summary"]["status"] == "completed"
     assert summary["evaluation_summary"]["asr_accent_bias_wer"]["overall_mean_wer"] == 0.12
     assert summary["evaluation_summary"]["faithfulness_deletion_audit"]["mean_deletion_score"] == 0.35
+
+
+class TestWerNormalisation:
+    """WER must not score punctuation and casing as recognition errors.
+
+    Whisper returns "a child." where the L2-ARCTIC reference says "a child".
+    Scoring the raw strings turned that trailing full stop into a
+    substitution, inflating every cohort by roughly a constant. Because the
+    inflation was near-constant it also compressed the bias-discrepancy index
+    (0.0481 reported against the profiler's 0.1091), understating the accent
+    disparity the index exists to measure.
+    """
+
+    def test_trailing_punctuation_is_not_an_error(self):
+        ref = "she was sleeping under his protection as sweetly as a child"
+        hyp = " She was leaving under his protection as sweetly as a child."
+        # One real substitution (sleeping -> leaving) out of 11 reference words.
+        assert calculate_wer(ref, hyp) == pytest.approx(1 / 11, abs=1e-4)
+
+    def test_casing_is_not_an_error(self):
+        assert calculate_wer("the quick brown fox", "THE QUICK BROWN FOX") == 0.0
+
+    def test_interior_punctuation_is_not_an_error(self):
+        assert calculate_wer("well i said yes", "Well, I said: yes!") == 0.0
+
+    def test_real_errors_are_still_counted(self):
+        # Punctuation stripping must not mask genuine substitutions.
+        assert calculate_wer("the quick brown fox", "the slow brown fox.") == 0.25
+
+    def test_matches_the_profiler_transform_on_the_same_pair(self):
+        """The two WER paths must agree; they disagreed on every cohort before."""
+        jiwer = pytest.importorskip("jiwer")
+        from app.domain.accent_bias_profiler import _WER_TRANSFORM
+
+        ref = "she was sleeping under his protection as sweetly as a child"
+        hyp = " She was leaving under his protection as sweetly as a child."
+        profiler_wer = jiwer.wer(
+            ref, hyp,
+            reference_transform=_WER_TRANSFORM,
+            hypothesis_transform=_WER_TRANSFORM,
+        )
+        assert calculate_wer(ref, hyp) == pytest.approx(profiler_wer, abs=1e-4)
