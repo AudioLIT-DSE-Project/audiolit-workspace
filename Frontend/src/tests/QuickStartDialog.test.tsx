@@ -1,11 +1,11 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
+import { QuickStartDialog } from "@/components/layout/QuickStartDialog";
 import {
-  QuickStartDialog,
   QUICKSTART_DISMISSED_KEY,
   readQuickStartDismissed,
   writeQuickStartDismissed,
-} from "@/components/layout/QuickStartDialog";
+} from "@/components/layout/quickStartStorage";
 
 // LIT-261: the localStorage gate must never crash the app - a private
 // window throws on both read and write, and the dialog should just behave

@@ -9,36 +9,11 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-
-// SRS §3.7: "A quick-start walkthrough covering the deepfake-detection,
-// canvas-mutation, bias, and faithfulness workflows." Gates the automatic
-// first-visit open only - the toolbar's "Quick start" button always reopens
-// this regardless of the dismissal state.
-export const QUICKSTART_DISMISSED_KEY = "audiolit.quickstart.dismissed";
-
-// localStorage throws in a private window with storage blocked - a failed
-// read/write here must not crash the app, it should just behave as if
-// nothing was ever dismissed/saved.
-export function readQuickStartDismissed(): boolean {
-  try {
-    return window.localStorage.getItem(QUICKSTART_DISMISSED_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-export function writeQuickStartDismissed(value: boolean): void {
-  try {
-    if (value) {
-      window.localStorage.setItem(QUICKSTART_DISMISSED_KEY, "true");
-    } else {
-      window.localStorage.removeItem(QUICKSTART_DISMISSED_KEY);
-    }
-  } catch {
-    // Private window / storage disabled - nothing we can persist.
-  }
-}
+import {
+  QUICKSTART_DISMISSED_KEY,
+  readQuickStartDismissed,
+  writeQuickStartDismissed,
+} from "./quickStartStorage";
 
 interface QuickStartDialogProps {
   open: boolean;
@@ -87,7 +62,10 @@ const TRACKS = [
     ],
   },
 ];
+import { Checkbox } from "@/components/ui/checkbox";
 
+// SRS §3.7: "A quick-start walkthrough covering the deepfake-detection,
+// canvas-mutation, bias, and faithfulness workflows." Gates the automatic
 export const QuickStartDialog = ({ open, onOpenChange }: QuickStartDialogProps) => {
   const [dontShowAgain, setDontShowAgain] = useState(() => readQuickStartDismissed());
 

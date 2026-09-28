@@ -26,7 +26,10 @@ over Linear issue bodies, which win over your own assumptions.
 
 ## Commands
 
-### Backend (`cd Backend`, Python 3.11, venv active)
+### Backend (`cd Backend`, venv active)
+
+README says Python 3.11+; **`.github/workflows/ci.yml` pins 3.10** — that is the
+version a PR is actually judged on, so verify against it when they diverge.
 
 ```bash
 pip install -r requirements.txt          # CI also installs: pytest httpx
@@ -60,10 +63,11 @@ npm ci
 npm run lint      # eslint .
 npm test          # jest (ts-jest + jsdom, tests in src/**/*.test.ts(x))
 npm run build     # vite build
-npm run dev       # Vite dev server on :8080 (NOT 5173 — README.md is wrong on this)
+npm run dev       # Vite dev server on :8080, not Vite's 5173 default (vite.config.ts)
 npm test -- src/tests/WaveformViewer.test.tsx   # one Jest file
-npx playwright test                              # e2e/ — boots its own dev server, no backend needed
-npx playwright test --project=chromium
+npm run test:e2e                                 # layout specs, chromium+firefox+webkit;
+                                                 # boots its own dev server, no backend needed
+npm run test:e2e:dataflow                        # opt-in; REQUIRES Redis + API + workers live
 ```
 
 **The full local CI equivalent is `npm ci && npm run lint && npm test && npm run
@@ -112,6 +116,18 @@ Whether `app/core/redis.py` moves to `app/infrastructure/` or `app/core/` is
 formally retired is an **open decision — raise it, don't resolve it by deleting
 a module a route depends on.**
 
+**MongoDB is the third store, and it is optional by design.**
+`app/infrastructure/metadata_store.py` (SRS §3.10, SAD §9) holds the *durable*
+records Redis deliberately doesn't: `models`, `audio_samples`,
+`analysis_results` (TTL 24 h), `bias_reports` (kept permanently). It stores
+**metadata only** — audio records carry a file path, analysis records carry a
+Redis tensor key, never the bytes or the tensor. It is off unless `MONGO_URL`
+is set, and when unreachable every write is a no-op and every read returns
+empty rather than raising (SRS §3.3.1) — so **a failing feature is never
+explained by Mongo being down; it degrades silently on purpose.** Consumers:
+`task_orchestrator.py` and `domain/model_registry_service.py`. Unit tests use
+`mongomock` the way the rest use `fakeredis`.
+
 **Layers** (SAD §5.1, landed via PR #16 / LIT-227):
 
 ```
@@ -145,10 +161,12 @@ alias `@/` → `src/`, mirrored in `jest.config.cjs`.
 **Test fixtures.** `Backend/tests/conftest.py` has an autouse `fake_redis`
 fixture that monkeypatches `app.infrastructure.redis.redis` with fakeredis.
 Any test that calls a task-orchestrator function — not just ones that enqueue —
-needs the `broker` fixture (patches `rq_connection._CONNECTION`) if that
-function or anything it calls touches `publish_progress` /
-`get_redis_connection`. Don't reason "I mocked the domain call, so no Redis is
-involved"; check the orchestrator wrapper itself.
+needs a `broker` fixture (patches `rq_connection._CONNECTION`) if that function
+or anything it calls touches `publish_progress` / `get_redis_connection`. Don't
+reason "I mocked the domain call, so no Redis is involved"; check the
+orchestrator wrapper itself. `broker` lives in the individual test files, not in
+`conftest.py`, so a new test module has to bring its own — copy
+`test_task_orchestrator.py`'s.
 
 ---
 
@@ -334,8 +352,9 @@ Before starting real implementation work in a session:
   LIT-228's own mapping table had it wrong).
 - LIT-154 — inherits stretch status from its LIT-129→LIT-153 chain but has
   no banner of its own yet.
-- `docs/RAVINDU_TESTING_ISSUES_PLAN.md` — working plan for the 2026-09-12
-  issue batch, not yet indexed in `docs/ISSUE_PLAN.md`. Linear wins over it.
+- The 2026-09-12 testing issue batch is not indexed in `docs/ISSUE_PLAN.md`;
+  Linear is the only record. (A `docs/RAVINDU_TESTING_ISSUES_PLAN.md` cited here
+  earlier exists on no branch and in no commit — don't go looking for it.)
 
 ---
 

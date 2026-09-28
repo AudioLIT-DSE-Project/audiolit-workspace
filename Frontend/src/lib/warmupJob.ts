@@ -44,3 +44,14 @@ export const clearActiveWarmupJobId = (): void => {
     /* non-fatal */
   }
 };
+
+/**
+ * Statuses after which a warmup run will never change again. "interrupted"
+ * is set by the backend when the run's worker died under it (e.g. the
+ * containers were recreated mid-run) - it must stop polling and reattaching
+ * just like a run the user cancelled.
+ */
+export const TERMINAL_WARMUP_STATUSES = ["completed", "cancelled", "failed", "interrupted"] as const;
+
+export const isTerminalWarmupStatus = (status: string | undefined | null): boolean =>
+  !!status && (TERMINAL_WARMUP_STATUSES as readonly string[]).includes(status);

@@ -111,7 +111,7 @@ describe('PredictionPanel XAI Fetch Error Handling', () => {
 // FR8.4: the property jet fails and viridis satisfies. A ramp whose luminance
 // is not monotonic invents banding that is not in the data and loses ordering
 // in greyscale, which is why the SRS names "perceptually uniform" explicitly.
-import { heatmapLuminance } from '../components/visualization/XAIOverlayCanvas';
+import { heatmapLuminance } from '../lib/heatmap';
 
 describe('FR8.4 heatmap colour scale', () => {
   it('increases monotonically in relative luminance', () => {

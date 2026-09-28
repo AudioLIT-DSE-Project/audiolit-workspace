@@ -24,7 +24,17 @@ services:
     # through the same Redis, that killed the workers rather than merely missing
     # a cache entry. LRU eviction cannot save a write larger than what it can
     # free in one pass.
-    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "allkeys-lru"]
+    #
+    # volatile-lru, not allkeys-lru: this one Redis is also the RQ broker, and
+    # allkeys-lru evicts *any* key under pressure - RQ's queue lists, its queue
+    # registry and the per-family worker locks included. When dataset warmup
+    # filled the cache, queued jobs silently vanished from their queue and a
+    # live worker lost its lock. volatile-* only evicts keys that carry a TTL:
+    # every cache/progress/session key does, RQ's queues and registries do not.
+    # Still LRU (SRS 3.4.3); the worker locks and warmup heartbeats it could
+    # touch are refreshed every 10-20 s, so they are never least-recently-used.
+    # NOTE: docs/SRS.md's Redis keyspace section still says allkeys-lru.
+    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "volatile-lru"]
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -54,6 +64,12 @@ services:
       dockerfile: Backend/Dockerfile
     image: audiolit-backend:latest
     container_name: audiolit-api
+    # Always rebuild from the working tree on `docker compose up`. Without
+    # this, compose silently reuses whatever audiolit-backend:latest already
+    # exists, so backend fixes (e.g. the L2-ARCTIC/LibriSpeech catalog
+    # loaders) never reach the containers unless someone remembers --build.
+    # Layer caching keeps a no-change rebuild to a few seconds.
+    pull_policy: build
     environment:
       REDIS_URL: redis://redis:6379/0
       MONGO_URL: mongodb://mongo:27017
@@ -62,7 +78,10 @@ services:
       - "8000:8000"
     volumes:
       - model-cache:/models
-      - ./Backend/data:/data
+      # Must be /app/data, not /data. The loaders resolve the corpus root
+      # from the module path (parents[2] of app/infrastructure/), which is
+      # /app inside the image, so a mount at /data is invisible to them.
+      - ./Backend/data:/app/data
       - ./uploads:/app/uploads
     depends_on:
       redis:
@@ -77,14 +96,28 @@ services:
       dockerfile: Backend/Dockerfile
     image: audiolit-backend:latest
     container_name: audiolit-worker
+    pull_policy: build
     command: ["python", "-m", "app.orchestration.worker", "all"]
+    # The image's HEALTHCHECK probes the API on :8000, which the worker never
+    # serves, so it was permanently "unhealthy". Healthy here means every
+    # family (asr, ser, add, xai, mutation) has a worker registered - "any
+    # worker at all" stayed green while a crashed family's queue went unserved.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, redis; from rq import Worker; from app.orchestration.task_orchestrator import WorkerFamily; c = redis.from_url(os.environ['REDIS_URL']); served = {q.split(':')[-1] for w in Worker.all(connection=c) for q in w.queue_names()}; sys.exit(0 if {f.value for f in WorkerFamily} <= served else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     environment:
       REDIS_URL: redis://redis:6379/0
       MONGO_URL: mongodb://mongo:27017
       HF_HOME: /models
     volumes:
       - model-cache:/models
-      - ./Backend/data:/data
+      # Must be /app/data, not /data. The loaders resolve the corpus root
+      # from the module path (parents[2] of app/infrastructure/), which is
+      # /app inside the image, so a mount at /data is invisible to them.
+      - ./Backend/data:/app/data
       - ./uploads:/app/uploads
     depends_on:
       redis:
@@ -103,6 +136,7 @@ services:
         VITE_API_BASE_URL: http://127.0.0.1:8000
     image: audiolit-frontend:latest
     container_name: audiolit-web
+    pull_policy: build
     ports:
       - "8080:8080"
     depends_on:

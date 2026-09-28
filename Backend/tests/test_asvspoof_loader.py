@@ -107,3 +107,37 @@ class TestAsvspoofAudioAndRegistry:
         loader = get_loader("asvspoof-2021", protocol_path=protocol, audio_base_dir=audio, audio_ext=".wav")
         assert isinstance(loader, ASVspoofLoader)
         assert len(list(loader)) == 4
+
+
+class TestASVspoofCatalogLayout:
+    """The provisioned sample has no protocol file, only flat ``*.flac`` + a
+    catalog CSV — the protocol-only path made the corpus probe unavailable."""
+
+    @pytest.fixture
+    def flat_root(self, tmp_path: Path):
+        root = tmp_path / "asvspoof2021_df"
+        root.mkdir()
+        _clip(root / "DF_E_2006826.flac")
+        _clip(root / "DF_E_3000001.flac")
+        (root / ASVspoofLoader.CATALOG_NAME).write_text(
+            "utt_id,filename,rel_path,label,class,source,attack,codec,speaker\n"
+            "DF_E_2006826,DF_E_2006826.flac,audio/DF_E_2006826.flac,spoof,traditional_vocoder,vcc2018,HUB-N08,high_ogg,VCC2TM1\n"
+            "DF_E_3000001,DF_E_3000001.flac,audio/DF_E_3000001.flac,bonafide,-,vcc2020,-,nocodec,TGM1\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def test_reads_catalog_when_protocol_is_absent(self, flat_root):
+        loader = ASVspoofLoader(audio_base_dir=flat_root, protocol_path=flat_root / "trial_metadata.txt")
+        by_id = {s.sample_id: s for s in loader}
+
+        assert by_id["DF_E_2006826"].label == SPOOF
+        assert by_id["DF_E_2006826"].audio_path == flat_root / "DF_E_2006826.flac"
+        assert by_id["DF_E_2006826"].extra["attack"] == "HUB-N08"
+        assert by_id["DF_E_3000001"].label == BONA_FIDE
+        assert by_id["DF_E_3000001"].speaker_id == "TGM1"
+
+    def test_missing_protocol_and_catalog_still_raises(self, tmp_path):
+        loader = ASVspoofLoader(audio_base_dir=tmp_path, protocol_path=tmp_path / "trial_metadata.txt")
+        with pytest.raises(FileNotFoundError):
+            next(iter(loader))

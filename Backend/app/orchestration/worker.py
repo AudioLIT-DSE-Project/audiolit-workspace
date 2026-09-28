@@ -14,7 +14,9 @@ families are pinned to 1 to respect the VRAM budget (SAD C2), which
 
 from __future__ import annotations
 
+import signal
 import sys
+import time
 import multiprocessing
 from typing import List, Optional
 
@@ -119,22 +121,78 @@ def main(argv: Optional[List[str]] = None) -> int:
     if len(selected_families) == 1:
         run_worker(selected_families[0])
     else:
-        # Spawn parallel worker processes for each selected family
-        processes = []
         print(f"Starting {len(selected_families)} parallel worker processes for queues: {', '.join(f.value for f in selected_families)}")
-        for fam in selected_families:
-            p = multiprocessing.Process(target=_start_family_worker, args=(fam,))
-            p.start()
-            processes.append(p)
-
-        try:
-            for p in processes:
-                p.join()
-        except KeyboardInterrupt:
-            print("\nShutting down parallel worker processes...")
-            for p in processes:
-                p.terminate()
+        supervise(selected_families)
     return 0
+
+
+#: Seconds between liveness checks of the family processes.
+SUPERVISE_INTERVAL = 5.0
+#: Minimum gap between respawns of the same family, so a family that dies on
+#: startup (bad config, missing model) cannot spin in a tight crash loop.
+RESPAWN_BACKOFF = 30.0
+
+
+def supervise(
+    families: List[WorkerFamily],
+    *,
+    target=_start_family_worker,
+    interval: float = SUPERVISE_INTERVAL,
+    backoff: float = RESPAWN_BACKOFF,
+    should_stop=None,
+) -> None:
+    """Run one process per family and respawn any that die.
+
+    The previous version started the processes and joined them, so a family
+    whose process died - an OOM kill during a heavy warmup was the observed
+    case - stayed dead until the whole container restarted, and its queue
+    silently stopped being consumed. SIGTERM (``docker stop``) is forwarded to
+    the children so RQ can shut down and release its family lock, instead of
+    the children being SIGKILLed with the lock still held.
+    """
+    processes: dict[WorkerFamily, multiprocessing.Process] = {}
+    last_start: dict[WorkerFamily, float] = {}
+    stopping = False
+
+    def start(fam: WorkerFamily) -> None:
+        p = multiprocessing.Process(target=target, args=(fam,), name=f"worker-{fam.value}")
+        p.start()
+        processes[fam] = p
+        last_start[fam] = time.monotonic()
+
+    def request_stop(_signum=None, _frame=None) -> None:
+        nonlocal stopping
+        stopping = True
+
+    previous = {}
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous[sig] = signal.signal(sig, request_stop)
+        except ValueError:  # not the main thread (tests)
+            pass
+
+    try:
+        for fam in families:
+            start(fam)
+        while not stopping and not (should_stop and should_stop()):
+            time.sleep(interval)
+            for fam, p in list(processes.items()):
+                if p.is_alive():
+                    continue
+                if time.monotonic() - last_start[fam] < backoff:
+                    continue
+                logger.warning(
+                    "worker.respawn family=%s exitcode=%s", fam.value, p.exitcode
+                )
+                start(fam)
+    finally:
+        for p in processes.values():
+            if p.is_alive():
+                p.terminate()
+        for p in processes.values():
+            p.join(timeout=10)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -423,6 +423,31 @@ class CommonVoiceLoader(CsvCatalogLoader):
         )
 
 
+def _read_catalog_rows(catalog: Path) -> Iterator[Dict[str, str]]:
+    """Stream a sample catalog CSV as dicts with stripped string values."""
+    with catalog.open("r", encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            yield {k.strip(): (v or "").strip() for k, v in row.items() if k}
+
+
+def _resolve_catalog_audio(root: Path, row: Dict[str, str]) -> Optional[Path]:
+    """Locate a catalog row's audio under ``root``.
+
+    The sample catalogs record ``rel_path`` as ``audio/<file>``, but the
+    provisioned copies keep the files flat at the corpus root — so try the
+    recorded relative path first, then the bare ``filename`` at the root.
+    """
+    for rel in (row.get("rel_path"), row.get("filename")):
+        if rel:
+            candidate = root / rel
+            if candidate.is_file():
+                return candidate
+    filename = row.get("filename")
+    # Fall back to the flat location even when missing, so FR2.1 integrity
+    # checks report it as "missing" instead of the row vanishing silently.
+    return root / filename if filename else None
+
+
 class LibriSpeechLoader(DatasetLoader):
     """Loader for LibriSpeech (ASR; LIT-141).
 
@@ -433,10 +458,16 @@ class LibriSpeechLoader(DatasetLoader):
     ``SPEAKERS.TXT`` (``ID | SEX | SUBSET | MINUTES | NAME``) when present, and
     exposed as demographic metadata. Audio is standardised to 16 kHz mono.
 
+    The repo's provisioned copy is not that tree but a flat stratified sample
+    (``*.flac`` at the root) described by ``CATALOG_NAME``. When that catalog
+    is present it is read instead of walking for ``*.trans.txt`` — which found
+    nothing in the flat layout, so the corpus probed as "not provisioned".
+
     Paths default to the real data location but are injectable for tests.
     """
 
     DEFAULT_DIR = DATA_DIR / "librispeech"
+    CATALOG_NAME = "librispeech_test_clean_120_metadata.csv"
 
     def __init__(
         self,
@@ -455,6 +486,11 @@ class LibriSpeechLoader(DatasetLoader):
                 f"LibriSpeech root for '{self.name}' not found: {self.root_dir}"
             )
         genders = self._load_speaker_genders()
+
+        catalog = self.root_dir / self.CATALOG_NAME
+        if catalog.is_file():
+            yield from self._iter_catalog(catalog, genders)
+            return
 
         for trans_file in sorted(self.root_dir.rglob("*.trans.txt")):
             with trans_file.open("r", encoding="utf-8") as fh:
@@ -475,6 +511,26 @@ class LibriSpeechLoader(DatasetLoader):
                         license=self.license,
                         demographic=demographic,
                     )
+
+    def _iter_catalog(self, catalog: Path, genders: Dict[str, str]) -> Iterator[SampleMetadata]:
+        """Yield samples from the flat-sample catalog (``utt_id``/``text``/``speaker``)."""
+        for row in _read_catalog_rows(catalog):
+            utt_id = row.get("utt_id", "")
+            audio_path = _resolve_catalog_audio(self.root_dir, row)
+            if not utt_id or audio_path is None:
+                continue
+            speaker = row.get("speaker") or utt_id.split("-")[0]
+            demographic = {"gender": genders[speaker]} if speaker in genders else {}
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=utt_id,
+                audio_path=audio_path,
+                task_family=TaskFamily.ASR,
+                label=row.get("text") or None,
+                speaker_id=speaker,
+                license=self.license,
+                demographic=demographic,
+            )
 
     def _load_speaker_genders(self) -> Dict[str, str]:
         """Parse SPEAKERS.TXT (``ID | SEX | …``) into {speaker_id: gender}."""
@@ -508,6 +564,11 @@ class ASVspoofLoader(DatasetLoader):
     path. Audio is the per-utterance FLAC named by the file-id column,
     standardised to 16 kHz mono like every other loader.
 
+    The repo's provisioned copy ships no protocol file: it is a flat stratified
+    sample (``*.flac`` at the root) described by ``CATALOG_NAME``. When the
+    protocol is absent and that catalog is present, it is read instead — the
+    protocol-only path made the corpus probe as unavailable.
+
     Research-use-only corpus (SAD constraint C5): a licence notice is logged the
     first time samples are read. Paths default to the real data location but are
     injectable for tests.
@@ -515,6 +576,10 @@ class ASVspoofLoader(DatasetLoader):
 
     DEFAULT_DIR = DATA_DIR / "asvspoof2021_df"
     DEFAULT_PROTOCOL = DEFAULT_DIR / "trial_metadata.txt"
+    CATALOG_NAME = "asvspoof2021_df_240_metadata.csv"
+    # Catalog columns carried through as SampleMetadata.extra (attack/codec
+    # breakdowns for FR7 evaluation); absent columns are simply skipped.
+    CATALOG_EXTRA_COLS = ("attack", "source", "vocoder", "codec", "class")
 
     def __init__(
         self,
@@ -535,9 +600,14 @@ class ASVspoofLoader(DatasetLoader):
 
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         if not self.protocol_path.exists():
-            raise FileNotFoundError(
-                f"ASVspoof protocol for '{self.name}' not found: {self.protocol_path}"
-            )
+            catalog = self.audio_base_dir / self.CATALOG_NAME
+            if not catalog.is_file():
+                raise FileNotFoundError(
+                    f"ASVspoof protocol for '{self.name}' not found: {self.protocol_path}"
+                )
+            self._maybe_log_license_notice()
+            yield from self._iter_catalog(catalog)
+            return
         self._maybe_log_license_notice()
 
         with self.protocol_path.open("r", encoding="utf-8") as fh:
@@ -576,6 +646,25 @@ class ASVspoofLoader(DatasetLoader):
                     license=self.license,
                 )
 
+    def _iter_catalog(self, catalog: Path) -> Iterator[SampleMetadata]:
+        """Yield samples from the flat-sample catalog (``utt_id``/``label``/``speaker``)."""
+        for row in _read_catalog_rows(catalog):
+            file_id = row.get("utt_id", "")
+            label = _ASVSPOOF_LABEL_TOKENS.get(row.get("label", "").lower())
+            audio_path = _resolve_catalog_audio(self.audio_base_dir, row)
+            if not file_id or label is None or audio_path is None:
+                continue
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=file_id,
+                audio_path=audio_path,
+                task_family=TaskFamily.DEEPFAKE,
+                label=label,
+                speaker_id=row.get("speaker") or None,
+                license=self.license,
+                extra={c: row[c] for c in self.CATALOG_EXTRA_COLS if row.get(c)},
+            )
+
     @staticmethod
     def _extract_label(tokens: List[str]) -> Optional[str]:
         for token in tokens:
@@ -608,6 +697,13 @@ class L2ArcticLoader(DatasetLoader):
     exposed as ``accent`` / ``demographic["l1"]`` — the grouping the FR15 bias
     diagnostics slice on. Audio is standardised to 16 kHz mono for the ASR path.
 
+    The repo's provisioned copy is a flat stratified sample (``*.wav`` at the
+    root, named ``<SPEAKER>_<utt>.wav``) described by ``CATALOG_NAME``; when
+    that catalog is present it is read instead of the per-speaker tree walk,
+    which found nothing in the flat layout. (``population_manifest.csv`` beside
+    it describes the full corpus, whose audio isn't provisioned, so it is not
+    read.)
+
     Research-use-only corpus; paths default to the real data location but are
     injectable for tests.
     """
@@ -616,6 +712,7 @@ class L2ArcticLoader(DatasetLoader):
     # a mismatch against the actual Backend/data/ layout that made this loader
     # unable to find its data by default (LIT-235).
     DEFAULT_DIR = DATA_DIR / "l2arctic"
+    CATALOG_NAME = "l2arctic_metadata.csv"
     SPEAKER_L1 = L2_ARCTIC_SPEAKER_L1
 
     def __init__(self, root_dir: Optional[Path | str] = None, *, name: str = "l2-arctic"):
@@ -628,6 +725,12 @@ class L2ArcticLoader(DatasetLoader):
                 f"L2-ARCTIC root for '{self.name}' not found: {self.root_dir}"
             )
         self._maybe_log_license_notice()
+
+        catalog = self.root_dir / self.CATALOG_NAME
+        if catalog.is_file():
+            yield from self._iter_catalog(catalog)
+            return
+
         for speaker in sorted(self.SPEAKER_L1):
             wav_dir = self.root_dir / speaker / "wav"
             if not wav_dir.is_dir():
@@ -649,6 +752,35 @@ class L2ArcticLoader(DatasetLoader):
                     license=self.license,
                     demographic={"l1": l1},
                 )
+
+    def _iter_catalog(self, catalog: Path) -> Iterator[SampleMetadata]:
+        """Yield samples from the flat-sample catalog.
+
+        ``sample_id`` keeps the tree walk's ``<SPEAKER>-<utt>`` shape so ids
+        are stable whichever layout is provisioned; L1 comes from the fixed
+        ``SPEAKER_L1`` map, falling back to the catalog's ``native_language``.
+        """
+        for row in _read_catalog_rows(catalog):
+            speaker = row.get("speaker", "")
+            audio_path = _resolve_catalog_audio(self.root_dir, row)
+            if not speaker or audio_path is None:
+                continue
+            utt = row.get("sentence_id") or audio_path.stem.removeprefix(f"{speaker}_")
+            l1 = self.SPEAKER_L1.get(speaker) or row.get("native_language") or None
+            demographic = {"l1": l1} if l1 else {}
+            if row.get("gender"):
+                demographic["gender"] = row["gender"]
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=f"{speaker}-{utt}",
+                audio_path=audio_path,
+                task_family=TaskFamily.ASR,
+                label=row.get("transcript") or None,
+                speaker_id=speaker,
+                accent=l1,
+                license=self.license,
+                demographic=demographic,
+            )
 
     @staticmethod
     def _read_transcript(path: Path) -> Optional[str]:

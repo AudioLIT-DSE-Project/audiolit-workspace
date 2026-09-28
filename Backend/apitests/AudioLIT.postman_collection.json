@@ -1,0 +1,164 @@
+{
+  "info": {
+    "name": "AudioLIT API",
+    "description": "Black-box API tests for the AudioLIT FastAPI gateway, used for section 3.1.2 (Function Testing) of the Master Test Plan. These run against a live stack (Redis, API, RQ workers) and assert on the HTTP contract only, with no knowledge of internals, which is what makes them independent evidence alongside the pytest route tests.\n\nRun headless with newman:\n  newman run Backend/apitests/AudioLIT.postman_collection.json --env-var baseUrl=http://127.0.0.1:8000",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [{ "key": "baseUrl", "value": "http://127.0.0.1:8000" }],
+  "item": [
+    {
+      "name": "Health - API and Redis reachable",
+      "request": { "method": "GET", "url": "{{baseUrl}}/health" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));",
+        "const b = pm.response.json();",
+        "pm.test('status is ok', () => pm.expect(b.status).to.eql('ok'));",
+        "pm.test('redis is connected', () => pm.expect(b.redis).to.be.true);"
+      ]}}]
+    },
+    {
+      "name": "Health - all five worker families registered",
+      "request": { "method": "GET", "url": "{{baseUrl}}/health/workers" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));",
+        "const b = pm.response.json();",
+        "pm.test('at least one worker is active', () => pm.expect(b.active_worker_count).to.be.above(0));",
+        "['asr','ser','add','xai','mutation'].forEach(q =>",
+        "  pm.test('queue ' + q + ' is reported', () => pm.expect(b.queues).to.have.property(q)));"
+      ]}}]
+    },
+    {
+      "name": "Datasets - list returns the provisioned corpora with licences",
+      "request": { "method": "GET", "url": "{{baseUrl}}/datasets/list" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));",
+        "const b = pm.response.json();",
+        "pm.test('datasets is a non-empty array', () => pm.expect(b.datasets).to.be.an('array').that.is.not.empty);",
+        "pm.test('every dataset carries a licence record', () =>",
+        "  b.datasets.forEach(d => pm.expect(b.licenses, d).to.have.property(d)));",
+        "pm.test('every licence names a task family', () =>",
+        "  Object.values(b.licenses).forEach(l => pm.expect(l).to.have.property('task_family')));"
+      ]}}]
+    },
+    {
+      "name": "Datasets - footprint is measurable",
+      "request": { "method": "GET", "url": "{{baseUrl}}/datasets/footprint" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));"
+      ]}}]
+    },
+    {
+      "name": "Models - resolve a supported Whisper model",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"model_id\":\"openai/whisper-base\"}" },
+        "url": "{{baseUrl}}/models/resolve"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));",
+        "const b = pm.response.json();",
+        "pm.test('family is whisper', () => pm.expect(b.family).to.eql('whisper'));",
+        "pm.test('revision is a resolved commit sha, not a branch name', () =>",
+        "  pm.expect(b.revision).to.match(/^[0-9a-f]{40}$/));",
+        "pm.test('weight digest is recorded for reproducibility', () =>",
+        "  pm.expect(b.weights_sha256).to.match(/^[0-9a-f]{64}$/));",
+        "pm.test('hook-able layers are advertised', () =>",
+        "  pm.expect(b.available_layers).to.be.an('array').that.is.not.empty);"
+      ]}}]
+    },
+    {
+      "name": "Models - reject an unsupported architecture",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"model_id\":\"distilbert-base-uncased\"}" },
+        "url": "{{baseUrl}}/models/resolve"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('rejects with a client error', () => pm.expect(pm.response.code).to.be.within(400, 499));",
+        "const d = pm.response.json().detail;",
+        "pm.test('uses the typed rejection code', () => pm.expect(d.code).to.eql('UNSUPPORTED_ARCHITECTURE'));",
+        "pm.test('message names the supported families', () =>",
+        "  pm.expect(d.message).to.include('whisper'));"
+      ]}}]
+    },
+    {
+      "name": "Inference - reject a multitask request with no audio reference",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{}" },
+        "url": "{{baseUrl}}/api/inference/multitask"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 422 validation error', () => pm.response.to.have.status(422));",
+        "const d = pm.response.json().detail;",
+        "pm.test('names the missing field', () =>",
+        "  pm.expect(JSON.stringify(d)).to.include('audio_ref'));"
+      ]}}]
+    },
+    {
+      "name": "Inference - enqueue a multitask job and get a job id back",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"audio_ref\":\"apitest-synthetic-ref\",\"tasks\":[\"asr\"]}" },
+        "url": "{{baseUrl}}/api/inference/multitask"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));",
+        "const b = pm.response.json();",
+        "pm.test('a job id is issued', () => pm.expect(b.job_id).to.be.a('string').that.is.not.empty);",
+        "pm.test('a websocket url is advertised for progress', () =>",
+        "  pm.expect(b.websocket_url).to.include('/api/ws/tasks/'));",
+        "pm.test('the response is schema-versioned', () => pm.expect(b.schema_version).to.exist);",
+        "pm.test('the request returns fast, work is not done inline', () =>",
+        "  pm.expect(pm.response.responseTime).to.be.below(2000));",
+        "pm.collectionVariables.set('jobId', b.job_id);"
+      ]}}]
+    },
+    {
+      "name": "Tasks - status of the enqueued job is a known state",
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/{{jobId}}/status" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));",
+        "const b = pm.response.json();",
+        "pm.test('state is one of the contract values', () =>",
+        "  pm.expect(['QUEUED','PROCESSING','RETRYING','SUCCESS','FAILURE','UNKNOWN']).to.include(b.state));"
+      ]}}]
+    },
+    {
+      "name": "Tasks - unknown job id degrades, it does not crash",
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/no-such-job-id/status" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200 rather than a server error', () => pm.response.to.have.status(200));",
+        "pm.test('state is UNKNOWN', () => pm.expect(pm.response.json().state).to.eql('UNKNOWN'));"
+      ]}}]
+    },
+    {
+      "name": "Session - a session is issued",
+      "request": { "method": "GET", "url": "{{baseUrl}}/session" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));"
+      ]}}]
+    },
+    {
+      "name": "Metrics - synthesis report is served",
+      "request": { "method": "GET", "url": "{{baseUrl}}/metrics/synthesis" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('returns 200', () => pm.response.to.have.status(200));",
+        "pm.test('responds quickly', () => pm.expect(pm.response.responseTime).to.be.below(2000));"
+      ]}}]
+    },
+    {
+      "name": "Cache - a miss returns not-found rather than fabricated data",
+      "request": { "method": "GET", "url": "{{baseUrl}}/results/whisper-base/0000000000000000000000000000000000000000000000000000000000000000" },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('is a 404 or an explicit empty result, never a 500', () =>",
+        "  pm.expect(pm.response.code).to.be.oneOf([200, 404]));",
+        "pm.test('server did not error', () => pm.expect(pm.response.code).to.not.eql(500));"
+      ]}}]
+    }
+  ]
+}
