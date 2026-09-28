@@ -486,7 +486,16 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex-1 overflow-auto">
+      {/* A scrollable region must be reachable by keyboard, or someone who
+          cannot use a pointer cannot scroll the table at all. tabIndex makes
+          it focusable so the arrow keys work; the label tells a screen reader
+          what the region holds once focus lands there. */}
+      <div
+        className="flex-1 overflow-auto"
+        tabIndex={0}
+        role="region"
+        aria-label="Audio dataset table"
+      >
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
@@ -567,14 +576,18 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount()}
         </div>
         <div className="flex items-center gap-1">
+          {/* The chevrons are the only content, so the name has to be
+              supplied: a screen reader otherwise announces two buttons that
+              differ only by an unreadable glyph. */}
           <Button
             variant="outline"
             size="sm"
             className="h-6 w-6 p-0"
             onClick={() => table.previousPage()}
             disabled={!table.getCanPreviousPage()}
+            aria-label="Previous page"
           >
-            <ChevronLeft className="h-3 w-3" />
+            <ChevronLeft className="h-3 w-3" aria-hidden="true" />
           </Button>
           <Button
             variant="outline"
@@ -582,8 +595,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
             className="h-6 w-6 p-0"
             onClick={() => table.nextPage()}
             disabled={!table.getCanNextPage()}
+            aria-label="Next page"
           >
-            <ChevronRight className="h-3 w-3" />
+            <ChevronRight className="h-3 w-3" aria-hidden="true" />
           </Button>
         </div>
       </div>

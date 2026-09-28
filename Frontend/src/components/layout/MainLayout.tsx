@@ -750,7 +750,11 @@ export const MainLayout = () => {
             setWarmupDataset(null);
           }}
         />
-        <div className="flex-1 overflow-hidden bg-background">
+        {/* The workbench panels are the page's main content. Without a
+            main landmark a screen reader user has no way to skip the
+            toolbar and jump straight to the work area, which axe reports
+            as landmark-one-main. */}
+        <main className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">
             <Panel defaultSize={25} minSize={20}>
               <EmbeddingPanel model={model} dataset={dataset} availableFiles={availableFiles} selectedFile={selectedEmbeddingFile} onFileSelect={handleEmbeddingSelection} />
@@ -811,7 +815,7 @@ export const MainLayout = () => {
               />
             </Panel>
           </PanelGroup>
-        </div>
+        </main>
         <StatusBar activeTaskId={activeTaskId} taskState={state} />
       </div>
     </EmbeddingProvider>

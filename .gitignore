@@ -83,3 +83,10 @@ desktop.ini
 # local opencode config (holds PAT/API keys)
 opencode.jsonc
 
+# --- Evaluation & temporary outputs ----------------------------------------
+*.patch
+.~lock.*
+docs/evaluation/api-reports/
+docs/evaluation/results/
+docs/evaluation/results_fr16/
+

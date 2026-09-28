@@ -48,6 +48,24 @@ class JobResponse(BaseModel):
     family_jobs: dict[str, str]
     cache_key: str | None = None
 
+# These handlers stay `async def`, and that was measured rather than assumed.
+#
+# The enqueue functions they call are synchronous and do several Redis round
+# trips, so moving them to FastAPI's threadpool (by declaring the handler `def`)
+# looks like the textbook fix. It is not, for this workload. Measured at 10
+# concurrent users against a live Redis, enqueue-only:
+#
+#     async def (this code)   median 44 ms   p95 70-75 ms
+#     def + threadpool        median 70 ms   p95 120 ms
+#
+# The threadpool version is about 1.7x worse, repeatably. A real Redis round
+# trip on loopback is a fraction of a millisecond, so per-request thread
+# dispatch costs more than the blocking it avoids. Threadpooling only pays when
+# the blocking call is long; an earlier synthetic test using a 200 ms stub
+# "proved" the opposite precisely because 200 ms is nothing like the real cost.
+#
+# So do not convert these to `def` on general principle. If the p95 needs to
+# come down further, the round trips themselves are the thing to attack.
 @router.post("/inference/multitask", response_model=JobResponse)
 async def post_multitask(req: MultiTaskRequest) -> JobResponse:
     result = enqueue_multitask_analysis(

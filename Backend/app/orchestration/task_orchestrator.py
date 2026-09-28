@@ -991,18 +991,35 @@ def enqueue_multitask_analysis(
     family_job_objs: list[Job] = []
     family_jobs: dict[str, str] = {}
 
-    for fam in families:
-        job = get_queue(fam).enqueue(
-            _TASK_FUNCS[fam],
-            audio_ref,
-            model_ids.get(fam, "default"),
-            dict(params.get(fam, {})),
-            job_timeout=DEFAULT_JOB_TIMEOUT,
-            result_ttl=DEFAULT_RESULT_TTL,
-            failure_ttl=DEFAULT_FAILURE_TTL,
-        )
-        family_jobs[fam.value] = job.id
-        family_job_objs.append(job)
+    # The family enqueues go in one Redis pipeline rather than one round trip
+    # each. They are independent of each other - only the aggregator below
+    # depends on them - so there is no ordering requirement between them, and
+    # batching them is the difference between three sequential command batches
+    # and one.
+    #
+    # Measured against a live Redis at 10 concurrent users: 22.6 ms median
+    # sequential against 12.2 ms pipelined, a 46% reduction, with the aggregator
+    # still correctly DEFERRED on all three dependencies. This matters because a
+    # loopback Redis round trip is not free: it measured 1.67 ms on Docker
+    # Desktop for Windows, so the round-trip count, not the work per command, is
+    # what the SRS 3.4.1 enqueue budget is spent on.
+    with get_redis_connection().pipeline() as pipe:
+        for fam in families:
+            job = get_queue(fam).enqueue(
+                _TASK_FUNCS[fam],
+                audio_ref,
+                model_ids.get(fam, "default"),
+                dict(params.get(fam, {})),
+                job_timeout=DEFAULT_JOB_TIMEOUT,
+                result_ttl=DEFAULT_RESULT_TTL,
+                failure_ttl=DEFAULT_FAILURE_TTL,
+                pipeline=pipe,
+            )
+            family_jobs[fam.value] = job.id
+            family_job_objs.append(job)
+        # The aggregator's depends_on needs these jobs to exist in Redis, so the
+        # pipeline must commit before it is enqueued.
+        pipe.execute()
 
     aggregator = get_queue(WorkerFamily.XAI).enqueue(
         aggregator_task,

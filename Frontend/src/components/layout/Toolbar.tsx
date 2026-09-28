@@ -264,7 +264,7 @@ export const Toolbar = ({
                 </Tooltip>
               </div>
               <Select value={model} onValueChange={onModelChange}>
-                <SelectTrigger className="w-40 h-7 border-border text-xs">
+                <SelectTrigger className="w-40 h-7 border-border text-xs" aria-label="Model">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -317,7 +317,7 @@ export const Toolbar = ({
                 </Tooltip>
               </div>
               <Select value={dataset} onValueChange={onDatasetChange}>
-                <SelectTrigger className="w-44 h-7 border-border text-xs">
+                <SelectTrigger className="w-44 h-7 border-border text-xs" aria-label="Dataset">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -379,7 +379,7 @@ export const Toolbar = ({
                     }
                   }}
                 >
-                  <SelectTrigger className="w-48 h-7 border-border text-xs">
+                  <SelectTrigger className="w-48 h-7 border-border text-xs" aria-label="Uploaded file">
                     <SelectValue placeholder="Select uploaded file" />
                   </SelectTrigger>
                   <SelectContent>
@@ -437,17 +437,14 @@ export const Toolbar = ({
         {/* Right side: Action buttons */}
         <div className="flex items-center gap-2.5 flex-shrink-0">
           <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
+            <TooltipTrigger asChild><Button
                 variant="outline"
                 size="sm"
                 className="h-7 w-7 p-0"
                 onClick={onQuickStartClick}
                 data-testid="quickstart-reopen-button"
-              >
-                <Rocket className="h-3.5 w-3.5" />
-              </Button>
-            </TooltipTrigger>
+               aria-label="Quick start"><Rocket className="h-3.5 w-3.5" />
+              </Button></TooltipTrigger>
             <TooltipContent>
               <p>Quick start</p>
             </TooltipContent>
@@ -462,11 +459,18 @@ export const Toolbar = ({
                 onClick={() =>
                   setTheme(resolvedTheme === "dark" ? "light" : "dark")
                 }
+                /* The name states the action, not the current state, so it
+                   does not contradict itself between render and click. */
+                aria-label={
+                  mounted && resolvedTheme === "dark"
+                    ? "Switch to light theme"
+                    : "Switch to dark theme"
+                }
               >
                 {mounted && resolvedTheme === "dark" ? (
-                  <Sun className="h-3.5 w-3.5" />
+                  <Sun className="h-3.5 w-3.5" aria-hidden="true" />
                 ) : (
-                  <Moon className="h-3.5 w-3.5" />
+                  <Moon className="h-3.5 w-3.5" aria-hidden="true" />
                 )}
               </Button>
             </TooltipTrigger>

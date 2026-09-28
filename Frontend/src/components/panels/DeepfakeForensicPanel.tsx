@@ -99,7 +99,9 @@ export const DeepfakeForensicPanel = ({
         <CardTitle className="text-sm flex items-center gap-2">
           Deepfake Forensics
           <Tooltip>
-            <TooltipTrigger><HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" /></TooltipTrigger>
+            <TooltipTrigger aria-label="Per-window synthetic-speech probability across the clip (FR7.2),...">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
+                  </TooltipTrigger>
             <TooltipContent className="space-y-1">
               <p className="text-xs">Per-window synthetic-speech probability across the clip (FR7.2),</p>
               <p className="text-xs">so a bona-fide/spoof verdict can be traced to where suspicion peaks.</p>

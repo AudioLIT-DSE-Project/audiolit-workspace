@@ -701,11 +701,8 @@ export const AudioDatasetPanel = ({
                 </TooltipContent>
               </Tooltip>
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button size="sm" variant="secondary" className="h-7 w-7 p-0" onClick={handleReloadDataset} title="Reload dataset">
-                    <RefreshCw className="h-3 w-3" />
-                  </Button>
-                </TooltipTrigger>
+                <TooltipTrigger asChild><Button size="sm" variant="secondary" className="h-7 w-7 p-0" onClick={handleReloadDataset} title="Reload dataset" aria-label="Reload dataset metadata and refresh the file list"><RefreshCw className="h-3 w-3" />
+                  </Button></TooltipTrigger>
                 <TooltipContent>
                   <p>Reload dataset metadata and refresh the file list</p>
                 </TooltipContent>

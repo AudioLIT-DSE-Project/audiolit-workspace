@@ -79,7 +79,9 @@ export const AccentBiasPanel: React.FC<AccentBiasPanelProps> = ({ model }) => {
             <CardTitle className="text-xs flex items-center gap-1.5">
               Accent Bias Dashboard
               <Tooltip>
-                <TooltipTrigger><HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" /></TooltipTrigger>
+                <TooltipTrigger aria-label="Runs the selected Whisper model over the L2-ARCTIC non-native...">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
+                  </TooltipTrigger>
                 <TooltipContent className="space-y-1">
                   <p className="text-xs">Runs the selected Whisper model over the L2-ARCTIC non-native reading corpus,</p>
                   <p className="text-xs">grouped by accent (L1), and ranks cohorts by mean Word Error Rate.</p>

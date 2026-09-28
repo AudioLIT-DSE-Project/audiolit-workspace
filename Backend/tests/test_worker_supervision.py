@@ -91,10 +91,28 @@ def _starts(marker_dir: Path, fam: WorkerFamily) -> int:
 
 def test_supervise_respawns_a_family_whose_process_died(tmp_path, monkeypatch):
     monkeypatch.setenv(_MARKER_DIR_ENV, str(tmp_path))
-    deadline = time.monotonic() + 30
+    launched = time.monotonic()
+    first_seen: list[float] = []
+    # Hard ceiling so a supervisor that never respawns fails instead of hanging.
+    hard_deadline = launched + 180
 
     def done() -> bool:
-        return _starts(tmp_path, WorkerFamily.ASR) >= 3 or time.monotonic() > deadline
+        n = _starts(tmp_path, WorkerFamily.ASR)
+        if not first_seen and n:
+            first_seen.append(time.monotonic())
+        if n >= 3:
+            return True
+        if first_seen:
+            # Budget the wait from the observed cost of one child start-up
+            # rather than from a fixed wall-clock figure. Under the spawn start
+            # method the child re-imports the application, torch included, before
+            # it records anything, which measured ~16.7 s per start on Windows
+            # against about a second on Linux. A flat 30 s from launch bought
+            # exactly one start here, so this asserted that a working supervisor
+            # was broken. The cost is measured, then three of them are allowed.
+            one_start = first_seen[0] - launched
+            return time.monotonic() - first_seen[0] > max(6.0, one_start * 3)
+        return time.monotonic() > hard_deadline
 
     supervise(
         [WorkerFamily.ASR], target=_exit_immediately, interval=0.05, backoff=0, should_stop=done
@@ -105,12 +123,19 @@ def test_supervise_respawns_a_family_whose_process_died(tmp_path, monkeypatch):
 
 def test_supervise_backs_off_a_crash_looping_family(tmp_path, monkeypatch):
     monkeypatch.setenv(_MARKER_DIR_ENV, str(tmp_path))
-    deadline = time.monotonic() + 30
+    # 180 s, not 30 s. The observation window below is correctly measured from
+    # the first start, but this outer ceiling is measured from launch, and one
+    # child start-up costs ~16.7 s under the spawn start method on Windows. At
+    # 30 s the margin was ~13 s, so a loaded machine could trip the ceiling
+    # before the first start ever landed and then assert on zero starts. The
+    # test still finishes in about a second past the first start in the normal
+    # case; this only stops a slow start being read as a failure.
+    deadline = time.monotonic() + 180
     first_seen: list[float] = []
 
     def done() -> bool:
-        # Child start-up is slow under the spawn start method (macOS), so time
-        # the observation window from the first start, not from launch.
+        # Child start-up is slow under the spawn start method, so time the
+        # observation window from the first start, not from launch.
         if not first_seen and _starts(tmp_path, WorkerFamily.ASR):
             first_seen.append(time.monotonic())
         return bool(first_seen and time.monotonic() - first_seen[0] > 1.5) or time.monotonic() > deadline
