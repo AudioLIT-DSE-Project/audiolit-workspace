@@ -94,6 +94,16 @@ QUEUE_CONFIGS: dict[WorkerFamily, QueueConfig] = {
 # so a job published by one was invisible to a subscriber on the other.
 PROGRESS_CHANNEL_PREFIX = "audiolit:progress"
 WORKER_LOCK_PREFIX = "audiolit:worker-lock"
+#: The per-family GPU lock (SAD C2) lives only as long as its holder keeps
+#: renewing it. It used to be taken for 24h and never renewed, so a worker that
+#: was OOM-killed (or SIGKILLed by `docker stop`) held its family's lock for a
+#: day: every replacement exited with "already has a worker running", and jobs
+#: for that family sat queued forever - including dataset warmups.
+WORKER_LOCK_TTL = 60
+WORKER_LOCK_RENEW_INTERVAL = 20
+#: A starting worker waits this long for a dead predecessor's lock to lapse
+#: instead of giving up at once.
+WORKER_LOCK_ACQUIRE_WAIT = 150
 
 DEFAULT_JOB_TIMEOUT: int = 600
 DEFAULT_AGGREGATOR_TIMEOUT: int = 120
@@ -448,6 +458,100 @@ def make_worker(
     )
 
 
+class _FamilyLock:
+    """Token lock with an expiry, renewable from any thread.
+
+    Plain ``SET NX PX`` plus ``WATCH``/``MULTI`` compare-and-set rather than
+    redis-py's ``Lock``, whose renew/release run Lua scripts (unsupported by
+    the fakeredis the suite and CI run on) and whose token is thread-local by
+    default (so a renewal thread could never renew it).
+    """
+
+    def __init__(self, conn: Redis, key: str, ttl: float):
+        import uuid
+
+        self._conn = conn
+        self.key = key
+        self.ttl = ttl
+        self._token = uuid.uuid4().hex.encode()
+
+    def acquire(self) -> bool:
+        return bool(self._conn.set(self.key, self._token, nx=True, px=int(self.ttl * 1000)))
+
+    def owned(self) -> bool:
+        return self._conn.get(self.key) == self._token
+
+    def _if_owned(self, action: Callable[[Any], None]) -> bool:
+        from redis.exceptions import WatchError
+
+        with self._conn.pipeline() as pipe:
+            try:
+                pipe.watch(self.key)
+                if pipe.get(self.key) != self._token:
+                    return False
+                pipe.multi()
+                action(pipe)
+                pipe.execute()
+                return True
+            except WatchError:
+                return False
+
+    def reacquire(self) -> None:
+        if not self._if_owned(lambda pipe: pipe.pexpire(self.key, int(self.ttl * 1000))):
+            raise RuntimeError(f"lock {self.key} is no longer owned")
+
+    def release(self) -> None:
+        self._if_owned(lambda pipe: pipe.delete(self.key))
+
+
+def _acquire_family_lock(
+    conn: Redis, fam: WorkerFamily, *, wait: Optional[float] = None, poll: float = 5.0
+):
+    """Take ``fam``'s GPU lock, waiting up to ``wait`` seconds for a holder's
+    TTL to lapse (a crashed predecessor stops renewing, so its lock frees
+    within WORKER_LOCK_TTL)."""
+    lock = _FamilyLock(conn, f"{WORKER_LOCK_PREFIX}:{fam.value}", WORKER_LOCK_TTL)
+    deadline = time.monotonic() + (WORKER_LOCK_ACQUIRE_WAIT if wait is None else wait)
+    while not lock.acquire():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"GPU family {fam.value} already has a worker running (SAD C2)")
+        logger.info("worker.lock.waiting family=%s", fam.value)
+        time.sleep(min(poll, max(deadline - time.monotonic(), 0)))
+    return lock
+
+
+class _FamilyLockRenewer:
+    """Keeps a family lock alive from a daemon thread for exactly as long as
+    the worker process lives."""
+
+    def __init__(self, lock, fam: WorkerFamily, interval: float = WORKER_LOCK_RENEW_INTERVAL):
+        import threading
+
+        self._lock = lock
+        self._fam = fam
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name=f"worker-lock-{fam.value}", daemon=True
+        )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._lock.reacquire()
+            except Exception as e:
+                # Lost the lock (e.g. the process stalled past its TTL and
+                # another worker took over). Keep running rather than kill an
+                # in-flight job; the other worker holds the lock now.
+                logger.error("worker.lock.renew_failed family=%s error=%s", self._fam.value, e)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
 def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     """Entrypoint for one family's worker process.
 
@@ -471,17 +575,18 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
         logger.warning("Could not set CPU thread cap: %s", e)
 
     lock = None
+    renewer = None
     if get_queue_config(fam).gpu_bound:
-        lock = conn.lock(
-            f"{WORKER_LOCK_PREFIX}:{fam.value}", timeout=60 * 60 * 24, blocking=False
-        )
-        if not lock.acquire(blocking=False):
-            raise RuntimeError(f"GPU family {fam.value} already has a worker running (SAD C2)")
+        lock = _acquire_family_lock(conn, fam)
+        renewer = _FamilyLockRenewer(lock, fam)
+        renewer.start()
 
     worker = make_worker(fam, connection=conn)
     try:
         worker.work(burst=burst, with_scheduler=True)
     finally:
+        if renewer is not None:
+            renewer.stop()
         if lock is not None:
             try:
                 lock.release()
@@ -1029,7 +1134,210 @@ def health_check() -> dict[str, Any]:
         return {"ok": False, "broker": "redis", "error": str(exc)}
 
 
+#: Progress statuses that mean "a worker is (supposedly) still on this run".
+WARMUP_ACTIVE_STATUSES = ("running", "cancelling")
+#: A run with no RQ job to consult (legacy record, in-process thread fallback)
+#: is presumed dead once its progress record has gone this long unwritten.
+#: The runner rewrites the record at every subtask, so a live run never idles
+#: this long.
+WARMUP_STALE_SECONDS = 15 * 60
+WARMUP_PROGRESS_TTL = 86400
+#: The runner refreshes a heartbeat key from a background thread at this
+#: interval, with a TTL a few beats longer. The key outlives a slow model step
+#: (the thread beats regardless of what the job is doing) but expires within
+#: WARMUP_HEARTBEAT_TTL of the process dying.
+WARMUP_HEARTBEAT_INTERVAL = 10
+WARMUP_HEARTBEAT_TTL = 45
+
+
+def warmup_progress_key(job_id: str) -> str:
+    return f"job_progress_{job_id}"
+
+
+def warmup_cancel_key(job_id: str) -> str:
+    return f"cancel_job_{job_id}"
+
+
+def warmup_heartbeat_key(job_id: str) -> str:
+    return f"warmup_heartbeat_{job_id}"
+
+
+class _WarmupHeartbeat:
+    """Background thread that keeps ``warmup_heartbeat_key`` alive while the
+    runner's process is alive - and only while it is."""
+
+    def __init__(self, conn: Optional[Redis], job_id: str):
+        import threading
+
+        self._conn = conn
+        self._key = warmup_heartbeat_key(job_id)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"warmup-heartbeat-{job_id}", daemon=True)
+
+    def _beat(self) -> None:
+        try:
+            self._conn.set(self._key, str(time.time()), ex=WARMUP_HEARTBEAT_TTL)
+        except Exception as e:  # a missed beat must never fail the warmup
+            logger.warning("Warmup heartbeat write failed: %s", e)
+
+    def _run(self) -> None:
+        while not self._stop.wait(WARMUP_HEARTBEAT_INTERVAL):
+            self._beat()
+
+    def __enter__(self) -> "_WarmupHeartbeat":
+        if self._conn is not None:
+            self._beat()
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._conn is not None:
+            try:
+                self._conn.delete(self._key)
+            except Exception:
+                pass
+
+
+def warmup_liveness(conn: Redis, job_id: str, data: Mapping[str, Any]) -> str:
+    """Whether anything is still executing warmup ``job_id``.
+
+    Returns ``"queued"`` (enqueued, no worker has picked it up yet),
+    ``"alive"`` (the runner's process is heartbeating) or ``"dead"``.
+
+    The progress record alone cannot answer this: it is written by the
+    runner, so when the worker process dies (container recreated, OOM kill)
+    the record stays ``running`` for its full 24h TTL. Cancellation is only
+    a flag the runner polls, so such a run was also uncancellable - the flag
+    was set but nothing was left to read it, and the UI reattached to the
+    ghost on every reload.
+
+    RQ's own bookkeeping cannot answer it either: a SimpleWorker's registry
+    entry is kept for the job's timeout (24h here) and still names the job
+    after its process was OOM-killed. Hence the runner's own heartbeat key.
+    """
+    if conn.exists(warmup_heartbeat_key(job_id)):
+        return "alive"
+
+    try:
+        job: Optional[Job] = Job.fetch(job_id, connection=conn)
+    except Exception:
+        job = None
+
+    if job is not None:
+        status = job.get_status(refresh=False)
+        if status in (JobStatus.DEFERRED, JobStatus.SCHEDULED):
+            return "queued"
+        if status == JobStatus.QUEUED:
+            # "queued" only counts if the id is really in its queue: under the
+            # old allkeys-lru policy Redis evicted RQ's queue lists, leaving
+            # jobs that claim QUEUED while no worker can ever pick them up.
+            if job_id in Queue(job.origin, connection=conn).get_job_ids():
+                return "queued"
+            return "dead"
+        if status == JobStatus.STARTED and job.started_at is not None:
+            started_at = job.started_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            # Grace for the instant between RQ marking the job started and
+            # the runner's first beat.
+            if (datetime.now(timezone.utc) - started_at).total_seconds() < WARMUP_HEARTBEAT_TTL:
+                return "alive"
+        # Started with no heartbeat, or finished/failed/stopped/canceled while
+        # the record still says running: the runner is gone.
+        return "dead"
+
+    # No RQ job to consult (in-process thread fallback, or a record from
+    # before the heartbeat existed): fall back to the record's own timestamp.
+    # Records written before `updated_at` existed are aged from their TTL.
+    updated_at = data.get("updated_at")
+    if isinstance(updated_at, (int, float)):
+        age = time.time() - updated_at
+    else:
+        ttl = conn.ttl(warmup_progress_key(job_id))
+        age = WARMUP_PROGRESS_TTL - ttl if ttl and ttl > 0 else WARMUP_STALE_SECONDS
+    return "alive" if age < WARMUP_STALE_SECONDS else "dead"
+
+
+def _finalize_warmup(conn: Redis, job_id: str, data: dict[str, Any], status: str) -> dict[str, Any]:
+    """Rewrite a non-terminal progress record as terminal ``status``."""
+    final = {
+        **data,
+        "status": status,
+        "current_file": "Cancelled" if status == "cancelled" else "Interrupted",
+        "active_subtask": None,
+        "eta_seconds": 0,
+        "eta_formatted": None,
+        "updated_at": time.time(),
+    }
+    conn.set(warmup_progress_key(job_id), json.dumps(final), ex=WARMUP_PROGRESS_TTL)
+    return final
+
+
+def reconcile_warmup_progress(conn: Redis, job_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Return ``data``, made terminal first if its run is no longer executing.
+
+    A dead run becomes ``cancelled`` if cancellation had been requested, and
+    ``interrupted`` otherwise - distinct from ``cancelled`` so the UI does not
+    claim the user stopped a run that crashed.
+    """
+    if data.get("status") not in WARMUP_ACTIVE_STATUSES:
+        return data
+    if warmup_liveness(conn, job_id, data) != "dead":
+        return data
+    status = "cancelled" if conn.get(warmup_cancel_key(job_id)) else "interrupted"
+    logger.warning("Warmup %s has no live worker; marking it %s", job_id, status)
+    return _finalize_warmup(conn, job_id, data, status)
+
+
+def cancel_warmup(conn: Redis, job_id: str) -> dict[str, Any]:
+    """Request cancellation of warmup ``job_id`` and report the resulting state.
+
+    A running job is flagged and moves to ``cancelling`` until the runner
+    reaches its next checkpoint. A job that is still queued, or whose worker
+    is gone, has nothing to observe the flag, so it is made ``cancelled``
+    immediately instead of waiting forever.
+    """
+    conn.set(warmup_cancel_key(job_id), "1", ex=3600)
+    raw = conn.get(warmup_progress_key(job_id))
+    if not raw:
+        return {"job_id": job_id, "status": "not_found"}
+    data = json.loads(raw)
+    if data.get("status") not in WARMUP_ACTIVE_STATUSES:
+        return {"job_id": job_id, **data}
+
+    liveness = warmup_liveness(conn, job_id, data)
+    if liveness == "alive":
+        data = {**data, "status": "cancelling", "updated_at": time.time()}
+        conn.set(warmup_progress_key(job_id), json.dumps(data), ex=WARMUP_PROGRESS_TTL)
+        return {"job_id": job_id, **data}
+
+    if liveness == "queued":
+        try:
+            Job.fetch(job_id, connection=conn).cancel()
+        except Exception as e:
+            logger.warning("Could not cancel queued warmup %s in RQ: %s", job_id, e)
+    return {"job_id": job_id, **_finalize_warmup(conn, job_id, data, "cancelled")}
+
+
 def run_batch_dataset_warmup_task(
+    job_id: str,
+    dataset: str,
+    model: str = "whisper-base",
+    tasks: list[str] | None = None,
+    cooldown_ms: int = 100,
+) -> dict[str, Any]:
+    """Run a dataset warmup while heartbeating, so warmup_liveness() can tell
+    this run apart from one whose process was killed under it."""
+    try:
+        conn = get_redis_connection()
+    except Exception:
+        conn = None
+    with _WarmupHeartbeat(conn, job_id):
+        return _run_batch_dataset_warmup(job_id, dataset, model, tasks, cooldown_ms)
+
+
+def _run_batch_dataset_warmup(
     job_id: str,
     dataset: str,
     model: str = "whisper-base",
@@ -1114,7 +1422,14 @@ def run_batch_dataset_warmup_task(
                     "total": total,
                     "current_file": filename,
                     "active_subtask": subtask_label,
-                    "status": "running",
+                    # Once cancel is requested, keep reporting it: writing
+                    # "running" here overwrote the route's "cancelling", so
+                    # the Cancel button looked like it did nothing until the
+                    # next checkpoint.
+                    "status": "cancelling" if is_job_cancelled() else "running",
+                    # Heartbeat for warmup_liveness() when there is no RQ job
+                    # to consult (in-process thread fallback).
+                    "updated_at": time.time(),
                     "percent": round((i / total) * 100, 1) if total > 0 else 0,
                     "eta_seconds": eta_sec,
                     "eta_formatted": eta_str,
@@ -1201,15 +1516,22 @@ def run_batch_dataset_warmup_task(
                     try:
                         update_subtask("Speech Emotion Recognition")
                         from app.domain.model_loader_service import (
-                            predict_emotion_wave2vec_with_attention,
+                            predict_emotion_wave2vec,
                         )
                         # A wav2vec2 selection means the user picked a SER
                         # checkpoint; anything else warms the default.
                         ser_model = model if is_wav2vec else None
-                        ser = predict_emotion_wave2vec_with_attention(
-                            str(resolved_path), model_id=ser_model
-                        )
+                        # No attention pass, and attention is never cached -
+                        # the same shape /inferences/wav2vec2-detailed caches
+                        # (it recomputes if a caller ever asks for attention;
+                        # the UI never does). Warmup used to cache the full
+                        # attention: ~84 MB of JSON per clip, under six keys,
+                        # so a 2 GB Redis held a couple of dozen clips and
+                        # the (then) allkeys-lru policy evicted RQ's own queue lists and worker
+                        # locks to make room - jobs vanished from the queue.
+                        ser = predict_emotion_wave2vec(str(resolved_path), False, ser_model)
                         if ser is not None:
+                            ser = {**ser, "attention": None}
                             write(ck.ser_keys(hashes, ser_model), {"prediction": ser})
                             warmed.add("ser")
                     except Exception as err:
@@ -1327,6 +1649,7 @@ def run_batch_dataset_warmup_task(
         "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
         "cached_files": warmed_files,
         "failed_subtasks": len(failures),
+        "updated_at": time.time(),
     }
     if failures:
         logger.warning(

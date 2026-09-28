@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ...orchestration.task_orchestrator import (
@@ -85,6 +85,7 @@ async def post_batch_warmup(req: BatchWarmupRequest):
     import json
     from app.orchestration.task_orchestrator import get_queue, WorkerFamily, run_batch_dataset_warmup_task, get_redis_connection
 
+    import time
     job_id = f"warmup_{uuid.uuid4().hex[:12]}"
     try:
         conn = get_redis_connection()
@@ -97,6 +98,7 @@ async def post_batch_warmup(req: BatchWarmupRequest):
                 # dataset it belongs to. See GET /inference/warmup/active.
                 "dataset": req.dataset,
                 "model": req.model,
+                "updated_at": time.time(),
             }), ex=86400)
     except Exception as e:
         logger.warning(f"Could not initialize Redis progress for job {job_id}: {e}")
@@ -111,6 +113,9 @@ async def post_batch_warmup(req: BatchWarmupRequest):
             req.tasks,
             req.cooldown_ms,
             job_timeout=86400,
+            # The RQ job shares the warmup id so warmup_liveness() can tell a
+            # run that is executing from one whose worker died under it.
+            job_id=job_id,
         )
     except Exception as e:
         logger.warning(f"Fallback to background thread for batch warmup: {e}")
@@ -144,7 +149,10 @@ async def list_active_warmups():
     convenience for the common single-run case.
     """
     import json
-    from app.orchestration.task_orchestrator import get_redis_connection
+    from app.orchestration.task_orchestrator import (
+        get_redis_connection,
+        reconcile_warmup_progress,
+    )
 
     try:
         conn = get_redis_connection()
@@ -163,9 +171,13 @@ async def list_active_warmups():
                 data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
             except (ValueError, TypeError):
                 continue  # a malformed record must not hide the healthy ones
+            job_id = key_s[len("job_progress_"):]
+            # Drops runs whose worker is gone (marking them terminal), which
+            # previously sat here as "running" and were reattached forever.
+            data = reconcile_warmup_progress(conn, job_id, data)
             if data.get("status") not in ("running", "cancelling"):
                 continue
-            data["job_id"] = key_s[len("job_progress_"):]
+            data["job_id"] = job_id
             jobs.append(data)
 
         jobs.sort(key=lambda j: j.get("percent") or 0, reverse=True)
@@ -182,7 +194,10 @@ async def list_active_warmups():
 @router.get("/inference/progress/{job_id}")
 async def get_job_progress(job_id: str):
     import json
-    from app.orchestration.task_orchestrator import get_redis_connection
+    from app.orchestration.task_orchestrator import (
+        get_redis_connection,
+        reconcile_warmup_progress,
+    )
 
     try:
         conn = get_redis_connection()
@@ -194,24 +209,34 @@ async def get_job_progress(job_id: str):
             return {"job_id": job_id, "status": "not_found", "completed": 0, "total": 0, "percent": 0.0}
 
         data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-        return data
+        return reconcile_warmup_progress(conn, job_id, data)
     except Exception as e:
         return {"job_id": job_id, "status": "error", "error": str(e), "completed": 0, "total": 0, "percent": 0.0}
 
 
 @router.post("/inference/cancel/{job_id}")
 async def cancel_batch_job(job_id: str):
-    from app.orchestration.task_orchestrator import get_redis_connection
+    """Cancel a warmup run and report the state it is actually in.
+
+    This used to set a flag and unconditionally answer "cancelled", even when
+    no worker was left to read the flag - so a run orphaned by a worker
+    restart stayed "running" forever while the API claimed it had stopped.
+    Now the response is ``cancelling`` (a live worker will stop at its next
+    checkpoint) or ``cancelled`` (it was queued or orphaned, and is stopped
+    now).
+    """
+    from app.orchestration.task_orchestrator import cancel_warmup, get_redis_connection
 
     try:
         conn = get_redis_connection()
-        if conn:
-            conn.set(f"cancel_job_{job_id}", "1", ex=3600)
-            logger.info(f"Cancellation signal sent for job {job_id}")
+        result = cancel_warmup(conn, job_id)
+        logger.info("Cancellation for warmup %s -> %s", job_id, result.get("status"))
     except Exception as e:
-        logger.warning(f"Could not send cancellation signal to Redis: {e}")
+        logger.warning(f"Could not cancel warmup {job_id}: {e}")
+        raise HTTPException(status_code=503, detail=f"Could not reach the task broker: {e}")
 
-    return {"job_id": job_id, "status": "cancelled", "message": "Cancellation requested. Completed samples remain saved in cache."}
+    result["message"] = "Completed samples remain saved in cache."
+    return result
 
 
 @router.post("/cache/clear")
