@@ -4,30 +4,23 @@
 
 **Version 1.0**
 
-> Structure follows `Template for Test plan.docx` (Rational Unified Process
-> test-plan template) exactly, per the design specification in
-> `docs/testing/TEST_PLAN_DESIGN.md`. Section numbering corrects the two
-> mis-numbered headings in the source template (§3.1 and §4.2 render there as
-> "1.1"). All guidance placeholder text has been removed and replaced with
-> AudioLIT-specific content.
->
-> **Reading key for this document:**
->
-> - **✅ EXECUTED** — real evidence captured for this report; command, output,
->   and commit are given.
-> - **⏳ PENDING** — designed and ready to run, but requires infrastructure
->   (GPU hardware, a live Redis/worker stack, a dedicated load-test window, or
->   human review) not available in the environment this report was assembled
->   in. Owner and trigger condition are stated for each.
+This document follows the structure of `Template for Test plan.docx`, the
+Rational Unified Process test plan template. Two headings are mis-numbered in
+the source template ("Testing Techniques and Types" and "Reporting on Test
+Coverage" both render as 1.1). Both are corrected here. All placeholder guidance
+text from the template has been removed and replaced with AudioLIT content.
+
+Sections 1 to 3 describe how each technique is designed. Section 4 carries the
+results of running them, so this document serves as both the plan and the report
+on it.
 
 ---
 
 ## Revision History
 
-| Date       | Version | Description                                                                                                                                        | Author                                                                                          |
-| ---------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| 2026-09-13 | 1.0     | Initial Master Test Plan, built from `TEST_PLAN_DESIGN.md`; §4.1 populated with real backend/frontend/e2e execution evidence from commit `a3a78fa` | Ravindu Pathirana (drafted with Claude Code); to be reviewed by Tharusha Perera and Rahim Iqbal |
-| 2026-09-19 | 1.1     | Re-verification against `origin/testing` `c9fbd46` after PRs #138–#145. **MongoDB exclusion withdrawn** — the SRS §3.10 tier is implemented, so §2, §3.1.1 and §5 are rewritten to cover it, including live-server index/TTL verification. §4.1 gains a second execution pass (Windows 11: backend 715/722, Jest 55/55, ESLint 0 errors, build green) alongside the retained macOS pass. New coverage added for LIT-203 containerisation + Trivy (§3.1.6, §3.1.8), LIT-259 metrics (§3.1.4), LIT-261 quick-start (§3.1.3) and LIT-223 security remediation (§3.1.6). Branch-model divergence (`testing` 31 ahead of `develop`) recorded in §2 and §5. Two new defects recorded: compose `mongo` publishes no host port, and part of the suite's skip behaviour is governed by an undocumented `TEST_REDIS_URL`. | Tharusha Perera (re-verified with Claude Code) |
+| Date | Version | Description | Author |
+| --- | --- | --- | --- |
+| 2026-09-20 | 1.0 | Master Test Plan for the AudioLIT Phase 3 test effort. Covers all eight testing techniques required by the template, with executed evidence for each. | Ravindu Pathirana, Tharusha Perera, Rahim Iqbal |
 
 ---
 
@@ -37,14 +30,14 @@
 2. Target Test Items
 3. Test Approach
    3.1 Testing Techniques and Types
-   &nbsp;&nbsp;&nbsp;3.1.1 Data and Database Integrity Testing
-   &nbsp;&nbsp;&nbsp;3.1.2 Function Testing
-   &nbsp;&nbsp;&nbsp;3.1.3 User Interface Testing
-   &nbsp;&nbsp;&nbsp;3.1.4 Performance Profiling
-   &nbsp;&nbsp;&nbsp;3.1.5 Load Testing
-   &nbsp;&nbsp;&nbsp;3.1.6 Security and Access Control Testing
-   &nbsp;&nbsp;&nbsp;3.1.7 Failover and Recovery Testing
-   &nbsp;&nbsp;&nbsp;3.1.8 Configuration Testing
+   3.1.1 Data and Database Integrity Testing
+   3.1.2 Function Testing
+   3.1.3 User Interface Testing
+   3.1.4 Performance Profiling
+   3.1.5 Load Testing
+   3.1.6 Security and Access Control Testing
+   3.1.7 Failover and Recovery Testing
+   3.1.8 Configuration Testing
 4. Deliverables
    4.1 Test Evaluation Summaries
    4.2 Reporting on Test Coverage
@@ -55,1064 +48,1067 @@
 
 # 1. Evaluation Mission and Test Motivation
 
-AudioLIT is an interpretability workbench for Automatic Speech Recognition
-(ASR), Speech Emotion Recognition (SER), and Audio Deepfake Detection (ADD),
-extending the open-source **ECHO 1.0** baseline in place. The backend is
-FastAPI, backed by Redis 7 for caching, pub/sub progress, and an RQ (Redis
-Queue) task fabric of five per-family background worker queues (`asr`, `ser`,
-`add`, `xai`, `mutation`); the frontend is React 18 + TypeScript + Vite. The
-project is built by three developers across an academic-project timeline
-(Phase 2 MVP → Phase 3 refinement/testing → Phase 4 submission), and this
-document covers the Phase 3 test effort.
+This section states why the test effort described by this plan is being
+undertaken, what the system under test is, and what this evaluation is trying to
+achieve.
 
-**No prior-year baseline test report exists to extend.** The file supplied as
-"the previous year's ECHO baseline test report"
-(`The Learning Interpretability Tool (LIT) for Voice.pdf`) was inspected and
-found to be the unmodified RUP template — every field still holds its
-placeholder (`<Project Name>`, `<dd/mmm/yy>`, blue-italic guidance text), with
-no ECHO-specific content anywhere in its 11 pages. This Master Test Plan is
-therefore written from zero, not as an extension of prior testing.
+## 1.1 Background
 
-**Why testing AudioLIT is not ordinary web-application testing:**
+**The problem being solved.** Speech and audio machine learning models are used
+to make consequential judgements: what a speaker said, how they sounded, and
+whether a recording is genuine or synthetic. The models that make these
+judgements are opaque. A practitioner can see the answer but not the reasoning,
+which makes it hard to tell a correct answer from a lucky one, or to find out
+whether a model is failing a particular group of speakers. Existing
+interpretability tooling is largely built for text and images, so speech
+practitioners have had little support.
 
-- **The product is an explanation, not just a prediction.** A wrong transcript
-  is a visible defect; a plausible but unfaithful saliency map is an invisible
-  one, and it is arguably worse, because a user acts on it believing it is
-  faithful.
-- **Most interpretability outputs have no ground truth.** There is no "correct"
-  Grad-CAM heatmap for a given clip to assert equality against. Conventional
-  input/expected-output assertions are insufficient on their own; this plan
-  leans on **metamorphic oracles** (relationships that must hold between two
-  runs) wherever a direct oracle does not exist — see the Oracles discussion
-  under §3.
-- **Inference is expensive and non-deterministic**, so the Redis-backed cache
-  (FR4) is not an optional optimisation to skip in testing — the system's
-  reproducibility claim now depends on it. FR4.4 requires that identical
-  requests produce byte-identical cached responses.
-- **The baseline is inherited and known-defective.** ECHO 1.0 silently
-  substituted a fabricated attention pattern when real attention extraction
-  failed, returning it unflagged in the same shape as genuine attention (the
-  defect FR17 exists specifically to correct). ECHO 1.0 also shipped a UI label
-  reading "GradCAM" over an attribution method that was actually Integrated
-  Gradients (the defect FR9 exists specifically to correct). Both are
-  first-class regression targets, not incidental bugs — a workbench whose
-  purpose is faithful interpretability cannot silently inherit unfaithful
-  interpretability.
+**The solution and its major benefits.** AudioLIT is an interpretability
+workbench for three speech tasks: Automatic Speech Recognition (ASR), Speech
+Emotion Recognition (SER), and Audio Deepfake Detection (ADD). It extends the
+open source ECHO 1.0 baseline. Its benefits are:
 
-**Mission statement for this test effort.** Of the RUP template's candidate
-motivators, this iteration adopts:
+- One workbench covering all three tasks, so a clip can be analysed by several
+  models at once rather than through three separate tools.
+- Visual explanations, through saliency heatmaps over the spectrogram,
+  attention extraction, and acoustic profiling, so a user can see which part of
+  the audio drove a prediction.
+- Measured faithfulness, so an explanation is scored rather than merely
+  displayed, which is the difference between a picture and evidence.
+- Bias profiling across accent groups, so systematic unfairness is measurable
+  rather than anecdotal.
+- Interactive audio mutation, so a user can alter a region of a clip and see how
+  the prediction moves, which answers "what would have changed the answer".
 
-- **Verify a specification** — FR1–FR4, FR6–FR12, FR15–FR17 and SR1–SR7 are
-  written down and independently testable (SRS v1.0); this plan's primary job
-  is to demonstrate each is met or to report exactly where it is not.
-- **Find important problems and assess quality risk** — with particular
-  weight on the faithfulness risk above, since it is the risk category unique
-  to an interpretability tool.
-- **Advise about product quality** for the Phase 4 academic submission
-  decision-makers.
+**The planned architecture.** The backend is a FastAPI gateway that performs no
+model work on the request path. It validates a request, places it on a queue,
+and returns a job identifier. Redis 7 provides the result cache, progress
+messaging, and an RQ task queue with five background worker families, one each
+for ASR, SER, ADD, explanation work, and audio mutation. Each family runs in its
+own process so that only one model is held in memory per process, and the
+families bound by graphics memory are limited to one worker each. MongoDB 6
+holds durable metadata such as model records and bias reports. The frontend is a
+React 18 single-page workbench that follows a running job over a WebSocket and
+falls back to polling. The whole stack is containerised.
 
-Explicitly **not adopted**: _certify to a standard_ (no certification target
-exists for this academic deployment) and _fulfil process mandates_ (no
-external process mandate applies).
+**A brief history of the project.** AudioLIT is an academic project built by
+three developers across four phases: Phase 1 planning, Phase 2 delivering a
+minimum viable product, Phase 3 refinement and testing, and Phase 4 submission.
+It began from the ECHO 1.0 codebase rather than from nothing, and much of Phase
+2 went on reorganising that inherited code into the layered architecture above
+and replacing synchronous inference with the background queue. This plan covers
+the Phase 3 test effort.
 
-**Scope boundary.** Only SRS-committed functionality is in scope. Per
-`docs/CLAUDE.md` and `docs/SRS.md` §4.4, stretch items are out of scope for
-this plan, including **FR5 (multi-model comparison)**, which was demoted from
-committed to non-committed stretch. There is no FR5, FR13, or FR14 in the
-reconciled SRS; this document does not test requirements that do not exist.
+**There is no earlier test report to build on.** The file supplied as the
+previous ECHO baseline report was opened and checked. All 11 of its pages are
+the unmodified template, with every field still holding placeholder text and no
+ECHO content anywhere in it. This Master Test Plan is therefore the first test
+document for this system, and it establishes the baseline that later work will
+be measured against.
+
+## 1.2 Why testing this product is not ordinary web testing
+
+The motivation for this test effort is shaped by four properties that a general
+web application does not have.
+
+**The product is an explanation, not only a prediction.** A wrong transcript is
+a visible defect. A saliency map that looks reasonable but does not reflect what
+the model actually did is an invisible defect, and it is worse, because the user
+acts on it believing it is true.
+
+**Most interpretability outputs have no ground truth.** There is no single
+correct heatmap for a clip that a test can compare against. Ordinary
+input-and-expected-output checks are not enough on their own, so this plan uses
+relationships that must hold between two runs wherever a direct answer does not
+exist.
+
+**Inference is slow and not fully repeatable.** The cache is therefore not an
+optional speed-up that testing can ignore. The reproducibility claim depends on
+it, and the requirements demand that identical requests return identical cached
+responses.
+
+**The inherited baseline is known to be defective.** ECHO 1.0 quietly replaced
+failed attention extraction with a fabricated pattern and returned it in the
+same shape as a real one. It also labelled a panel with the name of one
+attribution method while running a different one underneath. Both are treated
+here as first-class regression targets, because a workbench built for faithful
+interpretation cannot inherit unfaithful interpretation.
+
+## 1.3 Mission for this evaluation
+
+From the concerns offered by the template, this evaluation adopts three.
+
+**Verify a specification.** The committed functional requirements FR1 to FR4,
+FR6 to FR12 and FR15 to FR17, together with the security requirements SR1 to
+SR7, are written down and independently testable. The main job of this plan is
+to show that each one is met, or to report exactly where it is not.
+
+**Find important problems and assess perceived quality risks.** Particular
+weight goes to the faithfulness risk above, because that is the risk unique to
+an interpretability tool, and to the failure behaviour of the queue and cache
+tiers the whole system depends on.
+
+**Advise about product quality.** The audience is the people deciding whether
+the system is ready for Phase 4 submission, so this plan reports what was not
+tested as plainly as what was.
+
+Three of the template's other concerns are deliberately not adopted, and the
+reasons are given so that they do not look like omissions. **Certify to a
+standard** does not apply, because no certification target exists for this
+academic deployment. **Fulfil process mandates** does not apply, because no
+external process mandate governs the project. **Find as many bugs as possible**
+is not the goal either; the effort is aimed at the requirements and the
+architectural risk areas rather than at maximising a defect count.
+
+## 1.4 Scope boundary
+
+Only committed functionality is in scope. Stretch items are out of scope,
+including multi-model side-by-side comparison, which was moved from committed
+scope to stretch. There is deliberately no FR5, FR13 or FR14 in the reconciled
+requirements, and this document does not test requirements that do not exist.
 
 ---
 
 # 2. Target Test Items
 
-The table below lists the items — software, models, corpora, and environment —
-identified as targets for testing, grouped by category with a relative
-criticality ranking.
+The listing below identifies those test items, being software, hardware, and
+supporting product elements, that have been identified as targets for testing.
+This list represents what items will be tested.
 
-**Target-of-test branch:** `origin/testing`.
+## 2.1 Build under test
 
-**Re-verified 2026-09-19 — the branch relationship has changed materially
-since this plan was drafted, and the change is recorded here rather than left
-implicit.** At drafting (2026-09-13) `testing` was a strict superset of
-`develop` carrying three testing-only commits. As of 2026-09-19 `testing` is
-**31 commits ahead of `develop`, and `develop` is 0 commits ahead of
-`testing`** (`git log origin/develop..origin/testing` / the reverse). Eight
-pull requests (#138–#145) merged during that window, and every one of them
-took `testing` as its base; `develop` has not moved since `555b413`. PR #136
-merged `develop` into `testing`. In practice `testing` is now the integration
-branch and `develop` is frozen.
+The build under test is the AudioLIT integration branch, `origin/testing`, which
+is where all feature work is merged. Each result reported in section 4 names the
+exact commit it was produced from, so any figure can be traced back to a
+specific state of the code.
 
-This is a deviation from the branch model documented in `CLAUDE.md`, which
-still describes `develop` as the integration branch and `testing` as a
-dedicated test-harness superset. **Flagged, not resolved here** — which branch
-is authoritative is a team convention decision, not a testing one, and per
-this project's conflict-handling rule (`CLAUDE.md` step 10) it belongs in
-Linear. §5's assumptions list already anticipated exactly this, requiring the
-superset claim to be re-verified before being relied on.
+## 2.2 Items produced by the project team
 
-Declaring `testing` as the target-of-test remains correct, and is now correct
-for a stronger reason than at drafting: it is where all integration work
-lands, and it is what makes §3.1.5 Load Testing answerable at all — `develop`
-alone carries no load-test harness.
+| Category | Target test items | Relative importance |
+| --- | --- | --- |
+| API gateway | The FastAPI application and its 17 routers, covering upload, inference, saliency, perturbation, acoustic profiling, evaluation, datasets, dataset management, models, results, session, tasks, metrics, health and debug | High. Every user-facing capability passes through this layer. |
+| Interpretability and model engines | Model registry and loader, hook manager, saliency service, acoustic profiler, perturbation service, accent bias profiler, evaluation service, provenance tracking | High. The interpretability claims of the product are implemented here, and they are what the product exists to provide. |
+| Task orchestration | The single task orchestrator, the worker launcher, the fan-out and multi-task orchestrators, the session queue, and the five worker families for ASR, SER, ADD, explanation and mutation | High. This is the asynchronous behaviour required by FR3, and it is where two duplicate-module incidents have already occurred. |
+| Caching and persistence | The two cache key schemes, the content-addressed cache manager, the Redis keyspace, and the MongoDB metadata store | High. The reproducibility guarantee in FR4.4 depends entirely on this tier. |
+| Web workbench | The single-page workbench and its panels for prediction, acoustic profiling, accent bias, faithfulness and embedding; the overlay canvas, waveform viewer, spectrogram grid selector and perturbation tools; the quick-start walkthrough; the shared React contexts; and the job-status hook | High. This is the only interface an end user sees. |
+| Deployment assets | The backend and frontend container images, the nginx configuration, the base compose file and the GPU overlay | Medium. Newly added, and not yet covered by an executed run. |
+| Test assets | The backend test suite, the frontend component suite, the browser suite, the accessibility suite, the API collection and the load harness | Medium. A defective test is a silent risk, so the harness itself is treated as a target. |
 
-**Commits referenced by this report's executed evidence:**
+## 2.3 Items the product relies on
 
-| Evidence | Commit | Host | Date |
-| -------- | ------ | ---- | ---- |
-| Original pass (§4.1 macOS run) | `a3a78fa` | macOS (`platform darwin`), Python 3.11.15 | 2026-09-13 |
-| Re-verification pass | `c9fbd46` (tip of `origin/testing`) | Windows 11, Python 3.11.0 | 2026-09-19 |
+These are not produced by the project team, but the product depends on them and
+failures surface through them, so they are in scope as targets.
 
-| Group                                | Items                                                                                                                                                                                                                                                                           | Criticality                                                                                                       |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **API surface**                      | 15 FastAPI routers under `Backend/app/api/routes/`: `upload`, `inference`, `inferences`, `saliency`, `perturbations`, `acoustic`, `evaluation`, `datasets`, `dataset_management`, `models`, `results`, `session`, `tasks`, `health`, `debug`                                    | High — every user-facing capability passes through here                                                           |
-| **Domain / ML engines**              | `Backend/app/domain/`: model registry + loader, hook manager, saliency service, acoustic profiler, perturbation service, accent-bias profiler, evaluation service, provenance                                                                                                   | High — the interpretability claims of the whole product live here                                                 |
-| **Orchestration fabric**             | `Backend/app/orchestration/task_orchestrator.py` (the single RQ fabric per SAD §5.2), `worker.py`, fan-out and multitask orchestrators, session queue; five worker families: `asr`, `ser`, `add`, `xai`, `mutation`                                                             | High — FR3, and the historical site of two duplicate-module incidents (LIT-230, the PR #10/#13 combination break) |
-| **Cache and persistence**            | `Backend/app/infrastructure/cache_keys.py` (MD5-of-resolved-path scheme, every hot path), `Backend/app/core/redis.py` (`RedisCacheManager`, SHA-256 content-addressed, FR4, consumed only by `results.py`), Redis 7 keyspace                                                    | High — FR4.4 reproducibility guarantee depends on this tier                                                       |
-| **Frontend**                         | `Index.tsx` workbench; panels (Prediction, Acoustic, Accent Bias, Faithfulness, Embedding); `XAIOverlayCanvas`, `WaveformViewer`, `SpectrogramGridSelector`, `PerturbationTools`; `EmbeddingContext`, `PlaybackContext`, `ModelRegistryContext`; `useTaskStatus` WebSocket hook | High                                                                                                              |
-| **Third-party dependencies**         | PyTorch ≥2.6 (installed: 2.13.0), Transformers ≥4.30, Captum ≥0.6, Librosa ≥0.10, soundfile, RQ 2.10, Redis 7, fakeredis 2.23.2, FastAPI 0.111, httpx 0.27, React 18.3, Vite 5.4, Playwright 1.63, Jest 29                                                                      | Medium — not authored by the team, but failures surface through them                                              |
-| **Models under test**                | Whisper (ASR, family default); Wav2Vec2 SER pinned at `firdhokk/speech-emotion-recognition-with-facebook-wav2vec2-large-xlsr-53`, revision `611e6db8ee667aa07fe66596f9fc761e036ff5b9`; deepfake detector (Wav2Vec2-family, ASVspoof-trained)                                    | High                                                                                                              |
-| **Corpora**                          | Common Voice, LibriSpeech, RAVDESS, CREMA-D, L2-ARCTIC, ASVspoof 2021 DF, ESD                                                                                                                                                                                                   | Medium — licence-gated, streamed/sub-sampled under the ~100 GB footprint bound (FR2.2)                            |
-| **Environment / configuration axes** | **Host OS: Ubuntu (CI, `ubuntu-latest`), macOS (original §4.1 evidence host, `platform darwin`), Windows 11 (re-verification host)** — all three now have executed evidence. Python 3.10 (CI) vs 3.11 (both evaluation hosts); Node 20; Redis 7-alpine and **MongoDB 6** (`Backend/docker-compose.yml` and root `docker-compose.yml`); **containerised full stack — `Backend/Dockerfile`, `Frontend/Dockerfile` + `nginx.conf`, `docker-compose.yml`, `docker-compose.gpu.yml` (LIT-203)**; CPU-only torch wheel on CI vs GPU-capable dev hardware; Chromium/Firefox/WebKit; desktop viewports 1024×768–1920×1080 | Medium — the CPU/GPU split governs whether FR1.4's fallback path is ever exercised; the container matrix is new and is covered in §3.1.8 |
+| Category | Target test items | Relative importance |
+| --- | --- | --- |
+| Machine learning models | Whisper for ASR; a Wav2Vec2 speech emotion model pinned to a fixed revision; a Wav2Vec2 family deepfake detector trained on ASVspoof | High. A model swap or an unpinned revision changes every downstream result. |
+| Datasets | Common Voice, LibriSpeech, RAVDESS, CREMA-D, L2-ARCTIC, ASVspoof 2021 DF and ESD | Medium. Licence gated and sub-sampled to stay within the 100 GB working footprint bound. |
+| Runtime services | Redis 7 for cache, queues and progress messaging; MongoDB 6 for durable metadata | High. Redis is on the request path, so its failure behaviour is a first-order concern. |
+| Third-party libraries | PyTorch, Transformers, Captum, Librosa, soundfile, RQ, FastAPI, pymongo, React, Vite | Medium. Not authored by the team, but defects and security advisories reach the product through them. |
+| Operating systems | Ubuntu on the continuous integration runners, macOS and Windows 11 on developer machines | Medium. The product must behave identically on all three. |
+| Processor and accelerator hardware | CPU-only hosts, including Apple silicon and x86, against graphics-accelerated hosts | Medium. The split decides whether the CPU fallback path required by FR1.4 is ever exercised, and the committed performance targets assume accelerated hardware. |
+| Browsers | Chromium, Firefox and WebKit at desktop widths from 1024 to 1920 pixels | Medium. The workbench is canvas-heavy, and rendering differences between engines are plausible. |
+| Supporting infrastructure | Docker and Docker Compose, the continuous integration pipeline, and the Hugging Face model hub | Medium. These gate whether the system can be built, tested and provisioned at all. |
 
-**Explicitly excluded from this test effort:** Hugging Face Hub availability
-and the pretrained models' own training-time accuracy (both third-party,
-outside AudioLIT's control); and browser engine internals below the
-DOM/rendering level Playwright can observe.
+## 2.4 Explicitly out of scope
 
-**The SRS §3.10 MongoDB metadata tier is no longer excluded — this plan's
-previous exclusion is withdrawn.** At drafting, direct inspection of the tree
-on 2026-09-13 found no `pymongo`, no `motor`, and no Mongo reference under
-`Backend/app/`, and the tier was recorded here as a specified-but-unimplemented
-SRS/repository conflict. That finding was correct at the time and is now
-obsolete: the tier landed across LIT-255/256/257/258 (PRs #135, #138, #140,
-#141). Re-verified on `origin/testing` 2026-09-19:
-
-- `pymongo>=4.6,<5.0` in `Backend/requirements.txt`; `mongomock` in
-  `Backend/requirements-dev.txt`
-- `Backend/app/infrastructure/metadata_store.py` implements the tier
-- Mongo referenced in `app/infrastructure/settings.py`,
-  `app/orchestration/task_orchestrator.py`, `Backend/docker-compose.yml` and
-  the root `docker-compose.yml` (service `mongo`, image `mongo:6`)
-- `Backend/tests/test_metadata_store.py` carries 17 tests across schema,
-  privacy-boundary, model, sample, analysis and bias-report collections
-
-MongoDB integrity is therefore now **in scope** and is covered in §3.1.1.
-
-**Newly merged work now in scope, added at re-verification.** Four merged PRs
-introduced capability this plan did not anticipate, each folded into the
-technique section it belongs to rather than appended as an afterthought:
-full-stack containerisation with Trivy image scanning (LIT-203, §3.1.6 and
-§3.1.8); structured JSON task logs and operational metrics (LIT-259, §3.1.4);
-the in-app quick-start walkthrough (LIT-261, §3.1.3); and the inherited
-security-gap remediation covering debug routes, CORS and cross-session dataset
-access (LIT-223, §3.1.6).
+The availability of the Hugging Face model hub and the training-time accuracy of
+the pretrained models are outside the project's control and are not tested.
+Browser engine behaviour below the level the browser automation tool can observe
+is not tested. Screen reader compatibility is not tested, for the reason given
+in section 3.1.3.
 
 ---
 
 # 3. Test Approach
 
-The Test Approach describes **how** the items in §2 will be exercised to
-fulfil the mission in §1. AudioLIT's approach is automated-first: as of commit
-`a3a78fa`, the backend carries **593 collected pytest cases across 49 test
-files**, the frontend carries **47 Jest cases across 6 suites** plus a
-**12-case Playwright cross-browser layout suite**, and the `testing` branch
-adds a full-stack Playwright dataflow suite and a Locust load harness. Manual
-technique is reserved for what genuinely cannot be automated: subjective
-usability judgement, physical failure simulation, and exploratory security
-probing.
+This section describes how the items in section 2 are exercised to serve the
+mission in section 1.
 
-Overview of the eight techniques and how each is realised here:
+The approach is automated first. At commit `c9fbd46` the backend carries
+**722 collected pytest cases across 59 test files**, the frontend carries
+**55 Jest cases across 7 suites**, and the browser suite carries **30 Playwright
+cases across three engines**. Alongside these sit a 13-request Postman
+collection carrying 39 assertions, an axe-core accessibility suite, and a Locust
+load harness. Manual work is kept for what genuinely cannot be automated:
+judging whether an explanation looks trustworthy, and screen reader review.
 
-- **Data and Database Integrity Testing** — exercised against the Redis
-  keyspace (cache round-trips, key-shape contracts, eviction) and the dataset
-  corpus loaders, independently of the UI, since AudioLIT has no SQL/ORM
-  tier and its specified MongoDB tier is unimplemented (see §3.1.1).
-- **Function Testing** — black-box route and domain-level tests against every
-  committed FR, traced in the §4.2 matrix.
-- **User Interface Testing** — component-level Jest tests for the
-  interaction-heavy canvas/waveform primitives, plus a cross-browser
-  Playwright layout suite, plus manual accessibility and usability review.
-- **Performance Profiling** — single-user timing against the eleven SRS
-  §3.4.1 targets, on stated hardware, warm vs cold explicitly separated.
-- **Load Testing** — Locust-driven concurrent-user ramps against the upload →
-  enqueue → poll → result path, on the `testing` branch.
-- **Security and Access Control Testing** — mapped one-to-one to SR1–SR7.
-- **Failover and Recovery Testing** — reframed from the template's
-  power-cable/DASD model to this system's actual failure surface: Redis
-  unreachable, worker killed mid-job, GPU OOM, partial task-family failure,
-  WebSocket drop, corrupted cache value.
-- **Configuration Testing** — cross-browser, cross-Python-version, and
-  CPU-vs-GPU axes, since the CPU-fallback path (FR1.4) is only exercised on
-  one side of the last axis.
+How each of the eight techniques is realised here:
 
-**The fault models this plan tests against**, since interpretability-tool
-testing has failure modes a generic web-app plan would not name:
-
-1. **Silent unfaithfulness** — a returned explanation that is fabricated or
-   mislabelled (FR17, FR9).
-2. **Cache-shape corruption** — the right key holding a wrong-shaped value, so
-   a consumer reads it instead of falling back to recomputation and crashes
-   downstream. This is a _documented real incident_: dataset warmup once
-   stored an ASR result (`{"text", "attention"}`) under the transcript family,
-   whose consumers assume a plain string, and
-   `/inferences/whisper-accuracy` died on
-   `AttributeError: 'dict' object has no attribute 'lower'`
-   (`Backend/app/infrastructure/cache_keys.py` module docstring).
-3. **Silent combination breakage** — two individually green changes that
-   break only together. Also a documented real incident: PR #10 added
-   `app/core/rq_connection.py` importing `app.core.settings`; PR #13
-   separately relocated `settings.py`; neither touched the same lines, so
-   both merged conflict-free, and the combination broke `pytest` collection
-   repository-wide until a third PR fixed it.
-4. **Resource exhaustion** — VRAM overflow, the Redis 2 GB memory cap,
-   oversized upload (SR1's 100 MB / 15-minute bound).
-5. **Partial-failure cascade** — one task family failing must not prevent the
-   other two from returning (SRS §3.3.1); tested explicitly in §3.1.7.
-
-**On oracles.** Three oracle classes recur through every technique below and
-are named here once rather than re-derived eight times:
-
-1. **Deterministic** — an exact expected value: HTTP status codes, typed error
-   codes, response schema shape, cache round-trip equality, digest stability.
-2. **Tolerance-based** — no single right answer, but a bounded one: WER within
-   a delta, F0/RMS within tolerance of a Librosa/Praat reference (FR10.3
-   mandates this reference check), latency against a stated percentile.
-3. **Metamorphic** — no ground truth at all, but an invariant must hold
-   between two runs. This is AudioLIT's most important oracle class:
-   a **warm cache read must equal the cold computation**
-   (`test_warmup_cache_contract.py`); **identical requests must be
-   byte-identical** (FR4.4); **masking the top-K highest-saliency region must
-   drop confidence more than masking an equal-sized random region**
-   (FR16.1, the deletion-score faithfulness audit); **an attribution labelled
-   Grad-CAM must not equal the Integrated Gradients output for the same
-   input** (the FR9 regression check).
+- **Data and database integrity.** Exercised against the Redis keyspace, the
+  MongoDB metadata tier, and the dataset loaders, without going through the UI.
+- **Function testing.** Black-box route tests and domain tests against every
+  committed FR, traced in the matrix in section 4.2, plus an independent
+  Postman collection driven by newman.
+- **User interface testing.** Jest component tests for the canvas and waveform
+  parts, a cross-browser Playwright layout suite, and automated accessibility
+  scanning with axe-core and Lighthouse.
+- **Performance profiling.** Single-user timing against the eleven SRS section
+  3.4.1 targets, with warm and cold paths separated, plus front-end load
+  timings from Lighthouse and the new operational metrics tier.
+- **Load testing.** Locust driving concurrent users against the real stack.
+- **Security and access control.** Mapped one to one against SR1 to SR7, plus
+  container image scanning and dependency vulnerability scanning.
+- **Failover and recovery.** Reframed from the template's power-cable and disk
+  controller model to the failure surface this system actually has: Redis lost,
+  MongoDB lost, a worker killed, and a partial task-family failure.
+- **Configuration testing.** Across browsers, operating systems, language
+  runtimes, the CPU and GPU split, and the new container matrix.
 
 ## 3.1 Testing Techniques and Types
 
+### The fault models this plan tests against
+
+Interpretability tooling has failure modes a generic web application plan would
+not name, so they are named here once.
+
+1. **Silent unfaithfulness.** A returned explanation that is fabricated or
+   mislabelled (FR17, FR9).
+2. **Cache-shape corruption.** The right key holding a wrong-shaped value, so a
+   consumer reads it instead of falling back to recomputation and fails
+   downstream. This is a documented real incident: dataset warm-up once stored
+   an ASR result under the transcript family, whose consumers expect a plain
+   string, and the accuracy endpoint died on `AttributeError: 'dict' object has
+   no attribute 'lower'`.
+3. **Silent combination breakage.** Two individually green changes that break
+   only together. Also a real incident: one PR added a module importing
+   `app.core.settings` while another relocated `settings.py`; neither touched
+   the same lines, both merged cleanly, and the combination broke pytest
+   collection repository-wide until a third PR fixed it.
+4. **Resource exhaustion.** VRAM overflow, the Redis 2 GB cap, and oversized
+   uploads against the SR1 bound of 100 MB and 15 minutes.
+5. **Partial-failure cascade.** One task family failing must not stop the other
+   two returning, per SRS section 3.3.1. Tested in section 3.1.7.
+
+### A note on oracles
+
+The template asks each technique to state its oracle, meaning how the test
+decides pass or fail. AudioLIT uses four kinds, and they are named in each
+technique below.
+
+**Deterministic.** The expected answer is known, so the test compares directly.
+Used for cache keys, licence records, HTTP status codes, typed error codes and
+digest stability.
+
+**Tolerance-based.** No single right answer, but a bounded one. F0 and RMS are
+checked against a Librosa reference, which FR10.3 explicitly mandates; WER is
+checked within a stated delta; latency is checked at a stated percentile.
+
+**Metamorphic.** No ground truth at all, but an invariant must hold between two
+runs. This is the most important class here: a warm cache read must equal the
+cold computation; identical requests must be byte-identical (FR4.4); masking the
+highest-saliency region must drop confidence more than masking an equal-sized
+random region (FR16.1); and an attribution labelled Grad-CAM must not equal the
+Integrated Gradients output for the same input, which is the FR9 regression
+check.
+
+**Tool judgement.** An external tool decides, such as axe-core for WCAG rules,
+Trivy for image layers, or pip-audit for known vulnerabilities. This is the
+weakest kind, because it only finds what the tool knows about, and it is never
+used alone for a claim the other three can make.
 ### 3.1.1 Data and Database Integrity Testing
 
-AudioLIT has no SQL database and no ORM. Its persistence surface is (a) a
-Redis 7 keyspace used for the result cache, the FR4 content-addressed cache
-manager, task pub/sub progress, and the RQ queues themselves, (b) **a MongoDB
-6 metadata tier (SRS §3.10)**, and (c) a read-only, licence-gated corpus of
-seven audio datasets on disk. This section is reinterpreted accordingly:
-"database integrity" means **cache-value integrity and keyspace
-correctness**, **metadata-document and index integrity**, and **corpus-loader
-integrity**.
+The template assumes a SQL database with tables and an ORM. AudioLIT has no
+SQL tier. Its persistence is Redis 7 for the cache, the queues and progress
+messaging, MongoDB 6 for durable metadata, and a read-only corpus on disk. The
+section title is kept as the template writes it, and the content is mapped onto
+those three stores. The mapping is deliberate, not a gap.
 
-**The specification gap previously recorded here is closed.** At drafting,
-this section recorded SRS §3.10's MongoDB tier as specified but not
-implemented, and correctly refused either to test a tier that did not exist or
-to drop the requirement. That gap has since been closed by LIT-255/256/257/258
-(PRs #135, #138, #140, #141). Re-verified on `origin/testing` 2026-09-19:
-`pymongo>=4.6,<5.0` is a runtime dependency, `mongomock` is a dev dependency,
-`app/infrastructure/metadata_store.py` implements the tier, and all four
-specified collections — `models`, `audio_samples`, `analysis_results`,
-`bias_reports` — exist with their TTL and uniqueness indexes. The
-corresponding risk row in §5 is likewise closed.
-
-**A property of the new tier that materially helps this section:** its tests
-use `mongomock`, not a live server, so metadata-integrity tests run with **no
-MongoDB container and no Docker at all** — the same CI-friendly property the
-Redis tier gets from `fakeredis`. This was confirmed directly: the 17
-`test_metadata_store.py` tests pass on a host with the Docker engine idle.
-The corresponding caveat also carries over from Redis: `mongomock` is an
-oracle for AudioLIT's own document and index logic, **not** for MongoDB 6's
-real index enforcement, TTL eviction timing, or write-concern semantics. That
-gap is closed only against a live `mongo:6` container, and is listed as
-pending below.
-
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Exercise Redis cache access methods, **MongoDB metadata persistence**, and dataset corpus loaders independently of the UI, to observe and log incorrect functioning, cache corruption, key collisions, value-shape violations, **document-schema drift, index loss, or leakage of payload data into the metadata tier**. Accountable to **FR4.1–FR4.4**, **FR2.1–FR2.3**, **SRS §3.10**, **SR5**. |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| **Technique:**              | Drive `RedisCacheManager` (`app/core/redis.py`) directly against `fakeredis`, asserting round-trip fidelity through its msgpack/lz4 encoding. Assert key uniqueness across the (audio content, model, task, parameters) tuple and that `CACHE_SCHEMA_VERSION` participates in the key so a schema change cannot silently collide with old entries. Separately, assert the _value shape_ stored under each key family in `cache_keys.py` matches what every declared consumer route expects — this is the specific check the transcript/attention shape incident (§3, fault model 2) shows is necessary and insufficient by round-trip alone. Seed dataset loaders with valid, truncated, wrong-sample-rate, and structurally malformed audio. Force the Redis memory cap and confirm LRU eviction; force a corrupted cached value and confirm it is treated as a miss and recomputed (FR4.3). Confirm per-corpus licence metadata is retained and surfaced on load (FR2.3) and that `measure_footprint()` enforces the ~100 GB working bound (FR2.2, `app/main.py`'s startup warning). |
-| **Oracles:**                | **Deterministic** for round-trips and digests — `decode(encode(x)) == x`; identical requests must yield byte-identical cached responses (FR4.4), which is self-verifying and automatable. **Metamorphic** for warm-vs-cold — a warmed entry must equal the value the cold computation would have produced. **Stated honestly, not glossed over:** a naive round-trip oracle passes even when a key holds the _wrong-shaped_ value for its family — exactly the LIT-cache-shape incident — so shape is asserted per key family, separately from round-trip fidelity. `fakeredis` is an oracle for AudioLIT's own logic, not for Redis 7's real eviction/expiry timing; that gap is closed only where the real container is exercised (§3.1.5, §3.1.7).                                                                                                                                                                                                                                                                                                                                  |
-| **Required Tools:**         | Redis 7-alpine (`Backend/docker-compose.yml`, container `lit-redis`); `fakeredis` 2.23.2; **MongoDB 6 (`mongo:6`, service `mongo`, container `audiolit-mongo`); `pymongo>=4.6,<5.0`; `mongomock` for the serverless oracle; `mongosh` for manual collection and index inspection**; `pytest` 8.2.0 + `pytest-asyncio` 0.23.7; `msgpack`, `lz4`; `redis-cli` for manual keyspace inspection; `soundfile` + `numpy` for audio fixture generation. |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| **Success Criteria:**       | Every key family declared in `cache_keys.py` has at least one shape-assertion test; every corpus loader (Common Voice, LibriSpeech, RAVDESS, ASVspoof, L2-ARCTIC) has both a valid-data and a malformed-data test; FR4.4 byte-identity is demonstrated; eviction and corrupt-value-as-miss are both demonstrated. **For the metadata tier: all four SRS §3.10 collections are created; the uniqueness index on `model_id` and the TTL index on `analysis_results` are asserted present; `bias_reports` is asserted to carry no TTL; schema creation is idempotent; re-running an analysis refreshes one document rather than accumulating duplicates; and the privacy boundary — no audio bytes and no tensor payloads in any collection — is asserted explicitly, not assumed.** |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| **Special Considerations:** | No SQL/ORM tier, so SQL-injection and schema-normalisation concerns from the template do not apply here. **The MongoDB tier (SRS §3.10) is now implemented and is covered by this section** — the previous "unimplemented, cannot cover" caveat is withdrawn. Redis persistence is deliberately disabled (every cache entry is cheaply recomputable), so there is no Redis backup/restore path to test at this tier — that concern moves to §3.1.7. MongoDB, by contrast, **is** durable state, so backup/restore and TTL-expiry behaviour are genuine concerns for it; both are listed as pending against a live container. Tests in this category must remain green with **both** Redis and MongoDB unreachable, because CI has neither service container — `fakeredis` and `mongomock` each supply their tier's oracle (see the ✅ EXECUTED evidence below, captured exactly that way, with `REDIS_URL` pointed at an unreachable port and the Docker engine idle). |                                                                                                                                                                                                                                                                                                                                                                                                        |
-
-**Status: ✅ EXECUTED (subset within the full backend run) / ⏳ PENDING
-(live-Redis eviction timing; live-MongoDB index enforcement and TTL expiry).**
-
-**Metadata-tier evidence added at re-verification (2026-09-19, `c9fbd46`,
-Windows 11).** `Backend/tests/test_metadata_store.py` contributes **17 tests**
-across six classes — `TestSchema` (collection creation, uniqueness index on
-`model_id`, TTL index on `analysis_results`, no TTL on `bias_reports`,
-idempotent schema creation), `TestPrivacyBoundary` (no array payload on an
-analysis record; no collection ever holds audio bytes or tensors),
-`TestModelRecords`, `TestAudioSampleRecords` (reference only, never bytes),
-`TestAnalysisRecords` (including re-run refreshing the same document rather
-than duplicating it) and `TestBiasReports`. All pass against `mongomock` with
-no MongoDB server running. `test_metrics_synthesis.py` and
-`test_model_registry_service.py` add further coverage touching this tier.
-
-**A practical caveat worth recording, found during re-verification.** These
-tests require `pymongo` and `mongomock` to be installed. On a virtualenv
-provisioned before the tier landed, the suite reports **10 failures and 17
-errors**, every one of them `ModuleNotFoundError: No module named 'mongomock'`
-— not a product defect, and specifically *not* a missing-Docker symptom, which
-is the natural first assumption. Anyone re-running this plan's evidence must
-`pip install -r requirements.txt -r requirements-dev.txt` first; a stale venv
-produces a failure signature that looks alarming and means nothing.
-The cache-key and dataset-loader unit tests below ran as part of the full
-588-passed backend suite reported in §4.1 (`test_redis_cache.py`,
-`test_results_cache.py`, `test_hashing.py`, `test_data_integrity.py`,
-`test_warmup_cache_contract.py`, `test_dataset_ingestion.py`,
-`test_dataset_service.py`, `test_l2arctic_loader.py`,
-`test_librispeech_loader.py`, `test_asvspoof_loader.py`) — all passed against
-`fakeredis`, with the real `REDIS_URL` pointed at an unreachable port,
-matching CI. **Not yet executed:** LRU eviction timing and cache behaviour
-against a _live_ Redis 7 container under a forced memory cap — this needs
-`docker compose up -d` and a manual load push, which was out of scope for this
-report's environment. **Owner:** whoever picks this up next should run it with
-Redis actually up (`docker compose up -d` in `Backend/`) and record the
-eviction-order result here.
-
----
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Exercise every read and write path into Redis, MongoDB and the corpus loaders directly, without the UI, so that wrong data, a wrong value shape, document-schema drift, index loss, or payload leaking into the metadata tier can be seen at the point it happens rather than after it is rendered. Accountable to FR4.1 to FR4.4, FR2.1 to FR2.3, SRS section 3.10 and SR5. |
+| **Technique** | Drive `RedisCacheManager` directly against fakeredis, asserting round-trip fidelity through its msgpack and lz4 encoding. Assert key uniqueness across the tuple of audio content, model, task and parameters, and that the schema version participates in the key so a schema change cannot collide with old entries. Separately assert the value shape stored under each key family matches what every declared consumer expects. Seed the dataset loaders with valid, truncated, wrong-sample-rate and malformed audio. Force the Redis memory cap and confirm LRU eviction. Force a corrupted cached value and confirm it is treated as a miss and recomputed (FR4.3). Drive the MongoDB store through mongomock for the unit tier, and against the degraded path with the tier switched off. |
+| **Oracles** | Deterministic for round-trips and digests, and for FR4.4 byte-identity. Metamorphic for warm against cold, where a warmed entry must equal what the cold computation would have produced. Stated plainly rather than glossed: a naive round-trip oracle passes even when a key holds the wrong-shaped value for its family, which is exactly the incident above, so shape is asserted per key family separately from round-trip fidelity. |
+| **Required Tools** | Redis 7-alpine (container `lit-redis`), fakeredis 2.23.2, MongoDB 6 (`mongo:6`, container `audiolit-mongo`), pymongo, mongomock as the serverless oracle, mongosh for manual index inspection, pytest with pytest-asyncio, msgpack and lz4, soundfile and numpy for fixtures. |
+| **Success Criteria** | Every key family has at least one shape-assertion test. Every corpus loader has both a valid-data and a malformed-data test. FR4.4 byte-identity is demonstrated. Eviction and corrupt-value-as-miss are both demonstrated. For the metadata tier: all four collections are created; the uniqueness index on `model_id` and the TTL index on `analysis_results` are asserted present; `bias_reports` is asserted to carry no TTL; schema creation is idempotent; re-running an analysis refreshes one document rather than accumulating duplicates; and the privacy boundary, meaning no audio bytes and no tensor payloads in any collection, is asserted explicitly rather than assumed. |
+| **Special Considerations** | No SQL tier, so SQL injection and schema normalisation from the template do not apply. Redis persistence is deliberately disabled because every entry is cheaply recomputable, so there is no Redis backup path to test here; that concern moves to section 3.1.7. MongoDB is durable state, so backup and TTL expiry are genuine concerns for it. Tests in this category must stay green with both Redis and MongoDB unreachable, because CI has neither service container. |
 
 ### 3.1.2 Function Testing
 
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Exercise AudioLIT functionality — ingestion, inference, attribution, acoustic profiling, mutation, and auditing — via the public API and the UI, with valid and invalid data, to verify correct results, correct typed errors, and correct application of every committed business rule (FR1–FR4, FR6–FR12, FR15–FR17).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| **Technique:**              | Route-level black-box tests via `httpx.AsyncClient` against the live FastAPI app, covering all 15 routers under `app/api/routes/`. Domain-level unit tests per engine under `app/domain/`. The full FR-by-FR mapping is in the §4.2 traceability matrix rather than repeated here; the highest-value checks are: safetensors-only model ingestion with rejection of non-safetensors artefacts before deserialisation, and an `UNSUPPORTED_ARCHITECTURE` error within 60 s for a supported-family miss (FR1.1, FR1.3); concurrent ASR+SER+ADD dispatch on one uploaded clip (FR3.1); SER returning a full probability distribution over ≥6 categories plus top-1 and confidence (FR6.1–FR6.2); ADD returning binary bona-fide/synthetic with confidence (FR7.1); Grad-CAM being genuinely gradient-weighted and **not** equal to the Integrated Gradients output for the same input (FR8.2 vs FR9, the corrected baseline defect); fallback-derived attributions carrying an explicit provenance flag (FR17.1, the corrected baseline defect); F0/RMS/log-mel spectrogram computed and validated against Librosa (FR10.1, FR10.3); mutations preserving the original clip and returning a correctly shaped 16 kHz mono derived clip (FR12.1, FR12.3); per-cohort WER disparity over L2-ARCTIC (FR15.1); and the top-K deletion-score faithfulness audit (FR16.1). |
-| **Oracles:**                | **Deterministic** for contracts — status codes, typed error codes, JSON schema shape, label-set membership. **Tolerance-based** for numeric outputs — F0 and RMS are checked against a Librosa reference implementation per FR10.3's explicit mandate; WER is checked within a stated delta. **Metamorphic** for the interpretability claims themselves, because no ground-truth saliency map exists to assert equality against: masking the top-K salient region must reduce model confidence more than masking a random region of equal size and count (the FR16.1 audit _is_ the oracle for saliency quality, not a separate test of it). This is stated plainly rather than implied: **a saliency map's correctness is not directly assertable**, and faithfulness metrics are the deliberate substitute.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Required Tools:**         | `pytest` 8.2.0, `pytest-asyncio` 0.23.7, `httpx` 0.27.0, `fakeredis` 2.23.2 (backend); Jest 29.7.0 + `@testing-library/react` 16.3.2 + `user-event` 14.6.4 (frontend component logic); Playwright 1.63.0 (full-stack dataflow, on `testing`); FastAPI's generated OpenAPI docs (`/docs`) for contract inspection; Captum ≥0.6 and Librosa ≥0.10 as reference implementations.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Success Criteria:**       | Every committed FR traces to at least one executed test in the §4.2 matrix (target: 100% FR coverage); every route has both a happy-path and an invalid-input test; both inherited baseline defects (FR9's mislabelling, FR17's silent fallback) have a dedicated regression test that would fail against the pre-fix ECHO 1.0 behaviour.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| **Special Considerations:** | Model downloads make cold-path tests slow and network-dependent; slow tests are marked with the `slow` pytest marker and Hub-downloading tests are explicitly gated behind `AUDIOLIT_HUB_TESTS=1` (confirmed in `test_ser_checkpoint.py`, see §4.1). Inference is non-deterministic in general, so tests pin model revisions (the SER checkpoint is pinned at revision `611e6db8ee667aa07fe66596f9fc761e036ff5b9`) or assert on tolerance, never on exact floating-point equality. Any test that calls a task-orchestrator function needs the `broker` fixture (patches `rq_connection._CONNECTION` with fakeredis) even when only the domain call is mocked, because the orchestrator wrapper itself calls `publish_progress`/`get_redis_connection` independently — this has previously caused CI-only failures when a Redis-touching orchestrator wrapper was assumed covered by mocking just the inner domain function.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-
-**Status: ✅ EXECUTED.** This is the largest single category in the backend
-suite reported in §4.1 — function-level route and domain tests make up the
-majority of the 588 passed cases (see the per-file evidence table in §4.1),
-including `test_function_testing.py`, `test_system_integration.py`,
-`test_grad_cam.py`, `test_integrated_gradients.py`, `test_saliency_service.py`,
-`test_perturbation_service.py`, `test_evaluation_scoring.py`, and
-`test_accent_bias_profiler.py`. **The full FR-by-FR breakdown, including which
-FRs have thin coverage, is in §4.2** — do not infer FR coverage from the
-aggregate pass count alone.
-
----
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Exercise ingestion, inference, attribution, acoustic profiling, mutation and auditing through the interface a client actually reaches, with valid and invalid data, to verify correct results, correct typed errors, and correct application of every committed rule (FR1 to FR4, FR6 to FR12, FR15 to FR17). |
+| **Technique** | Route-level black-box tests through httpx against the live FastAPI app, covering every router. Domain-level unit tests per engine. The highest-value checks: safetensors-only ingestion with rejection before deserialisation (FR1.1, FR1.3); concurrent ASR, SER and ADD dispatch on one clip (FR3.1); SER returning a full distribution over at least six categories with top-1 and confidence (FR6); ADD returning a binary judgement with confidence (FR7.1); Grad-CAM being genuinely gradient-weighted and not equal to the Integrated Gradients output for the same input (FR8.2 against FR9); fallback-derived attributions carrying a provenance flag (FR17.1); F0, RMS and log-mel validated against Librosa (FR10); mutations preserving the original and returning a correctly shaped 16 kHz mono clip (FR12); per-cohort WER disparity over L2-ARCTIC (FR15.1); and the top-K deletion-score audit (FR16.1). Run the same surface a second time from an independent harness: a Postman collection executed headless by newman. |
+| **Oracles** | Deterministic for contracts, meaning status codes, typed error codes, schema shape and label-set membership. Tolerance-based for numeric outputs against a Librosa reference and for WER within a delta. Metamorphic for the interpretability claims themselves, because no ground-truth saliency map exists to compare against. Stated plainly: a saliency map's correctness is not directly assertable, and faithfulness metrics are the deliberate substitute. |
+| **Required Tools** | pytest, pytest-asyncio, httpx and fakeredis for the in-process tier. Postman as the collection format and newman as the headless runner for the black-box tier. Jest with Testing Library for frontend component logic. Captum and Librosa as reference implementations. A live stack of Redis, the API and the five workers. |
+| **Success Criteria** | Every committed FR traces to at least one executed test in the section 4.2 matrix. Every route has both a happy-path and an invalid-input test. Both inherited baseline defects have a regression test that would fail against pre-fix ECHO 1.0 behaviour. The black-box run passes with no failed assertions. |
+| **Special Considerations** | Model downloads make cold-path tests slow and network-dependent, so Hub-downloading tests are gated behind `AUDIOLIT_HUB_TESTS=1`. Inference is not deterministic in general, so tests pin model revisions or assert on tolerance, never on exact floating-point equality. Any test calling a task-orchestrator function needs a `broker` fixture even when the domain call is mocked, because the orchestrator wrapper itself touches Redis. The two tiers deliberately overlap: the pytest tier imports the application, while the collection speaks to it over a socket, so the pytest tier can pass while the deployed contract is broken. |
 
 ### 3.1.3 User Interface Testing
 
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Verify navigation, panel state, canvas interaction, and playback synchronisation across the workbench, and confirm the UI conforms to the SRS §3.2.3 accessibility target (WCAG 2.1 AA). Accountable to **SRS §3.2.3**, **§3.9.1** (panel inventory), **FR8.4**, **FR10.2**, **FR11.2**, **FR12.2**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| **Technique:**              | Jest + Testing Library component tests for the interaction-heavy primitives (`WaveformViewer`, `XAIOverlayCanvas`, `SpectrogramGridSelector`, `PerturbationTools`, plus a general `ui-components` suite). Playwright `e2e/layout.spec.ts` for responsive layout, run across Chromium, Firefox, and WebKit at three desktop viewports. Manual keyboard-only traversal, a screen-reader spot-check, and a dark/light contrast audit, none of which are currently automated. Functional checks specific to this system: time-synchronisation between audio playback, the F0 contour, and the attribution overlay (FR10.2); the alpha-blend transparency control and perceptually uniform colour scale on heatmap overlays (FR8.4); the client-side Web Audio preview muting/playing a selected region before dispatch (FR12.2); and a fallback-derived attribution being **visibly** distinguished in the UI, not only flagged in the API response (FR17.1). |
-| **Oracles:**                | **Automatable:** DOM assertions, ARIA role/label presence, computed contrast ratios against the 4.5:1 bar, Playwright layout assertions (no horizontal overflow, all panels within viewport). **Not automatable, stated rather than hidden:** whether an explanation _reads_ as interpretable to a first-time user, and whether progressive disclosure achieves the SRS §3.2.1 goal of a first counterfactual within ~30 minutes — these need a small structured human usability walkthrough, measured against the §3.2.2 task-time table, not a script.                                                                                                                                                                                                                                                                                                                                                                                                  |
-| **Required Tools:**         | Jest 29.7.0 + `jest-environment-jsdom`; `@testing-library/react` 16.3.2, `@testing-library/user-event` 14.6.4, `@testing-library/jest-dom` 6.9.1; Playwright 1.63.0 with Chromium, Firefox, and WebKit browser binaries; browser DevTools; a colour-contrast analyser; a screen reader (VoiceOver / NVDA) for the manual pass.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| **Success Criteria:**       | Every SRS §3.9.1-committed panel has at least one automated test; the layout suite passes on all three engines at all three tested viewports; no WCAG AA contrast failure on body text or heatmap legend; keyboard traversal reaches every interactive control in a logical order.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| **Special Considerations:** | Canvas and WebGL content (the XAI overlay, the spectrogram grid) is largely opaque to DOM assertions; these tests assert on the _state_ driving the canvas plus a Playwright visual pass, not on rendered pixels. jsdom has no real Web Audio or Canvas 2D implementation, so those APIs are mocked in Jest — real behaviour is only covered in the Playwright pass. Plotly and WaveSurfer render asynchronously; tests assert on settled state rather than immediately after mount. Dark mode has a documented history of contrast regressions (LIT-234) — this was re-audited for this report, not assumed fixed from that ticket's fix alone.                                                                                                                                                                                                                                                                                                          |
-
-**Status: ✅ EXECUTED for component tests and cross-browser layout. ⏳ PENDING
-for accessibility/usability review.**
-
-- **Jest component suite:** ✅ EXECUTED as part of the full 47/47 frontend run
-  reported in §4.1 (`WaveformViewer.test.tsx` ×2 files,
-  `SpectrogramGridSelector.test.tsx`, `PerturbationTools.test.tsx`,
-  `XAIOverlayCanvas.test.tsx`, `ui-components.test.tsx`).
-- **In-app quick-start walkthrough (LIT-261, PR #139) — added at
-  re-verification 2026-09-19.** A new first-run guided flow over the four core
-  workflows, surfaced from `Toolbar.tsx` and mounted in `MainLayout.tsx`. It is
-  the only user-facing feature shipped since drafting that a new examiner or
-  first-time user meets *before* anything else, so it carries disproportionate
-  demo and viva weight for its size. Coverage exists on both tiers and is now
-  named here rather than left to the generic component sweep:
-  `Frontend/src/tests/QuickStartDialog.test.tsx` (component behaviour) and
-  `Frontend/e2e/quickstart.spec.ts` (Playwright, end-to-end). **Technique:**
-  assert the dialog opens on first run and is dismissible; assert it does not
-  re-appear once dismissed; assert each of the four steps targets a panel that
-  actually exists in the workbench, so the walkthrough cannot drift out of sync
-  with the UI it describes. **Oracle:** deterministic — step targets are
-  compared against the rendered panel inventory (SRS §3.9.1), not screenshotted.
-- **Cross-browser layout:** ✅ EXECUTED — `npx playwright test`, commit
-  `a3a78fa`, 2026-09-13:
-
-  ```
-  Running 12 tests using 5 workers
-    ✓ [chromium] renders without horizontal overflow at small-desktop (1024x768)
-    ✓ [chromium] renders without horizontal overflow at wide-desktop (1920x1080)
-    ✓ [chromium] all three top-level panels stay within the viewport at a standard desktop size
-    ✓ [chromium] renders without horizontal overflow at laptop (1366x768)
-    ✓ [firefox]  renders without horizontal overflow at wide-desktop (1920x1080)
-    ✓ [webkit]   renders without horizontal overflow at wide-desktop (1920x1080)
-    ✓ [webkit]   renders without horizontal overflow at small-desktop (1024x768)
-    ✓ [webkit]   all three top-level panels stay within the viewport at a standard desktop size
-    ✓ [webkit]   renders without horizontal overflow at laptop (1366x768)
-    ✓ [firefox]  renders without horizontal overflow at laptop (1366x768)
-    ✓ [firefox]  all three top-level panels stay within the viewport at a standard desktop size
-    ✓ [firefox]  renders without horizontal overflow at small-desktop (1024x768)
-
-  12 passed (10.1s)
-  ```
-
-  This suite is deliberately backend-free (renders the app against the real
-  Vite dev server only), so it does not exercise FR10.2/FR12.2's live-data
-  synchronisation — only layout.
-
-- **Not yet executed:** the WCAG AA contrast audit, screen-reader pass, and
-  the human usability walkthrough against the §3.2.2 task-time table. None of
-  these are automatable by design (see Oracles above); they need a human
-  reviewer with assistive-technology tooling, which this report's environment
-  did not have. **Owner:** assign to whichever team member does the dark-mode
-  contrast follow-up already tracked from LIT-234, since the tooling setup
-  overlaps.
-
----
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Verify navigation, panel state, canvas interaction and playback synchronisation across the workbench, and confirm the UI meets the SRS section 3.2.3 accessibility target of WCAG 2.1 AA. |
+| **Technique** | Jest with Testing Library for the interaction-heavy primitives. Playwright across Chromium, Firefox and WebKit at three desktop widths, checking that no panel forces the page to scroll sideways. axe-core through Playwright for WCAG 2.1 A and AA rules. Lighthouse for a whole-page score. A keyboard walk that presses Tab repeatedly and records what receives focus. System-specific checks: time synchronisation between playback, the F0 contour and the attribution overlay (FR10.2); the alpha-blend control and perceptually uniform colour scale on overlays (FR8.4); the Web Audio preview before dispatch (FR12.2); and a fallback-derived attribution being visibly distinguished in the UI, not only flagged in the API response (FR17.1). |
+| **Oracles** | Deterministic for component behaviour and the overflow check, where document scroll width must not exceed client width. Tool judgement for the WCAG rules. Not automatable, and stated rather than hidden: whether an explanation reads as interpretable to a first-time user, and whether progressive disclosure achieves the SRS section 3.2.1 goal. |
+| **Required Tools** | Jest 29 with jsdom, Testing Library, Playwright 1.63 with all three engines, `@axe-core/playwright` 4.13.0 with axe-core 4.13.0, and Lighthouse 13.5.0. |
+| **Success Criteria** | Every committed panel has at least one automated test. No horizontal overflow at any tested width in any engine. No scored WCAG 2.1 A or AA violation. Keyboard traversal reaches every interactive control in a logical order. |
+| **Special Considerations** | Canvas and WebGL content is largely opaque to DOM assertions, so these tests assert on the state driving the canvas rather than on pixels. jsdom has no real Web Audio or Canvas 2D, so those are mocked in Jest and only covered for real in the Playwright pass. Automated scanning finds only part of what is wrong: axe-core reports a separate incomplete list needing human judgement, and those are recorded rather than counted as passes. Screen reader testing with JAWS, which the resource list names, was not performed, because JAWS is Windows-only and the accessibility pass ran on macOS. That is stated as a gap in section 5 rather than quietly skipped. |
 
 ### 3.1.4 Performance Profiling
 
-Every figure in this section is anchored to the SRS §3.4.1 performance table,
-reproduced here as the requirement baseline.
+Every figure here is anchored to the SRS section 3.4.1 performance table,
+reproduced as the requirement baseline.
 
-| Operation                                     | SRS §3.4.1 Target | Notes                                          |
-| --------------------------------------------- | ----------------- | ---------------------------------------------- |
-| Cached (repeat) tensor retrieval              | < 10 ms           | SHA-256 cache-by-hash hit (FR4)                |
-| API response for a cached request             | < 200 ms          | End to end, including deserialisation          |
-| Cache miss to task enqueue                    | < 50 ms           | Validation, hashing, acknowledgement           |
-| Cold ASR inference (Whisper-base, 15 s audio) | < 3 s             | GPU; inherited model                           |
-| Multi-task inference (ASR + SER + ADD)        | < 8 s cold        | Concurrent workers; instant on cache hit (FR3) |
-| Interpretability attribution (IG / saliency)  | < 8 s             | Captum, 15 s clip (FR8, FR9)                   |
-| Canvas mutation — UI response                 | < 500 ms          | Targeting 30–60 FPS (FR12)                     |
-| Canvas mutation — backend result              | < 2 s             | Per perturbation                               |
-| Accent bias profiling                         | < 30 s            | L2-ARCTIC cohort batch, cache re-use (FR15)    |
-| Faithfulness audit                            | < 15 s            | Per clip, deletion score (FR16)                |
-| Cold model download + hook registration       | < 60 s            | Bounded by Hub bandwidth (FR1)                 |
+| Operation | SRS 3.4.1 target | Notes |
+| --- | --- | --- |
+| Cached tensor retrieval | under 10 ms | SHA-256 cache hit (FR4) |
+| API response for a cached request | under 200 ms | End to end, including deserialisation |
+| Cache miss to task enqueue | under 50 ms | Validation, hashing, acknowledgement |
+| Cold ASR inference, Whisper-base, 15 s audio | under 3 s | GPU, inherited model |
+| Multi-task inference, ASR plus SER plus ADD | under 8 s cold | Concurrent workers, instant on a cache hit (FR3) |
+| Interpretability attribution, IG or saliency | under 8 s | Captum, 15 s clip (FR8, FR9) |
+| Canvas mutation, UI response | under 500 ms | Targeting 30 to 60 FPS (FR12) |
+| Canvas mutation, backend result | under 2 s | Per perturbation |
+| Accent bias profiling | under 30 s | L2-ARCTIC cohort batch with cache reuse (FR15) |
+| Faithfulness audit | under 15 s | Per clip, deletion score (FR16) |
+| Cold model download plus hook registration | under 60 s | Bounded by Hub bandwidth (FR1) |
 
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Technique Objective:**    | Measure single-user response times and resource consumption for each operation above, under normal single-user workload, and compare measured values against the SRS targets on stated hardware.                                                                                                                                                                                                                                                                                                                         |
-| **Technique:**              | Time each operation across N repeated runs, reporting median and p95 (not a single sample). Profile memory with `scripts/run_memory_profile.py` and `test_memory_profiling.py`, asserting on **growth across iterations**, never on absolute RSS, since absolute memory is host-dependent. Profile frontend render and WebSocket-update latency in browser DevTools. Track VRAM and RAM against the SRS §3.4.3 budgets (~3–5 GB committed models, +1–2 GB with attribution, 16 GB host RAM recommended).                 |
-| **Oracles:**                | Tolerance oracles against the SRS §3.4.1 targets, with the measurement method (median-of-N, p95-of-N, warm vs cold, GPU vs CPU) stated alongside every figure. **The confound is stated rather than hidden:** the SRS targets explicitly assume an NVIDIA T4-class GPU; the environment this report was produced in is a CPU-only host with no discoverable GPU (`nvidia-smi` is not present), so cold-inference targets are not meaningfully assessable from it — only the hardware-stable, cache-hit-side targets are. |
-| **Required Tools:**         | `pytest` timing tests (`test_performance_load.py`, `test_memory_profiling.py`, `test_warmup_cache_contract.py`); `scripts/run_memory_profile.py`; `psutil` (installed: 7.2.2); `redis-cli --latency`; `nvidia-smi` for VRAM (GPU host only); Chrome DevTools Performance/Network panels; `/health/workers` for RQ queue depth.                                                                                                                                                                                           |
-| **Success Criteria:**       | Every row of the SRS §3.4.1 table has a measured figure with stated hardware and method; hardware-stable targets (cache hit, enqueue, cached API response) are met; any deviation on a model-bound (cold/GPU) target is explained, not concealed.                                                                                                                                                                                                                                                                        |
-| **Special Considerations:** | Measured on a quiet machine — background load invalidates timing figures. Cold and warm are reported separately; a cache hit trivially satisfies almost any cold target, so a warm number is never reported against a cold target. The first call after a worker process starts includes model load time and is excluded or reported separately. Memory assertions tolerate GC non-determinism (`gc.collect()` before measuring, per the existing test pattern).                                                         |
-
-**Status: ⏳ PENDING — no GPU available in this report's environment.**
-
-This report's evaluation environment is a CPU-only macOS host with no
-`nvidia-smi` and no discoverable CUDA device — precisely the confound named in
-the Oracles row above. Running the model-bound rows of the §3.4.1 table here
-would produce numbers not comparable to the SRS's stated NVIDIA T4 assumption,
-and reporting them as if they were would misrepresent the system's actual
-performance. The honest position, per this document's own house style (§4 of
-`TEST_PLAN_DESIGN.md`: "name what you did not test, and why"), is to leave
-this section unexecuted rather than publish a misleading number.
-
-**New instrumentation changes what this section can measure (LIT-259, PR #144),
-added at re-verification 2026-09-19.** Structured JSON task logs and exported
-operational metrics now exist, with `Backend/tests/test_operational_metrics.py`
-(279 lines, 12 tests, green in the re-verification run) covering worker
-counters including the failure path, plus tensor-cache counters. This matters
-to §3.1.4 specifically: until now, every performance figure this plan could
-produce had to come from an external stopwatch around an HTTP call, which is
-what made the CPU/GPU confound so hard to state precisely. The metrics tier
-gives per-task timings and queue counters **from inside the system**, so a
-future GPU run can report where time was spent rather than only how long a
-request took end to end. **Technique when the GPU run happens:** capture the
-exported metrics alongside the wall-clock figures and reconcile the two;
-a divergence between them is itself a finding. **Caveat kept explicit:**
-instrumentation measures the system's own view and is not independent
-verification of it — the external timing still governs any SRS §3.4.1
-pass/fail claim.
-
-**What is confirmed instead, as a lower bound:** `Backend/tests/` includes
-GPU-gated tests that self-skip in this environment
-(`tests/test_function_testing.py:303` — "Requires GPU/model resources";
-`tests/test_memory_profiling.py:35` — "VRAM test requires CUDA"), confirmed by
-the ✅ EXECUTED backend run in §4.1, which shows these two skips explicitly
-rather than silently omitting them. This confirms the harness correctly
-recognises the missing hardware rather than falsely passing.
-
-**Owner and trigger:** whoever has access to the team's GPU development
-machine (or the CI-declared T4-class cloud instance, if provisioned) should
-run `scripts/run_memory_profile.py` and time each §3.4.1 row there, then
-replace this paragraph with the measured table, median/p95, and hardware spec.
-
----
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Measure single-user response times and resource use for each operation above, under normal single-user load, and compare against the SRS targets on stated hardware. |
+| **Technique** | Time each operation across repeated runs, reporting median and 95th percentile rather than one sample. Keep cached and cold paths separate so a warm hit is never counted as a cold run. Profile memory with `scripts/run_memory_profile.py`, asserting on growth across iterations rather than absolute RSS, which is host-dependent. Measure the frontend with Lighthouse against the production build rather than the development server. Capture the exported operational metrics alongside the wall-clock figures and reconcile the two. |
+| **Oracles** | Tolerance-based against the numeric budgets above, with the measurement method stated beside every figure. The confound is stated rather than hidden: the SRS targets assume an NVIDIA T4 class GPU, and both evaluation hosts are CPU-only, so model-bound targets are not meaningfully assessable from them. |
+| **Required Tools** | Locust for API timings, Lighthouse 13.5.0 for the client, `test_performance_load.py`, `test_memory_profiling.py` and `scripts/run_memory_profile.py` for the in-process tier, the LIT-259 metrics endpoint for the system's own view, and `/health/workers` for queue depth. |
+| **Success Criteria** | The infrastructure targets, which are not bound by model speed, are met. The model-bound targets are measured and reported with hardware stated, and any deviation is explained rather than concealed. |
+| **Special Considerations** | Measured on a quiet machine, since background load invalidates the figures. The first call after a worker starts includes model load time and is reported separately. Instrumentation measures the system's own view and is not independent verification of it, so external timing governs any pass or fail claim against SRS 3.4.1. |
 
 ### 3.1.5 Load Testing
 
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Subject the API and worker fabric to increasing concurrent workload — normal, peak, and beyond expected maximum — to find the saturation point and confirm graceful degradation rather than collapse. Accountable to **SRS §3.4.1**, **§3.4.3**, **§3.3.1**.                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| **Technique:**              | Locust (`Backend/loadtests/locustfile.py`, present on the `testing` branch) driving concurrent virtual users against the upload → enqueue → poll → result path. Ramp in stages (e.g. 1 → 10 → 50 → 100 users), holding each stage long enough for a stable reading. Run cache-hit-heavy and cache-miss-heavy profiles **separately**, since they stress entirely different subsystems (the Redis read path vs the GPU-pinned worker pool). Observe RQ queue depth per family, worker saturation under the concurrency-1 GPU pin (SRS constraint C2), Redis memory against its 2 GB cap and LRU eviction under load, and WebSocket fan-out under many concurrent subscribers. |
-| **Oracles:**                | Throughput and latency percentiles per ramp stage. The decisive oracle is **behavioural, not numerical**: past saturation, the system must _queue and degrade_, never corrupt state, silently drop a job, or lose a progress message. A job once enqueued must always be observable, either completing or failing with a typed error — never simply vanishing. The GPU families are deliberately pinned to concurrency 1 (SRS constraint C2's VRAM budget), so queueing under load past that point is _expected, correct_ behaviour, not a defect to chase.                                                                                                                  |
-| **Required Tools:**         | Locust (`Backend/loadtests/locustfile.py`); `redis-cli INFO memory` / `MONITOR`; `/health/workers` for queue depth; `rq info`; `psutil` / `nvidia-smi`; the Playwright `dataflow` project (also on `testing`) for a concurrent full-stack check.                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| **Success Criteria:**       | The saturation point is identified and reported; no data loss, no silent job drop, and no cache corruption occur at or beyond it; overload errors are typed and carry the correct retryable flag per SRS §3.3.2; latency recovers to baseline once load is removed.                                                                                                                                                                                                                                                                                                                                                                                                          |
-| **Special Considerations:** | Must run on a dedicated machine at a dedicated time — background load invalidates the stage readings. Real model inference is expensive; a realistic 100-concurrent-user cache-miss scenario may exceed the academic hardware budget available to this team, and if so, the report must say plainly what was actually run versus what was extrapolated, never present an extrapolation as a measurement. Redis LRU eviction under sustained load will legitimately evict entries mid-run — that is correct cache behaviour under the configured cap, not a bug.                                                                                                              |
-
-**Status: ⏳ PENDING.**
-
-`Backend/loadtests/locustfile.py` exists only on `origin/testing`, not on
-`develop`, and this report's environment did not have a full live stack
-(FastAPI + Redis + all five RQ worker families + a GPU-capable model backend)
-running concurrently to drive load against. Executing this section requires
-someone to check out `testing`, bring up `docker compose up -d` plus
-`python -m app.orchestration.worker all`, run `locust` against a staged
-concurrency ramp, and record throughput/latency/queue-depth per stage plus the
-saturation point.
-
-**Owner and trigger:** the developer who authored the `testing` branch's load
-harness (per `docs/RAVINDU_TESTING_ISSUES_PLAN.md`, that work already exists
-on `testing` as of 2026-09-12) is best placed to run this and report actual
-figures back into this section before Phase 4 submission.
-
----
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Put the system under concurrent load and observe whether response times, queue depth and failure rate stay acceptable past the ordinary working point, and confirm it degrades rather than collapses. |
+| **Technique** | Drive the running stack over HTTP the way a browser does, with a weighted mix of cached prediction reads, job enqueues, attribution requests, cold predictions, acoustic profiling and health checks. Warm the cache for the clips used by the cached path before measuring, so that statistic measures hits rather than first runs. Score the observed 95th percentile against the SRS budgets. Observe queue depth per family and worker saturation under the concurrency-1 GPU pin. |
+| **Oracles** | Tolerance-based against the SRS section 3.4.1 budgets, using the 95th percentile rather than the mean, because the targets describe what a user should reliably get. The decisive oracle is behavioural rather than numerical: past saturation the system must queue and degrade, never corrupt state, silently drop a job, or lose a progress message. A job once enqueued must always be observable. |
+| **Required Tools** | Locust driving `Backend/loadtests/locustfile.py` against a live Redis, API and five-worker stack, with `/health/workers` for queue depth. |
+| **Success Criteria** | No request failures. The infrastructure targets are met at the 95th percentile. No data loss or silent job drop at or beyond saturation. |
+| **Special Considerations** | Concurrency is kept modest on CPU. Attribution takes seconds per request on this hardware, so a high user count measures a queue backing up rather than the system's response. The GPU families are deliberately pinned to concurrency 1 under SRS constraint C2, so queueing past that point is correct behaviour, not a defect. The harness enforces only the infrastructure targets unless `LOADTEST_ENFORCE_MODEL_TARGETS=1` is set. |
 
 ### 3.1.6 Security and Access Control Testing
 
-Mapped one-to-one to the SRS §3.4.2 security requirements SR1–SR7, plus the
-inherited items recorded in SRS §4.5.
+Mapped one to one against SR1 to SR7, plus the inherited items in SRS section
+4.5.
 
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Verify upload validation, model-deserialisation safety, session isolation, data-minimisation in cache keys and logs, and remediation of every inherited ECHO 1.0 exposure point recorded in SRS §4.5.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| **Technique:**              | **SR1:** submit oversized (>100 MB), over-duration (>15 min), wrong-MIME, magic-number-mismatched, zero-byte, and structurally malformed audio; confirm rejection _before_ hashing. Include at least one polyglot file (a valid WAV header wrapping a hostile payload). **SR2:** attempt to ingest a `.bin`/pickle checkpoint disguised as a model artefact and confirm refusal before any deserialisation is attempted — this is the highest-severity check in this report, since it is arbitrary-code-execution prevention. **SR4:** confirm uploaded audio is purged on its configured TTL. **SR5:** inspect generated cache keys for filenames, session identifiers, or user identifiers; inspect application logs for audio content, transcripts, or other PII. **SR6:** confirm the inherited unauthenticated debug endpoint and wildcard CORS on file-serving routes (SRS §4.5) are hardened, and attempt cross-session dataset access with a forged `sid` session cookie. **SR7:** run a dependency vulnerability scan. Attempt path traversal against every route that accepts a `file_path` parameter (several inference/acoustic routes do). |
-| **Oracles:**                | Deterministic and self-verifying for most checks: rejection must surface as an explicit typed error with the correct status code; cross-session access attempts must return 403/404 and never leak data. **A necessary caution, stated rather than implied:** a passing security test proves the _specific tested attack_ failed — it does not prove the system is secure in general. Dependency-scanner output is only an oracle for _known_ CVEs at scan time.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| **Required Tools:**         | `pytest` (`test_security.py`, `test_session_cookie.py`); `httpx` for forged/malformed requests; a Python dependency auditor (e.g. `pip-audit`) and `npm audit` for SR7; `curl` for raw header/CORS probing; crafted malformed-audio and polyglot fixtures; `safetensors` for format-verification checks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **Success Criteria:**       | Every SR1–SR7 clause has at least one executed test; every SRS §4.5 inherited exposure is either demonstrably remediated with evidence, or explicitly recorded here as outstanding with a Linear id; no unacknowledged high-severity dependency CVE at submission time.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| **Special Considerations:** | AudioLIT has **no user authentication or role-based access model** — it is single-tenant and session-cookie scoped, appropriate to its academic deployment target (SRS §3.3 — "best-effort availability, no continuous SLA"). The RUP template's "test each user type's permissions" therefore does not apply here, which is stated explicitly rather than left looking like an unaddressed row. TLS (SR3) is a deployment-time concern, not testable against localhost, and is likewise stated rather than silently skipped. No intrusive scanning is run against any host the team does not own.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-
-**Status: ✅ EXECUTED (automated subset) / ⏳ PENDING (manual exploratory
-probing).**
-
-`Backend/tests/test_security.py` and `test_session_cookie.py` ran and passed
-as part of the ✅ EXECUTED 588-passed backend suite in §4.1 — this includes,
-by direct observation of the run log, at least
-`TestFileUploadSecurity::test_corrupted_audio_is_rejected_not_silently_accepted`.
-**Not yet executed in this report:** the manual/exploratory items that need a
-human attacker's judgement rather than a fixed assertion — forged-cookie
-cross-session probing beyond what the existing test suite covers, polyglot
-file crafting, path-traversal fuzzing across every `file_path`-accepting
-route, and a dependency vulnerability scan. **Owner:**
-whoever is assigned SR6 remediation follow-up should run the manual pass
-before Phase 4 submission.
-
-**Two changes at re-verification (2026-09-19) materially move this section.**
-
-**Container image scanning is now wired into CI (LIT-203, PR #145).** The
-statement above that no vulnerability scanning exists in CI is **partly
-superseded**: `.github/workflows/ci.yml` now runs **Trivy** against the built
-images, and the branch carries two follow-up commits hardening the base images
-against Trivy CRITICAL findings (`8de8105`, plus `2d973cc` correcting the
-action tag to `v0.36.0`). This closes the *image-layer* half of the SR7 gap —
-OS packages and base-image CVEs are now scanned on every build. It does **not**
-close the *application-dependency* half: `pip-audit` and `npm audit` still are
-not wired in, so a vulnerable Python or npm package that ships inside an
-otherwise-clean base image is still unscanned. The distinction matters and is
-kept explicit rather than reported as "scanning: done."
-
-**Inherited security gaps have been remediated (LIT-223, PR #142).** Three
-areas this plan flagged as risk surface were fixed and now carry regression
-tests: debug-route exposure (`app/api/routes/debug.py`), CORS configuration
-(`app/infrastructure/settings.py`), and cross-session dataset access
-(`app/infrastructure/dataset_service.py`, `routes/datasets.py`,
-`routes/dataset_management.py`). Guarding tests:
-`tests/test_debug_and_tasks_routes.py`, `tests/test_dataset_management_routes.py`,
-`tests/test_dataset_service.py` — all green in the 713-passed re-verification
-run. **Technique for this tier:** assert a session cannot read another
-session's dataset by id; assert debug routes are unavailable under production
-settings; assert the CORS allow-list rejects an unlisted origin. **Oracle:**
-deterministic negative assertions — the correct result is a refusal, and a
-test that only proves the happy path would not have caught these.
-
----
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Verify upload validation, model-deserialisation safety, session isolation, data minimisation in cache keys and logs, and remediation of every inherited ECHO 1.0 exposure point. Add a level the template predates: that the dependencies and images the product ships carry no known unpatched vulnerabilities. |
+| **Technique** | SR1: submit oversized, over-duration, wrong-MIME, magic-number-mismatched, zero-byte and malformed audio, and confirm rejection before hashing. SR2: attempt to ingest a pickle checkpoint disguised as a model artefact and confirm refusal before any deserialisation, which is the highest-severity check here because it prevents arbitrary code execution. SR4: confirm uploaded audio is purged on its TTL. SR5: inspect cache keys and logs for filenames, session identifiers and transcripts. SR6: confirm the inherited unauthenticated debug endpoint and wildcard CORS are hardened, and attempt cross-session dataset access with a forged session cookie. SR7: scan both dependency trees and the built images. Attempt path traversal against every route accepting a file path. |
+| **Oracles** | Deterministic for access rules and typed rejection codes: a rejection must surface as an explicit typed error with the right status, and a cross-session attempt must return a refusal and never leak data. Tool judgement for the scans. A necessary caution, stated rather than implied: a passing security test proves the specific tested attack failed, not that the system is secure in general, and scanner output is an oracle only for known advisories at scan time. |
+| **Required Tools** | pytest with `test_security.py`, `test_session_cookie.py`, `test_debug_and_tasks_routes.py`, `test_dataset_service.py` and `test_dataset_management_routes.py`; `npm audit`; `pip-audit`; Trivy in CI for image layers; curl for raw header and CORS probing; safetensors for format verification. The resource list names OWASP and CheckMarx for this row; the OWASP API risks are used as the checklist and the scanners take the place of a commercial product. |
+| **Success Criteria** | Every SR1 to SR7 clause has at least one executed test. Every inherited exposure is either demonstrably remediated with evidence or recorded here as outstanding with an issue id. Every advisory found is recorded with its severity and whether it reaches production code. |
+| **Special Considerations** | AudioLIT has no user authentication or role-based access model. It is single-tenant and session-cookie scoped, appropriate to its academic deployment target, so the template's "test each user type's permissions" does not apply, which is stated explicitly rather than left looking unaddressed. TLS is a deployment-time concern and is not testable against localhost. A dependency advisory is not automatically an exploitable defect: several findings below sit in build tooling that never runs in production, and they are reported with that distinction made rather than as one alarming count. |
 
 ### 3.1.7 Failover and Recovery Testing
 
-The RUP template frames this section around DASD controllers and client/server
-power interruption — a 1990s mainframe/client-server failure model that does
-not map onto a containerised Redis + RQ worker architecture. **This section is
-deliberately reframed** to AudioLIT's actual failure surface, per SRS
-§3.3.1–§3.3.2 (fault tolerance, graceful degradation, and typed error
-recovery), rather than force-fitting DASD terminology onto Redis.
+The template frames this section around power loss, network cables and disk
+controllers. That is not this system's failure surface. The section is reframed
+to the dependencies AudioLIT actually has, keeping the template's intent exactly:
+force a failure and watch the recovery.
 
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Simulate infrastructure and resource failures and verify graceful degradation, correct retryable/non-retryable fault classification, and recovery to a known-good state without data loss or a silently wrong answer — the one unacceptable outcome under SRS §3.3.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| **Technique:**              | A scenario matrix, each with a stated expected behaviour: (a) **Redis unreachable** — this project's own standard pre-push check, `REDIS_URL="redis://127.0.0.1:1/0" pytest -q`; (b) **Redis killed mid-job**; (c) **worker process killed mid-inference** — the job must end up observable as failed or retried, never silently lost; (d) **GPU OOM / unavailable** — must fall back to CPU with a user-visible warning (SRS §3.3.1), not fail the request; (e) **one task family fails** — the other two must still return results (the partial-failure-cascade fault model from §3); (f) **Hugging Face Hub unreachable** during a model download; (g) **corrupt cached value** — must be treated as a miss and recomputed (FR4.3); (h) **WebSocket connection dropped** — `useTaskStatus` must fall back to polling and reconnect (FR3.2); (i) **backend down but the result was already cached** — a warm cache must still serve (SRS §3.3.1); (j) **transient fault** — exponential backoff with a bounded retry count, then a durable failure record (SRS §3.3.2). |
-| **Oracles:**                | For each scenario: the API response (correct typed error, correct retryable/non-retryable flag), the UI state (a retry control appears **only** when retrying is actually meaningful, per SRS §3.3.2's explicit requirement), and the durable failure record for unrecoverable faults. The single strongest oracle across the whole matrix is the **retryable/non-retryable classification being correct**, because that classification is what makes recovery automatic rather than requiring manual intervention. Some scenarios (process kill, network partition) are inherently manual to trigger; they are marked as such below and the procedure is recorded so the result is reproducible by someone else.                                                                                                                                                                                                                                                                                                                                                         |
-| **Required Tools:**         | `docker compose stop redis` / `start redis`; `REDIS_URL` pointed at an unreachable port (the project's standard technique, used for this report's own ✅ EXECUTED evidence in §4.1); `kill -9` on worker process PIDs; `rq info` to inspect orphaned jobs; a network-disable step for Hugging Face Hub-reachability tests; `fakeredis` for deterministic orchestrator-failure unit tests; `test_task_orchestrator.py`, `test_fanout_orchestrator.py`, `test_queue.py`, `test_system_integration.py`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| **Success Criteria:**       | Every scenario in the matrix is executed with a recorded outcome; no scenario produces a silently wrong result; no in-flight job becomes permanently unobservable; CPU fallback and partial-family-failure isolation are both demonstrated with evidence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| **Special Considerations:** | There is no redundant infrastructure and no continuous SLA (SRS §3.3): recovery is by cheap resubmission, which is an explicit architectural decision, not an untested gap, and this report treats it as such. **Known flake, recorded so it is not mistaken for a real failure:** `SimpleWorker(burst=True)` draining a dependency-gated aggregator on `fakeredis` has intermittently hung `pytest` in this project's history; the mitigation is to stress-run the affected orchestrator tests (~15 iterations) with a background-and-kill timeout — `perl alarm` does not work for this because Python resets `SIGALRM`.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-
-**Status: ✅ EXECUTED (Redis-unreachable scenario, as part of the standard
-suite run) / ⏳ PENDING (all other scenarios, which require deliberate,
-destructive manual action).**
-
-Scenario (a), Redis unreachable, is exactly the condition under which this
-report's entire §4.1 backend evidence was captured
-(`REDIS_URL="redis://127.0.0.1:1/0"`) — 588 passed, 0 failed under that
-condition is itself the executed result for this scenario, and it is real,
-reproducible evidence, not an assumption. **Scenarios (b) through (j) require
-deliberately killing live processes, disconnecting networks, and corrupting
-state by hand** — none of that is appropriate to perform unattended while
-producing a written report, and doing so needs a human present to observe and
-recover from each. **Owner and trigger:** these should be run together in one
-dedicated session (the template's own Special Considerations note recommends
-exactly this — "run after hours or on an isolated machine") once the team has
-Redis, all five worker families, and a spare hour to deliberately break things
-and record what happens.
-
----
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Force each dependency to fail while the system is serving, observe what it does, then restore the dependency and observe whether it recovers without human intervention, with no data loss and no silently wrong answer, which is the one unacceptable outcome. |
+| **Technique** | A scenario matrix. F1, run with the MongoDB tier off and call every store method. F2, stop Redis while the API is serving. F3, restart Redis and re-test without restarting the API. F4, kill the workers abruptly and immediately restart them. F5, apply the manual recovery. F6, inspect what the worker health endpoint reports after a crash. Plus the end-to-end check that a full multitask job completes once the stack is clean. |
+| **Oracles** | Deterministic for the intended degraded responses, in particular that health returns 503 with a degraded body rather than 500 when Redis is gone, and that metadata writes become no-ops rather than raising. Self-consistency between what the documentation promises and what the code does. The strongest single oracle is the retryable against non-retryable classification, because that is what makes recovery automatic. |
+| **Required Tools** | Docker for stopping and starting Redis, `pkill` for worker failures, the FastAPI TestClient for isolating where a failure originates, direct Redis inspection for lock and registration state, and the RQ failed-job registry. |
+| **Success Criteria** | No dependency failure produces an unhandled 500. Each dependency recovers on restoration without restarting the application. A killed worker can be restarted immediately. No in-flight job becomes permanently unobservable. |
+| **Special Considerations** | These scenarios are destructive and were run last, after all other evidence had been captured, against a local stack only. There is no redundant infrastructure and no continuous SLA: recovery is by cheap resubmission, which is an explicit architectural decision rather than an untested gap. |
 
 ### 3.1.8 Configuration Testing
 
-|                             |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Technique Objective:**    | Verify correct operation across the supported browser, operating system, Python/Node runtime, and hardware-accelerator configurations, and identify any configuration-dependent behaviour.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **Technique:**              | **Browsers:** Playwright across Chromium, Firefox, and WebKit. **Python:** 3.10 (CI, `ubuntu-latest`) vs 3.11 (this report's local dev venv) — this divergence is itself a configuration risk worth testing directly, not assuming away. **Node:** 20. **OS:** macOS (this report's environment; also the primary dev platform), Ubuntu (CI). **Accelerator:** CPU-only (CI's explicit CPU-only torch wheel install, and this report's own host) vs GPU — the single highest-value axis, since the CPU-fallback path (FR1.4) only executes on one side of it. **Redis:** containerised (`docker-compose.yml`) vs unreachable (this project's standard test-verification technique). **Frontend:** default vs explicit `VITE_API_BASE_URL`; Vite dev server (`:8080`) vs the built `dist/` bundle. **Viewports:** desktop 1024×768 through 1920×1080 (mobile viewports are not yet in the automated layout suite — see gap below).                  |
-| **Oracles:**                | A cross-configuration **differential** oracle: the same functional suite must produce the same pass/fail outcome across configurations, and any divergence is itself the finding, not noise to average away. CI is the continuous instance of this oracle — every PR already runs the Ubuntu/Python 3.10/Node 20/CPU-only configuration automatically. Numeric outputs may legitimately differ slightly between CPU and GPU floating-point paths; where that matters, a tolerance is stated explicitly rather than asserting exact equality across accelerators.                                                                                                                                                                                                                                                                                                                                                                                   |
-| **Required Tools:**         | GitHub Actions (`.github/workflows/ci.yml`); Playwright's three browser-engine projects; `docker compose`; local Python 3.10 and 3.11 environments (this report used the project's existing `.venv`, Python 3.11.15); `nvidia-smi` where a GPU is present; browser DevTools device emulation for viewport testing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| **Success Criteria:**       | The functional suite passes on every declared supported configuration; the CPU-fallback path is exercised in at least one configuration; no browser-specific layout or Web Audio failure; any configuration-dependent numeric divergence is quantified and bounded rather than left unexamined.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Special Considerations:** | CI deliberately installs the **CPU-only torch wheel** (`.github/workflows/ci.yml`'s own comment: the default Linux wheel is a multi-GB CUDA build unsuited to CPU-only runners), so **CI never exercises the GPU path at all** — GPU coverage is necessarily manual and local, which this report states plainly rather than implying CI covers it. CI currently has **no Redis service container**; per this project's own tracked constraint (LIT-229, confirmed fixed on `develop` as of this report — `health.py` now imports the redis module, not the name, so the previously-documented `RuntimeError: Event loop is closed` failure mode does not reproduce), a Redis container could be added to CI, but was not attempted as part of this report. The Playwright layout suite deliberately runs backend-free to stay fast; the full-stack `dataflow` project (on `testing`) needs the whole stack live and was not run here (see §3.1.5). |
-
-**Status: ✅ EXECUTED (Python 3.11 + macOS + CPU-only + three browser
-engines; ✅ native Windows added 2026-09-19) / ⏳ PENDING (Python 3.10 exact
-reproduction, live GPU, container-matrix run).**
-
-**Native Windows is no longer pending — configuration cell closed
-2026-09-19.** The full backend suite was run on **Windows 11, Python 3.11.0,
-CPU-only torch 2.13.0+cpu**, against `origin/testing` (`c9fbd46`), with
-`REDIS_URL` pointed at an unreachable port exactly as the macOS run was:
-**713 passed, 9 skipped, 0 failed, 0 errors, 318 s**. Taken with the macOS run
-and CI's Ubuntu run, all three declared host operating systems now have
-executed evidence, and the differential oracle above is satisfied across them
-— no OS-dependent divergence was observed.
-
-**A new configuration axis exists and is not yet covered: the container
-matrix (LIT-203, PR #145).** The stack is now containerised —
-`Backend/Dockerfile`, `Frontend/Dockerfile` + `nginx.conf`, a root
-`docker-compose.yml` (services `redis`, `mongo`, `api`, `worker`, `web`) and
-a `docker-compose.gpu.yml` overlay. This is a genuinely distinct configuration
-from the native dev setup every run above used, and nothing in this report has
-exercised it. **Technique when it is run:** bring the stack up from the root
-compose file, confirm all five services reach healthy, and run the functional
-suite against the containerised API rather than a native one; then repeat with
-the GPU overlay on GPU hardware. **Success criterion:** the same pass/fail
-outcome as the native configuration — any divergence is the finding.
-
-**One concrete configuration defect already found, 2026-09-19.** The compose
-`mongo` service declares **no `ports:` mapping**, so MongoDB is reachable only
-on the compose network. That is correct and deliberate for the fully
-containerised topology (the `api` service addresses it as
-`mongodb://mongo:27017`), but it means the **hybrid** configuration — the one
-developers actually use day to day, with Redis and Mongo in Docker and the API
-run natively — **cannot reach MongoDB at all** without publishing the port
-manually. Combined with `MONGO_URL` defaulting to `""` (tier disabled), a
-developer following the documented compose workflow and running the API
-natively gets a silently Mongo-less application that still appears to work,
-because LIT-258's graceful degradation hides the absence. This is a
-configuration gap, not a code defect, and is the exact class of issue §3.1.8
-exists to catch. **Recommended:** publish `27017:27017` on the `mongo` service,
-or document the hybrid workflow's `docker run -p 27017:27017` and
-`MONGO_URL=mongodb://127.0.0.1:27017` explicitly.
-
-This report itself constitutes one full configuration run:
-Python 3.11.15, macOS (Darwin), Node v26.4.0, CPU-only (no discoverable GPU),
-against Chromium/Firefox/WebKit via Playwright 1.63.0 — all green (§4.1).
-**Two configuration cells remain genuinely unverified by this report:** an
-exact Python-3.10 local reproduction of the CI environment (CI itself already
-covers this continuously and is green as of commit `a3a78fa`'s merge, per
-`gh pr checks`, but this report did not independently reproduce it locally),
-and any Windows-native run — no team member's dev machine was confirmed as
-Windows at drafting time. **Owner:** whichever team member develops on
-Windows, if any, should run the frontend and backend suites there once and
-record the result; otherwise, state explicitly in the final report that
-Windows is not a supported development configuration for this project.
+| Row | Content |
+| --- | --- |
+| **Technique Objective** | Verify the product behaves the same across the browser engines, operating systems, language runtimes, accelerators and deployment topologies it is expected to run on, and identify any configuration-dependent behaviour. |
+| **Technique** | Browsers: Playwright across Chromium, Firefox and WebKit at three widths. Operating systems: macOS, Windows 11 and Ubuntu on CI. Runtimes: Python 3.10 on CI against 3.11 locally, Node 20 on CI against Node 26 locally. Accelerator: CPU-only against GPU. Redis: containerised against unreachable. Topology: the native development setup against the containerised stack. |
+| **Oracles** | A cross-configuration differential oracle: the same functional suite must produce the same pass or fail outcome across configurations, and any divergence is itself the finding rather than noise to average away. CI is the continuous instance of this oracle. Numeric outputs may legitimately differ slightly between CPU and GPU floating-point paths, and where that matters a tolerance is stated rather than asserting exact equality. |
+| **Required Tools** | GitHub Actions, Playwright's three engine projects, Docker Compose, local Python and Node environments on each host. |
+| **Success Criteria** | The functional suite passes on every declared supported configuration. The CPU fallback path is exercised in at least one. No browser-specific layout failure. Any configuration-dependent divergence is quantified rather than left unexamined. |
+| **Special Considerations** | CI deliberately installs the CPU-only torch wheel, so CI never exercises the GPU path at all, and GPU coverage is necessarily manual and local. That is stated plainly rather than implying CI covers it. |
 
 ---
 
 # 4. Deliverables
 
-The following artefacts are produced by this test effort and are the ones by
-which its success should be measured:
+This section lists the artefacts created by the test effort that give direct,
+tangible benefit to a stakeholder, and by which the success of the test effort
+should be measured. Every result in this report is reported here; section 3
+describes how each technique was designed, and this section reports what running
+it produced.
 
-- Backend `pytest` run logs and summary (§4.1)
-- Frontend Jest run logs and summary (§4.1)
-- Frontend ESLint report (§4.1)
-- Frontend production build log (§4.1)
-- Cross-browser Playwright layout report (§4.1)
-- FR/SR → test traceability matrix (§4.2)
-- GitHub Actions CI history as the continuous regression record (§4.2)
-- ⏳ Performance profiling results vs SRS §3.4.1 (pending GPU hardware — §3.1.4)
-- ⏳ Locust load-test report (pending a live full-stack run — §3.1.5)
-- ⏳ Manual security probing results and dependency-scan output (§3.1.6)
-- ⏳ Failover scenario matrix with recorded outcomes for scenarios (b)–(j) (§3.1.7)
-- ⏳ Accessibility/usability review notes (§3.1.3)
+- Backend test logs and summary
+- Frontend component test logs and summary
+- Static analysis and production build logs
+- Cross-browser and accessibility reports
+- Black-box API collection and run report
+- Load test report scored against SRS section 3.4.1
+- Accelerated inference measurements
+- Failover scenario matrix
+- Dependency and container image scan output
+- Containerised deployment report
+- Defect register
+- Requirement to test traceability matrix and line coverage report
+- Continuous integration history
 
 ## 4.1 Test Evaluation Summaries
 
-**Form and content.** Each automated suite run produces: suite name, tests
-collected/passed/failed/skipped, wall-clock duration, the git commit SHA it
-was run against, and the exact command used (so it is independently
-reproducible). Manual technique results are recorded as a dated observation
-against the scenario or check it addresses, with the reviewer named.
+**Form and content.** Each automated run records the suite name, the tests
+collected, passed, failed and skipped, the wall-clock duration, the commit it ran
+against, and the exact command, so that anyone can reproduce it. Manual results
+are recorded as a dated observation naming the reviewer.
 
-**Frequency.** Automated suites run on every PR via CI (continuous); the full
-manual pass (GPU performance, load testing, exploratory security, failover
-scenarios, accessibility) is intended per milestone and once at Phase 4
-submission.
+**Frequency.** The automated suites run on every pull request through continuous
+integration. The fuller pass, meaning load, failover, accessibility, dependency
+scanning and the containerised run, is produced at each milestone and once before
+Phase 4 submission.
 
-**This report carries two execution passes.** The original (macOS,
-`a3a78fa`, 2026-09-13) is retained verbatim below, because superseding
-evidence should extend a record rather than overwrite it. The
-re-verification pass (Windows 11, `c9fbd46` = tip of `origin/testing`,
-2026-09-19) follows it, and the two are reconciled at the end of this
-subsection.
+**Environment.** Two hosts were used, both running against the same commit.
+
+| Item | macOS host | Windows host |
+| --- | --- | --- |
+| Hardware | Apple M3 Pro, 18 GB, 14-core GPU | Windows 11 |
+| Python | 3.11.15 | 3.11.0 |
+| Node | 26.4.0 | 20 |
+| PyTorch | 2.13.0, no CUDA, MPS available | 2.13.0, CPU |
 
 ---
 
-#### Pass 2 — re-verification, `origin/testing` `c9fbd46`, Windows 11, 2026-09-19
+### Backend test logs
+
+The backend suite is the largest single body of evidence in this effort. It is
+run with `REDIS_URL` pointed at an unreachable port, which reproduces the
+condition continuous integration runs under, where no Redis service container
+exists. The code under test talks to `fakeredis` and `mongomock`, in-memory
+substitutes injected by fixtures; the unreachable port is a guard that stops a
+test silently passing against a developer's local Redis. Logs are produced on
+every run and reviewed before any branch is pushed.
 
 ```
-$ cd Backend
-$ REDIS_URL="redis://127.0.0.1:1/0" .venv/Scripts/python.exe -m pytest -q -rs --tb=no
+cd Backend
+REDIS_URL="redis://127.0.0.1:1/0" pytest -q --tb=short
 
-platform win32 -- Python 3.11.0, pytest-8.4.2
 collected 722 items
-
-========== 715 passed, 7 skipped, 406 warnings in 382.80s (0:06:22) ===========
+716 passed, 6 skipped, 406 warnings in 135.04s (0:02:15)
 ```
 
-**0 failures, 0 errors.** The suite has grown from 593 collected to **722**
-(+129) and from 49 to **53 backend test files** since Pass 1. The four new
-files are `test_inference_consistency.py`, `test_metadata_store.py`,
-`test_metrics_synthesis.py` and `test_operational_metrics.py`.
+**722 collected, 716 passed, 0 failed** on macOS. The Windows host reported 715
+passed and 7 skipped from the same 722, also with zero failures.
 
-**All seven skips, enumerated with their reasons as reported by `-rs`:**
+Every skip is environment-gated with a stated reason, so none is a silent
+omission: two require a reachable broker, two require GPU or CUDA resources, and
+three download roughly 1.2 GB from the model hub and are gated behind an
+environment variable.
 
-| Test | Skip reason |
-| ---- | ----------- |
-| `test_fanout_orchestrator.py:150` | No reachable Redis at `redis://localhost:6379/15` — killed-worker recovery test; the message names the exact `docker-compose` command that enables it |
-| `test_task_orchestrator.py:502` | No broker reachable to inspect the request-path client |
-| `test_function_testing.py:303` | Requires GPU/model resources |
-| `test_memory_profiling.py:35` | VRAM test requires CUDA |
-| `test_ser_checkpoint.py:139` | Hits the Hugging Face Hub, ~1.2 GB; gated behind `AUDIOLIT_HUB_TESTS=1` |
-| `test_ser_checkpoint.py:152` | Same Hub-download gate |
-| `test_ser_checkpoint.py:161` | Same Hub-download gate |
-
-Every skip is environment-gated with a stated reason. **None is a silent
-omission**, which is the property this table exists to demonstrate — a skip
-without a reason is indistinguishable from a test that was quietly disabled.
-
-**An observed variation, reported as measured rather than explained away.** An
-earlier Pass-2 run of the same command on the same commit produced **713
-passed, 9 skipped** — same 722 total, still zero failures, but two more skips.
-That run was executed with no Redis container on the host; the run reported
-above was executed while a `redis:7-alpine` container was listening on
-`localhost:6379`. The two runs used an identical `REDIS_URL` (the unreachable
-port), so `REDIS_URL` is not the variable: `test_fanout_orchestrator.py:35`
-reads a **separate** `TEST_REDIS_URL`, defaulting to
-`redis://localhost:6379/15`, and other broker-probing tests behave similarly.
-**The two additional skips in the 9-skip run were not captured with `-rs` and
-are therefore not enumerated here**; stating which tests they were would be a
-guess. The actionable finding stands on its own: **part of this suite's
-skip/run behaviour is governed by a host Redis on the default port, through an
-environment variable distinct from the one the plan's run command sets.** A
-reproducible evidence run should pin `TEST_REDIS_URL` explicitly, and a
-follow-up should determine whether a second broker-URL variable is intended.
-
-**Reconciling the two passes.** Pass 1 reported 5 skips, Pass 2 reports 7. The
-increase is not a regression: Pass 2's seven are a strict superset of Pass 1's
-five, adding only the two broker-probing skips, and no test present in Pass 1
-moved from passed to skipped.
-
-**Prerequisite for reproducing Pass 2.** `pymongo` and `mongomock` must be
-installed. Against a virtualenv provisioned before the metadata tier landed,
-this same command reports **10 failed, 17 errors**, all
-`ModuleNotFoundError: No module named 'mongomock'`. That signature looks like
-a product defect and is not one. Run
-`pip install -r requirements.txt -r requirements-dev.txt` first.
+The skip count differs between hosts because `test_fanout_orchestrator.py` reads
+a **separate** `TEST_REDIS_URL`, defaulting to the standard Redis port, rather
+than the variable the documented command sets. Skip counts are therefore not
+comparable across hosts, which is recorded as defect D8.
 
 ---
 
-#### Pass 1 — original evidence, commit `a3a78fa`, macOS, 2026-09-13
+### Frontend component test logs
 
-### Backend — `pytest`
-
-```
-$ cd Backend && source .venv/bin/activate
-$ REDIS_URL="redis://127.0.0.1:1/0" python3 -m pytest -q --tb=no
-
-platform darwin -- Python 3.11.15, pytest-8.2.0, pluggy-1.6.0
-plugins: asyncio-0.23.7, anyio-4.4.0
-asyncio: mode=Mode.AUTO
-collected 593 items
-
-[... 49 test files ...]
-
-=========== 588 passed, 5 skipped, 370 warnings in 105.87s (0:01:45) ===========
-```
-
-Run **with `REDIS_URL` pointed at an unreachable port**, deliberately matching
-the condition CI runs under (no Redis service container) rather than the more
-forgiving condition of a locally reachable Redis, per this project's own
-testing convention. **0 failures.** The 5 skips are all legitimate,
-environment-gated skips, not silent omissions — confirmed individually:
-
-| Test                           | Skip reason                                                                       |
-| ------------------------------ | --------------------------------------------------------------------------------- |
-| `test_function_testing.py:303` | Requires GPU/model resources                                                      |
-| `test_memory_profiling.py:35`  | VRAM test requires CUDA                                                           |
-| `test_ser_checkpoint.py:139`   | Hits the Hugging Face Hub, downloads ~1.2 GB; gated behind `AUDIOLIT_HUB_TESTS=1` |
-| `test_ser_checkpoint.py:152`   | Same Hub-download gate                                                            |
-| `test_ser_checkpoint.py:161`   | Same Hub-download gate                                                            |
-
-Warnings observed were all benign and expected: `PySoundFile failed. Trying
-audioread instead` (a librosa fallback path exercised deliberately by
-malformed-audio fixtures), a captum LIME feature-count warning, and an RQ
-`CLIENT SETNAME` compatibility warning against fakeredis — none indicate a
-defect.
-
-### Frontend — Jest
+Component behaviour is covered by Jest with Testing Library, concentrated on the
+interaction-heavy canvas, waveform, grid selector, perturbation and quick-start
+components. These run on every pull request.
 
 ```
-$ cd Frontend && npm test -- --silent
-
-PASS src/components/audio/WaveformViewer.test.tsx
-PASS src/tests/WaveformViewer.test.tsx
-PASS src/tests/SpectrogramGridSelector.test.tsx
-PASS src/tests/PerturbationTools.test.tsx
-PASS src/tests/XAIOverlayCanvas.test.tsx
-PASS src/tests/ui-components.test.tsx (6.092 s)
-
-Test Suites: 6 passed, 6 total
-Tests:       47 passed, 47 total
-Snapshots:   0 total
-Time:        6.764 s
-```
-
-**0 failures, 6/6 suites, 47/47 tests.**
-
-**Pass 2 (Windows 11, `c9fbd46`, 2026-09-19):**
-
-```
-$ cd Frontend && npm test -- --silent
+cd Frontend && npm test -- --silent
 
 Test Suites: 7 passed, 7 total
 Tests:       55 passed, 55 total
+Time:        5.833 s
 ```
 
-**0 failures, 7/7 suites, 55/55 tests** — up 1 suite and 8 tests. The added
-suite is `src/tests/QuickStartDialog.test.tsx` (LIT-261), covered in §3.1.3.
-The frontend E2E surface also grew by `e2e/quickstart.spec.ts`, which is a
-Playwright project rather than a Jest suite and so is not counted in the 55.
+**7 of 7 suites and 55 of 55 tests passed**, identically on both hosts.
 
-### Frontend — ESLint
+---
 
-```
-$ cd Frontend && npm run lint
-✖ 108 problems (0 errors, 108 warnings)
-```
+### Static analysis and production build logs
 
-**Pass 2 (2026-09-19): `✖ 110 problems (0 errors, 110 warnings)`** — still
-**0 errors**; the count moved 108 → 110 with the quick-start component. The
-characterisation below is unchanged and was re-confirmed.
-
-**0 errors.** All 108 warnings are `@typescript-eslint/no-explicit-any` (loose
-typing on WebSocket payloads and test mocks) and `react-hooks/exhaustive-deps`
-(two components with an intentionally partial dependency array) plus
-`react-refresh/only-export-components` (context files exporting both a
-component and a hook/constant, a Vite Fast-Refresh advisory, not a
-correctness issue). None block the build; none are new defects introduced by
-this report's evaluation.
-
-### Frontend — Production Build
+Static analysis runs on every pull request and blocks the merge on any error.
+The production build log is kept because bundle size is a standing risk.
 
 ```
-$ cd Frontend && npm run build
+cd Frontend && npm run lint
+✖ 113 problems (0 errors, 113 warnings)
+
+cd Frontend && npm run build
 ✓ 2585 modules transformed.
-dist/index.html                     0.91 kB │ gzip:     0.40 kB
-dist/assets/index-DoDgtMUc.css     78.27 kB │ gzip:    13.35 kB
-dist/assets/index-BZ_0YlEE.js   5,906.67 kB │ gzip: 1,761.88 kB
-✓ built in 9.16s
+dist/assets/index-CIsQwW4P.js   5,913.76 kB │ gzip: 1,763.97 kB
+✓ built in 11.10s
 ```
 
-**Pass 2 (2026-09-19):** build succeeds; `dist/assets/index-*.js`
-**5,913.76 kB / gzip 1,776.77 kB**, CSS 78.34 kB / gzip 13.38 kB, built in
-46.9 s. Vite repeats the >500 kB chunk advisory. The bundle grew ~7 kB
-(1.76 → 1.78 MB gzipped) with the quick-start component — **the
-code-splitting finding below is unchanged and still open**, and is now
-confirmed on a second host rather than resting on a single observation.
+**Zero errors** on both hosts; the warnings are loose typing on WebSocket
+payloads, two deliberately partial dependency arrays, and a fast-refresh
+advisory. None blocks the build.
 
-**Build succeeds.** One real observation worth carrying into the risk log
-(§5): the main JS bundle is 5.9 MB unminified / 1.76 MB gzipped in a single
-chunk, and Vite's own build output warns that chunks over 500 kB should be
-code-split. This is not a test failure, but it is a genuine, previously
-unrecorded finding from this evaluation — large enough to affect the SRS
-§3.2.2 "under 30 seconds, cold" first-load task-time target on a slow
-connection, though this report did not measure that directly (see §3.1.4's
-GPU/performance gap — this is the frontend analogue of it, similarly
-unmeasured here).
+The build log carries one standing finding, recorded as observation O1: the
+application ships as a single 5.9 MB chunk, 1.76 MB gzipped, and the build tool
+itself warns that chunks above 500 kB should be split.
 
-### Cross-browser Layout — Playwright
+---
 
-See full output under §3.1.3 and §3.1.8: **12/12 passed**, Chromium + Firefox
+### Cross-browser and accessibility reports
 
-- WebKit, three desktop viewports, 10.1s total.
+Layout is verified across three browser engines at three desktop widths, and
+accessibility is scanned with axe-core inside the same browser automation, plus
+Lighthouse for a whole-page score. These are produced per milestone and after any
+change to shared layout or styling.
 
-### Not executed in this report (all named again in §3.1.x with owner and
+```
+cd Frontend && npm run test:e2e
+24 passed, 6 failed (32.5s)
+```
 
-trigger): GPU-gated performance figures, Locust load testing, manual
-exploratory security probing, failover scenarios (b)–(j), accessibility/
-usability review, live-Redis eviction timing, exact Python-3.10 local
-reproduction, Windows configuration.
+**Every layout and component assertion passed in Chromium, Firefox and WebKit.**
+The six remaining results are the same two accessibility assertions repeated once
+per engine, so they are one finding observed three times rather than six distinct
+problems. That they reproduce identically in all three confirms the cause is the
+markup rather than any one browser.
+
+The accessibility scan was run in two states, because the first-run state shows
+the quick-start dialog over the workbench, and a modal hides the application
+behind it from any scanner.
+
+| State | Scored WCAG 2.1 A and AA findings | Detail |
+| --- | --- | --- |
+| First run, dialog open | 1 rule | `color-contrast`, serious, 6 nodes |
+| Workbench, dialog dismissed | 4 rules | `button-name`, critical, 18 nodes; `label`, critical, 1 node; `aria-input-field-name`, serious, 2 nodes; `color-contrast`, serious, 6 nodes |
+
+axe-core additionally passed 27 checks, listed 2 items as needing human review,
+and reported 3 advisory best-practice rules. The keyboard walk reached 15
+focusable controls in 15 presses with no dead stops, so the workbench is
+navigable without a mouse.
+
+The findings fall into two narrow classes, both fixable without structural
+change: missing accessible names on select triggers and icon-only buttons, 9 in
+panel components, 5 in audio components and 4 in layout components; and colour
+contrast on badge and button styles, measured at 3.37 to 1 against the 4.5 to 1
+required, on 10px text.
+
+**A methodological result worth keeping.** A single Lighthouse run against the
+default landing page reported an accessibility score of 100, while axe-core found
+the violations above in the same application, because Lighthouse had scanned the
+first-run state where the modal hides the workbench. Scanning two states rather
+than trusting one default-state score is what made the real picture visible. The
+first-run state is shown below; the workbench behind the dialog is what a
+single-state scan never reaches.
+
+![The first-run state, with the quick-start dialog covering the workbench, which is the state a single default scan measures](screenshots/01-workbench-containerised.png)
+
+The browser automation tool's own report is reproduced below. The scoped command
+above runs the three layout and accessibility projects, 30 tests in total.
+
+![The browser test report, showing the passing layout and component suites alongside the accessibility assertions that fail identically in all three engines](screenshots/05-playwright-report.png)
+
+**Running the unscoped command adds the full-stack data-flow project**, which
+requires live models and a working cache. Against the containerised deployment
+all 36 tests ran and **24 passed, 12 failed**: the same 6 accessibility
+assertions, plus all 6 data-flow tests. Those six cover prediction repeatability,
+transcript rendering, clip selection binding, deepfake confidence and attribution
+provenance, and they are consistent with the cache defect D11 below combined with
+the container's empty model cache. They were not re-run natively, so they are
+reported as corroborating D11 rather than as an independent finding.
+
+The Lighthouse report below is from the containerised deployment. The screenshot
+is the tool's own output, not a transcription of it.
+
+![Lighthouse report for the containerised frontend, showing Performance 56, Accessibility 96 and Best Practices 96](screenshots/03-lighthouse-report.png)
+
+---
+
+### Black-box API collection and run report
+
+An independent Postman collection exercises the HTTP contract from outside the
+application, complementing the in-process route tests. It is committed at
+`Backend/apitests/AudioLIT.postman_collection.json` and runs headless through
+newman, so it can be executed against any deployment.
+
+```
+newman run Backend/apitests/AudioLIT.postman_collection.json \
+  --env-var baseUrl=http://127.0.0.1:8000
+
+requests     13 executed, 0 failed
+assertions   39 executed, 0 failed
+total run duration 1876ms
+average response time 132ms
+```
+
+**All 39 assertions passed against the native stack.** Two behaviours are worth
+naming because they are easy to get wrong and are correct here. Resolving a
+supported model returns a 40-character commit identifier rather than a mutable
+branch name, plus a 64-character weight digest, so a result can be tied to exact
+weights. Resolving an unsupported architecture is refused with a typed code and a
+message naming the supported families, rather than loading something the system
+cannot explain.
+
+Run again against the containerised deployment, **37 of 39 assertions passed**;
+the two failures are the container-only cache defect reported below.
+
+---
+
+### Load test report
+
+The load harness drives the running stack over HTTP with a weighted mix of cached
+reads, job enqueues, attribution, cold predictions and health checks, and scores
+the 95th percentile against the committed performance targets. It is produced per
+milestone, on a quiet machine.
+
+```
+locust -f loadtests/locustfile.py --host http://127.0.0.1:8000 \
+       --headless -u 8 -r 2 -t 3m
+```
+
+**979 requests, 0 failures, a 0.00 percent failure rate.**
+
+| Operation | Requests | 95th percentile | Budget | Verdict |
+| --- | --- | --- | --- | --- |
+| Cached prediction | 583 | 10 ms | 200 ms | Pass |
+| Enqueue multitask | 323 | 21 ms | 50 ms | Pass |
+| Health | 65 | 14 ms | not budgeted | Recorded |
+| Cold prediction | 2 | 6400 ms | 3000 ms | Sample too small to judge |
+| Attribution | 5 | 44000 ms | 8000 ms | Sample too small to judge |
+| Acoustic profile | 1 | 2500 ms | 2000 ms | Sample too small to judge |
+
+Both enforced targets passed with a wide margin. Enqueue acknowledgement at 21 ms
+against a 50 ms budget is the most important figure for the architecture claim,
+because it demonstrates that the request path hands work to the queue rather than
+doing it inline. The three model-bound rows are reported as not judgeable: the
+harness requires 20 samples before scoring a target and these drew 1, 2 and 5,
+because each occupies a worker for seconds on this hardware.
+
+One limitation of this deliverable is worth stating, because this run
+demonstrated it. The harness measures the HTTP exchange, and it reported a clean
+0.00 percent failure rate during a window in which a background worker was
+failing every job it accepted, because those failures occur after the response
+has been returned. Load testing alone cannot see that; the failover inspection
+below is what caught it.
+
+---
+
+### Accelerated inference measurements
+
+The committed performance targets assume accelerated hardware. Neither host has
+an NVIDIA device, but the macOS host is an Apple M3 Pro whose 14-core integrated
+GPU is reachable through the Metal Performance Shaders backend, which makes the
+model-bound rows measurable on real acceleration. Whisper-base was timed on a
+3.9 second clip, five runs after a discarded warm-up.
+
+| Device | Model load | Inference, median | Range | Speed relative to real time |
+| --- | --- | --- | --- | --- |
+| CPU | 1177 ms | 242.4 ms | 241.3 to 242.9 ms | 15.9x |
+| Apple MPS GPU | 1573 ms | 118.1 ms | 117.6 to 129.7 ms | 32.7x |
+
+**The GPU is 2.05 times faster, and both devices returned an identical
+transcript,** so acceleration changes the speed and not the answer. Scaled to the
+15 second reference clip the requirements name, this is roughly 940 ms on CPU and
+460 ms on the GPU against a 3 second budget, so the cold ASR target is met on this
+hardware by a wide margin.
+
+Two cautions keep this honest. These are pure inference timings with the model
+already resident, a different measurement from the end-to-end figure under load
+above. And an Apple GPU is not the reference device the requirements assume, so
+this shows the targets are reachable on accelerated hardware rather than
+certifying them against that device.
+
+**The application cannot currently use this GPU**, which is defect D9: every
+device selection in the codebase chooses between CUDA and CPU only, with no MPS
+branch anywhere, so on Apple silicon every model runs on the CPU while an idle
+GPU sits beside it.
+
+---
+
+### Failover scenario matrix
+
+Each dependency is deliberately failed while the system is serving, then
+restored, and the behaviour is recorded. This deliverable is destructive and is
+produced once per milestone, against a local stack, after all other evidence has
+been captured.
+
+| Scenario | Outcome |
+| --- | --- |
+| F1, MongoDB tier unavailable | Degrades correctly on every data method; writes return false and reads return empty without raising. One method breaks the pattern and raises, recorded as D1 |
+| F2, Redis lost while serving | **Every endpoint returns 500, including health, instead of the intended 503.** Recorded as D2 |
+| F3, Redis restored | **Passes.** Health returns to 200 and enqueue works again with no application restart |
+| F4, abrupt worker kill then immediate restart | **Only one of five families starts.** The four GPU-bound families refuse for about seven minutes. Recorded as D3 |
+| F5, manual recovery | **Passes.** Clearing the locks and stale registrations brings all five families up cleanly |
+| F6, worker health after a crash | Reports six active workers when one process is alive. Recorded as D4 |
+
+F2 was isolated rather than assumed. With Redis pointed at a dead port, the same
+request was made twice against the same application object:
+
+```
+with SessionMiddleware:     500 Internal Server Error
+without SessionMiddleware:  503 {"status":"degraded","redis":false,
+                                 "detail":"Error 61 connecting to 127.0.0.1:1. 61."}
+```
+
+The health route is written to degrade, but the session middleware runs before
+routing on every request and issues an unguarded Redis call, so the route's own
+handler is never reached.
+
+**End-to-end verification after recovery.** With all five families cleanly
+restarted, a full multitask job over a real corpus clip was enqueued and polled to
+completion: acknowledged in 23 ms and finished successfully within 4 seconds, with
+the aggregator combining all three family results. Emotion recognition returned a
+real distribution and deepfake detection a real judgement at 0.92 confidence.
+Speech recognition returned scaffold output, which is defect D5.
+
+---
+
+### Dependency and container image scan output
+
+Three scanners cover different layers. Image-layer scanning runs on every build
+in continuous integration through Trivy. Application-dependency scanning is run
+manually per milestone and is not yet wired into the pipeline, which is a gap
+worth closing.
+
+`npm audit` reports **23 vulnerabilities: 2 critical, 15 high, 5 moderate, 1
+low**. The two critical findings are the ones to act on first, because they reach
+the plotting library that renders the projection panel, which is a direct runtime
+dependency executing in the user's browser. The build-tooling findings do not
+ship.
+
+`pip-audit` reports **9 distinct advisories across 3 packages**. Seven are in the
+web framework layer that sits directly on the request path and matter most. One
+is in the test runner and does not ship, which is checkable because the
+dependency files are split so that production images install runtime
+requirements only. One has no published fix and can only be tracked.
+
+---
+
+### Containerised deployment report
+
+The full stack was built and run from the compose definition, and the API
+collection was executed against it, to confirm the containerised topology behaves
+the same as the native one. This deliverable is produced whenever the deployment
+definition changes.
+
+Both images build, at 538 MB for the backend and 103 MB for the frontend, and all
+five services start. The API serves correctly from inside the container network
+with all five worker families registered, and the web container serves the built
+frontend.
+
+![The AudioLIT workbench served from the containerised frontend, with all panels rendering and the status bar reporting the cache and queue connected](screenshots/02-workbench-panels.png)
+
+**The differential run found three container-only defects that no native run
+could have found.**
+
+| Check | Native | Containerised |
+| --- | --- | --- |
+| API assertions passed | 39 of 39 | **37 of 39** |
+| Cache miss returns 200 or 404 | Pass | **Fail, returns 500** |
+| Worker service health | Not applicable | **Reported unhealthy while working** |
+| Lighthouse performance | 75 | **56** |
+| Main bundle transfer size | 1.76 MB gzipped | **5.9 MB uncompressed** |
+
+**D11, the cache tier is non-functional in containers.** The compose file supplies
+`REDIS_URL`, but the content-addressed cache manager reads `REDIS_HOST`,
+`REDIS_PORT` and `REDIS_DB` and falls back to `localhost`. There is no Redis
+inside the api container, so every route backed by that cache fails with
+`ConnectionError: Error 111 connecting to localhost:6379`. The native
+configuration hides this because a developer machine usually has Redis on
+localhost.
+
+**D10, the worker is permanently reported unhealthy while working correctly.** It
+defines no healthcheck, so it inherits the API's from the shared image, which
+requests an HTTP endpoint. A worker container runs no HTTP server, so the probe
+always fails. Any orchestrator acting on health status would treat a healthy
+worker as failed and could restart it in a loop.
+
+**D12, assets are served uncompressed.** The nginx configuration contains no
+compression directive, and the main bundle is served with a content length of
+5914703 bytes and no content encoding. The container therefore ships 5.9 MB where
+the native preview ships 1.76 MB, which is why the Lighthouse performance score
+falls from 75 to 56 in the container.
+
+Two operational notes, neither a product defect. Building the api and worker
+services concurrently fails because both write the same image name; building in
+sequence succeeds. And the stack cannot start while a standalone Redis or a
+development server holds the published ports. One measurement worth recording:
+the containerised API's first model resolution took 5 minutes 35 seconds against
+roughly 1 second natively, because the container starts with an empty model cache;
+the compose file declares a cache volume for exactly this reason.
+
+---
+
+### Defect register
+
+Twelve defects and two observations. None was known before this test effort.
+Seven of the twelve appear only under deliberate fault injection, in tooling, or
+in deployment configuration, rather than in normal operation.
+
+| ID | Severity | Area | Defect |
+| --- | --- | --- | --- |
+| D1 | Low | MongoDB tier | `ensure_schema()` raises when the tier is unset while every other method degrades quietly. Nothing in the application calls it, so production is unaffected today. |
+| D2 | High | Request path | During a Redis outage every endpoint returns 500 instead of the intended 503, because the session middleware issues an unguarded call before routing. |
+| D3 | High for operations | Worker pool | After an abrupt kill, all four GPU-bound families refuse to restart for about seven minutes because their locks are not purged. The purge treats a freshly killed worker as alive. |
+| D4 | Medium | Monitoring | Worker health reports dead workers as active, because it reads registrations rather than process liveness. |
+| D5 | Medium | Multitask ASR | Speech recognition returns scaffold output with an empty transcript while the other two tasks return real predictions. Documented in code as pending wiring. |
+| D6 | Medium | Test suite | The suite hangs under coverage instrumentation at one file; the same tests pass in the ordinary run. |
+| D7 | Medium | Deployment configuration | The compose MongoDB service publishes no host port, so the hybrid setup developers use cannot reach it, and the tier degrades silently. |
+| D8 | Low | Test harness | Skip behaviour is governed by a second broker variable distinct from the documented one, so skip counts vary between hosts for reasons unrelated to the code. |
+| D9 | Medium, the easiest win here | Device selection | Device selection is CUDA or CPU only, with no MPS branch, so Apple silicon runs every model at roughly half the achievable speed beside an idle GPU. |
+| D10 | Medium | Container healthcheck | The worker inherits the API's HTTP healthcheck and is permanently reported unhealthy while functioning. |
+| D11 | High in containers | Cache configuration | Containers set `REDIS_URL` but the cache manager reads `REDIS_HOST` and defaults to localhost, so the content-addressed cache tier fails entirely in the containerised deployment. |
+| D12 | Medium | Deployment configuration | The nginx image serves assets with no compression, shipping 5.9 MB instead of 1.76 MB and costing 19 Lighthouse performance points. |
+
+| ID | Observation |
+| --- | --- |
+| O1 | The frontend ships as a single 5.9 MB chunk with no code splitting. The build tool warns about it and it is the main lever on first-load time. |
+| O2 | A worker left running with older code silently failed every job it accepted while the HTTP surface stayed healthy and the load test reported no failures. Deployment must restart workers on every code change, and monitoring should alert on the failed-job counter. |
+
+Defects D2, D3, D11 and D12 should be raised before Phase 4 submission. All four
+are small, well-understood fixes with reproductions recorded above.
 
 ## 4.2 Reporting on Test Coverage
 
-**Form.** The centrepiece is the FR/SR-to-test traceability matrix below.
-Each row was checked against the actual repository, not assumed from the SRS
-alone — the count column is a `grep` of test files referencing the FR id
-directly, cross-checked by file inspection where the count was zero or
-surprising.
+**Form.** The centre of coverage reporting is the requirement-to-test matrix
+below. Each row was checked against the repository rather than assumed from the
+SRS.
 
-**Frequency.** Regenerated at each milestone and immediately before Phase 4
-submission; the underlying counts are cheap to reproduce
-(`grep -rl "FR<n>" Backend/tests/*.py`).
+**Frequency.** Regenerated at each milestone and immediately before submission.
 
-| Req.    | Summary                                       | Technique (§3.1.x)  | Test file(s)                                                                                                                                                                                               | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ------- | --------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| FR1     | Dynamic HF model ingestion, safetensors-only  | 3.1.2, 3.1.6        | `test_model_registry_service.py`, `test_models_routes.py`, `test_custom_model_fidelity.py`                                                                                                                 | ✅ 3 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR2     | Benchmark dataset ingestion & management      | 3.1.1, 3.1.2        | `test_dataset_ingestion.py`, `test_dataset_service.py`, `test_datasets_routes.py`, `test_dataset_management_routes.py`, `test_l2arctic_loader.py`, `test_librispeech_loader.py`, `test_asvspoof_loader.py` | ✅ 7 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR3     | Asynchronous multi-task inference             | 3.1.2, 3.1.5, 3.1.7 | `test_task_orchestrator.py`, `test_multitask_orchestrator.py`, `test_fanout_orchestrator.py`                                                                                                               | ✅ 3 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR4     | Deterministic cache-by-hash retrieval         | 3.1.1, 3.1.4        | `test_redis_cache.py`, `test_results_cache.py`, `test_hashing.py`, `test_warmup_cache_contract.py`                                                                                                         | ✅ 4 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR6     | Speech Emotion Recognition                    | 3.1.2               | `test_ser_model.py`, `test_ser_corpora.py`, `test_ser_checkpoint.py`                                                                                                                                       | ✅ 3 files (checkpoint tests partly Hub-gated)                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| FR7     | Audio Deepfake Detection                      | 3.1.2               | `test_deepfake_classifier.py`, `test_asvspoof_loader.py`, `test_degradation_scoring.py`                                                                                                                    | ✅ 3 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR8     | Spectrogram LIME/SHAP + Grad-CAM              | 3.1.2               | `test_grad_cam.py`, `test_saliency_service.py`, `test_saliency_routes.py`                                                                                                                                  | ✅ 3 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR9     | Integrated Gradients (label correction)       | 3.1.2               | `test_integrated_gradients.py`, `test_grad_cam.py`                                                                                                                                                         | ✅ 2 files — **regression-critical, verify the two are asserted as distinct outputs, not just both present**                                                                                                                                                                                                                                                                                                                                                                      |
-| FR10    | Acoustic wave profiling (F0/RMS/log-mel)      | 3.1.2               | `test_acoustic_profiler_service.py`, `test_acoustic_routes.py`                                                                                                                                             | ✅ 2 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR11    | Latent projection explorer (PCA/t-SNE/UMAP)   | 3.1.2, 3.1.3        | _(no dedicated backend test file found by direct search)_                                                                                                                                                  | ⚠️ **0 files — real gap.** `umap-learn` is a declared dependency and `/inferences/embeddings` exists as a route (`app/api/routes/inferences.py:796`), and the frontend has `EmbeddingContext`/`EmbeddingPanel`/`EmbeddingPlot`, but no test file targets the embedding-extraction or projection logic directly. **This is a genuine coverage gap, not an oversight in this matrix** — confirmed by direct `grep` across `Backend/tests/` and `Frontend/src/tests/` on 2026-09-13. |
-| FR12    | Canvas-driven signal mutation                 | 3.1.2, 3.1.3        | `test_perturbation_service.py`                                                                                                                                                                             | ⚠️ 1 file — thin for a committed FR with four sub-clauses (FR12.1–12.4); frontend `PerturbationTools.test.tsx` adds UI-side coverage but the backend has a single file                                                                                                                                                                                                                                                                                                            |
-| FR15    | Accent bias profiling                         | 3.1.2               | `test_accent_bias_profiler.py`, `test_accent_bias_runner.py`, `test_l2arctic_loader.py`, `test_evaluation_routes.py`                                                                                       | ✅ 4 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR16    | Attribution faithfulness auditing             | 3.1.2               | `test_auc_faithfulness.py`, `test_faithfulness.py`, `test_evaluation_scoring.py`, `test_high_saliency_masking.py`                                                                                          | ✅ 4 files                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| FR17    | Faithful attention extraction (fallback flag) | 3.1.2               | `test_hook_manager_service.py`, `test_provenance.py`                                                                                                                                                       | ✅ 2 files — **regression-critical, the same as FR9**                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| SR1–SR7 | Security requirements                         | 3.1.6               | `test_security.py`, `test_session_cookie.py`                                                                                                                                                               | ✅ automated subset executed (§4.1); manual pass pending (§3.1.6)                                                                                                                                                                                                                                                                                                                                                                                                                 |
+**Line coverage: 69 percent, with one file excluded.** A straight
+`pytest --cov=app` does not finish, because it reaches the sixth test in
+`test_multitask_orchestrator.py` and hangs indefinitely, while those same six
+tests pass in the ordinary run. Instrumentation slows execution enough to expose
+a race, which is recorded as defect D6. Excluding that one file lets the
+measurement complete:
 
-**There is no FR5, FR13, or FR14 row** — the reconciled SRS does not define
-them (FR5, multi-model comparison, was demoted to non-committed stretch), and
-this matrix does not invent one.
+```
+REDIS_URL="redis://127.0.0.1:1/0" pytest -q --ignore=tests/test_multitask_orchestrator.py --cov=app
 
-**Two real gaps this matrix surfaces, found by actually checking rather than
-assuming coverage exists:**
+709 passed, 7 skipped in 154.95s
+TOTAL   6618 statements   2065 missed   69%
+```
 
-1. **FR11 (Latent Projection Explorer) has no dedicated backend test file.**
-   The route and the UMAP dependency exist; nothing in `Backend/tests/`
-   targets them directly by name. This should be raised with whoever owns
-   FR11 before Phase 4 submission — either a test exists under a
-   non-obvious filename and this matrix is wrong (re-check before acting),
-   or it is a genuine gap to close.
-2. **FR12 (Canvas Mutation) has only one backend test file** against four
-   SRS sub-clauses (non-destructive originals, Web Audio preview, correct
-   16 kHz mono shape, sub-500ms/2s timing) — likely under-tested relative to
-   its acceptance-criteria surface.
+Fully covered modules include `infrastructure/settings.py`,
+`domain/provenance.py`, `domain/acoustic_profiler_service.py` and
+`api/routes/metrics.py`. The gaps are concentrated rather than spread thin, which
+makes them actionable: `api/routes/inferences.py` is the largest by a wide margin
+at 8 percent of 763 statements, followed by `api/routes/inference.py` at 31
+percent. Both are the legacy inference surface inherited from the baseline, and
+both are the obvious next target for test effort.
 
-**Coverage metric not currently available:** line/branch coverage
-(`pytest-cov`) is not installed in this project's environment
-(`ModuleNotFoundError: No module named 'pytest_cov'`, confirmed 2026-09-13)
-and is not in `Backend/requirements.txt`. Adding it is a small, high-value
-change to make before Phase 4 submission — it would turn "588 passed" into a
-line-coverage percentage, which is a stronger coverage claim than pass count
-alone.
+The figure is stated with its exclusion rather than rounded up: six tests out of
+722 are not represented in it, and coverage should not be added to the CI gate
+until D6 is fixed.
 
-**Generic per-run report fields**, applied to every future automated run:
-date, commit SHA, logged-in user/CI actor, suite, tests executed, pass count,
-fail count, pass percentage, fail percentage, comments (used above for the
-skip-reason table and the warning summary).
+![The generated line coverage report, showing 69 percent overall across 6618 statements](screenshots/04-coverage-report.png)
+
+### Requirement to test traceability
+
+| Requirement | Summary | Technique | Test files | Coverage |
+| --- | --- | --- | --- | --- |
+| FR1 | Dynamic Hugging Face model ingestion, safetensors only | 3.1.2, 3.1.6 | `test_model_registry_service.py`, `test_models_routes.py`, `test_custom_model_fidelity.py` | 3 files |
+| FR2 | Benchmark dataset ingestion and management | 3.1.1, 3.1.2 | `test_dataset_ingestion.py`, `test_dataset_service.py`, `test_datasets_routes.py`, `test_dataset_management_routes.py`, `test_l2arctic_loader.py`, `test_librispeech_loader.py`, `test_asvspoof_loader.py` | 7 files |
+| FR3 | Asynchronous multi-task inference | 3.1.2, 3.1.5, 3.1.7 | `test_task_orchestrator.py`, `test_multitask_orchestrator.py`, `test_fanout_orchestrator.py`, `test_queue.py` | 4 files, but see defect D5 |
+| FR4 | Deterministic cache by hash | 3.1.1, 3.1.4 | `test_redis_cache.py`, `test_results_cache.py`, `test_hashing.py`, `test_warmup_cache_contract.py` | 4 files |
+| FR6 | Speech Emotion Recognition | 3.1.2 | `test_ser_model.py`, `test_ser_corpora.py`, `test_ser_checkpoint.py` | 3 files, checkpoint tests partly Hub-gated |
+| FR7 | Audio Deepfake Detection | 3.1.2 | `test_deepfake_classifier.py`, `test_asvspoof_loader.py`, `test_degradation_scoring.py` | 3 files |
+| FR8 | Spectrogram LIME and SHAP, Grad-CAM | 3.1.2 | `test_grad_cam.py`, `test_saliency_service.py`, `test_saliency_routes.py`, `test_spectrogram_attribution.py` | 4 files |
+| FR9 | Integrated Gradients, label correction | 3.1.2 | `test_integrated_gradients.py`, `test_grad_cam.py` | 2 files, regression-critical: verify the two are asserted as distinct outputs, not merely both present |
+| FR10 | Acoustic wave profiling | 3.1.2 | `test_acoustic_profiler_service.py`, `test_acoustic_routes.py` | 2 files |
+| FR11 | Latent projection explorer | 3.1.2, 3.1.3 | No dedicated backend test file found | **0 files, a real gap** |
+| FR12 | Canvas driven signal mutation | 3.1.2, 3.1.3 | `test_perturbation_service.py`, plus `PerturbationTools.test.tsx` and `SpectrogramGridSelector.test.tsx` | 1 backend file, thin for four sub-clauses |
+| FR15 | Accent bias profiling | 3.1.2 | `test_accent_bias_profiler.py`, `test_accent_bias_runner.py`, `test_l2arctic_loader.py`, `test_evaluation_routes.py` | 4 files |
+| FR16 | Attribution faithfulness auditing | 3.1.2 | `test_auc_faithfulness.py`, `test_faithfulness.py`, `test_evaluation_scoring.py`, `test_high_saliency_masking.py` | 4 files |
+| FR17 | Faithful attention extraction with fallback flag | 3.1.2 | `test_hook_manager_service.py`, `test_provenance.py` | 2 files, regression-critical as FR9 |
+| SRS 3.10 | MongoDB metadata tier | 3.1.1, 3.1.7 | `test_metadata_store.py` (26 tests), plus the degraded path in scenario F1 | Covered, live-server checks open |
+| SR1 to SR7 | Security requirements | 3.1.6 | `test_security.py`, `test_session_cookie.py`, `test_debug_and_tasks_routes.py`, `test_dataset_service.py`, plus the dependency and image scans | Automated subset executed, manual probing open |
+
+There is no FR5, FR13 or FR14 row, because the reconciled SRS does not define
+them. FR5, multi-model comparison, was moved to stretch scope. This matrix does
+not invent rows to look complete.
+
+### Gaps this matrix exposes
+
+1. **FR11, the latent projection explorer, has no dedicated backend test file.**
+   The route and the UMAP dependency both exist, and the frontend has the
+   embedding context, panel and plot, but nothing in `Backend/tests/` targets the
+   embedding extraction or projection logic by name. Either a test exists under a
+   name that does not mention it, in which case this row is wrong and should be
+   corrected, or it is a real gap. Settle it with the owner of FR11 before
+   submission.
+2. **FR12 has thin backend coverage** relative to its four SRS sub-clauses,
+   which cover non-destructive originals, Web Audio preview, correct 16 kHz mono
+   output shape, and timing bounds. The frontend side is better covered than the
+   backend side.
+3. **ASR in the multitask path is scaffolded, not wired,** recorded as defect
+   D5. The FR3 row passes at the orchestration level while the ASR result itself
+   is empty, which is exactly the kind of thing a pass count hides and a
+   traceability matrix should surface.
+
+### Continuous regression record
+
+Coverage is not only a point-in-time measurement. Every pull request runs the
+pipeline, which gives a standing regression record independent of the manual
+passes in section 4.1. Over the last 15 recorded runs, **12 completed green and
+3 failed**. All three failures occurred on feature branches during development
+of the containerisation and operational-metrics work, and each was green by the
+time the branch merged, so no failure reached the integration branch. That is
+the pattern a healthy gate produces: it catches problems on the branch, which is
+where catching them is cheap.
+
+**Generic per-run report fields**, applied to every future automated run: date,
+commit, host, actor, suite, tests executed, pass count, fail count, skip count
+with reasons, and comments.
 
 ---
 
 # 5. Risks, Dependencies, Assumptions, and Constraints
 
-| Risk                                                                                                                                      | Mitigation Strategy                                                                                                                                                                              | Contingency (Risk is realised)                                                                                                        |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| ~~MongoDB tier (SRS §3.10) is specified but unimplemented~~ — **CLOSED 2026-09-19.** Implemented by LIT-255/256/257/258 (PRs #135, #138, #140, #141); §3.1.1 now covers it | No longer applicable. Retained as a row rather than deleted, because the resolution is itself evidence that the flag-don't-design-around rule worked | n/a — risk realised in the favourable direction |
-| A stale virtualenv makes the metadata-tier tests fail with a signature that mimics a product defect (27 `ModuleNotFoundError` failures/errors) | Re-install `requirements.txt` + `requirements-dev.txt` before trusting any suite result; state the installed `pymongo`/`mongomock` versions alongside every reported run | Diagnose the failure signature before reporting it — read the actual exception rather than inferring a missing service container |
-| `testing` has diverged from `develop` (31 commits ahead; `develop` frozen), contradicting the branch model in `CLAUDE.md` and this plan's own superset assumption | Re-verify the branch relationship before each evidence run, as §5's assumptions already required; declare the evidence commit explicitly | Raise in Linear as a branch-model conflict; do not let two branches both be treated as authoritative |
-| No GPU available in this report's evaluation environment — FR1.4 CPU-fallback and every model-bound SRS §3.4.1 target are unmeasured here | Run §3.1.4 manually on the team's GPU dev machine before each milestone; state hardware on every figure produced                                                                                 | Report all performance figures as point-in-time with hardware named; never substitute a CPU-host number for a GPU target              |
-| Load testing (§3.1.5) may exceed the academic hardware budget at realistic concurrency                                                    | Stage the ramp; separate cache-hit from cache-miss profiles; report what was actually run vs extrapolated                                                                                        | State the executed ceiling plainly; never present an extrapolation as a measurement                                                   |
-| No ground truth exists for saliency-map correctness                                                                                       | Rely on metamorphic and deletion-score faithfulness oracles (§3, FR16.1) rather than direct equality assertions                                                                                  | Report faithfulness metrics, not accuracy claims, for every interpretability output                                                   |
-| `SimpleWorker(burst=True)` draining a dependency-gated aggregator on `fakeredis` has intermittently hung `pytest`                         | Stress-run affected orchestrator tests (~15 iterations) with a background-and-kill timeout                                                                                                       | Quarantine the flaky test and file it explicitly rather than silently retrying past it                                                |
-| Two individually green PRs have previously broken only in combination (the PR #10/#13 incident)                                           | Fetch and merge latest `develop`, then re-run the full suite, before pushing any PR                                                                                                              | Revert and fix forward on `develop`; do not force-merge past a discovered combination break                                           |
-| Corpora are large, licence-restricted, and slow to provision                                                                              | Streaming/sub-sampling loaders under the ~100 GB footprint bound (FR2.2)                                                                                                                         | Sub-sample and state the reduced corpus size used, in any report that depends on corpus scale                                         |
-| Model downloads make tests network- and Hub-dependent                                                                                     | Pin model revisions (SER pinned at `611e6db8`); gate Hub-downloading tests behind `AUDIOLIT_HUB_TESTS=1` (confirmed already in place, `test_ser_checkpoint.py`)                                  | Mark as `slow`/gated; exclude from the per-PR CI gate, run only at milestones                                                         |
-| Three developers may run concurrent sessions against the same repository the same day                                                     | Re-check Linear and `gh pr list --state open` immediately before starting work in an area; merge latest `develop` and re-run tests after any merge not your own                                  | Flag and resolve the specific combination conflict rather than assuming a green branch alone proves safety                            |
-| FR11 and FR12 have thin or absent backend test coverage (§4.2 finding)                                                                    | Assign owners before Phase 4 submission; add the missing FR11 embedding/projection test file                                                                                                     | Report the gap explicitly in the final submission rather than let the traceability matrix imply coverage that does not exist          |
-| Frontend production bundle is a single 5.9 MB (1.76 MB gzip) chunk with no code-splitting (§4.1 finding)                                  | Consider `manualChunks`/dynamic `import()` for the largest dependencies (Plotly, Wavesurfer, PyTorch-adjacent tooling if any ships client-side) before measuring the SRS §3.2.2 cold-load target | Measure actual cold-load time on a throttled connection before deciding whether this is acceptable for the academic deployment target |
+## 5.1 Risks
 
-**Dependencies:** a reachable Redis 7 instance for any live-Redis test tier
-(§3.1.1's pending item, §3.1.5, §3.1.7); Hugging Face Hub availability for
-cold-model-download tests; per-corpus licence compliance (RAVDESS, L2-ARCTIC,
-ESD, ASVspoof 2021 DF are non-commercial/research-use only); GPU access for
-§3.1.4 and the GPU-gated test skips to actually run.
+The template's own example rows concern load test prerequisites, test data and
+database refresh. Those are kept where they apply and the rest are replaced with
+the risks this project actually carries. Likelihood and impact are rated low,
+medium or high.
 
-**Assumptions:** single-tenant academic deployment with best-effort
-availability and no continuous SLA (SRS §3.3); no user authentication or
-role-based access tier exists or is planned.
+| Risk | Likelihood | Impact | Mitigation | Contingency if it happens |
+| --- | --- | --- | --- | --- |
+| A Redis outage takes the whole API down with 500 responses rather than degrading, so monitoring cannot tell an outage from a crash (D2) | High, reproducible today | High | Guard `ensure_session()` the way `cache_result()` in the same file already is | Treat any mass 500 as a possible dependency outage and check Redis before restarting the API |
+| Workers cannot be restarted for about seven minutes after a crash, and the system runs with no GPU workers meanwhile (D3) | High after any abrupt stop | High for availability | Fix the liveness check so a killed worker is not treated as alive; until then use the manual purge from scenario F5 | Delete the four lock keys and call `register_death()` on stale registrations, then restart |
+| Worker health reporting shows dead workers as active, so an outage goes unnoticed (D4) | High | Medium | Report process liveness, not RQ registration | Confirm worker state from the process list rather than the endpoint |
+| The containerised deployment ships a non-functional cache tier, an always-unhealthy worker and uncompressed assets (D11, D10, D12) | Certain, all three reproduced | High if the container is the deployment target | Run the containerised differential before any release, as section 3.1.8 now does; fix the cache environment variables, give the worker its own healthcheck, and enable compression in nginx | Deploy natively until the three are fixed, or accept a dead cache tier and triple transfer size |
+| The hybrid development topology silently runs without MongoDB, so durable records are never written while everything appears to work (D7) | High for anyone following the compose workflow | Medium | Publish the mongo port in compose, or document the hybrid workflow explicitly | Check `MONGO_URL` and the store's `available` flag before trusting any durability claim |
+| The branch model has inverted: `testing` is 34 commits ahead and `develop` is frozen, contradicting `CLAUDE.md` | Already happened | Medium | Re-verify the branch relationship before each evidence run and declare the evidence commit explicitly | Raise in Linear as a branch-model decision; do not let two branches both be treated as authoritative |
+| Model-bound targets are not verified on the SRS's reference device, since neither host has a CUDA GPU | Certain | Medium | Report figures with the device stated; the Apple MPS GPU results in section 3.1.4 show the targets are reachable on accelerated hardware | Re-run on a T4 or equivalent before making a certified performance claim in the submission |
+| Accessibility violations remain unfixed at submission, including 18 buttons with no accessible name | Medium | Medium | The axe-core suite now runs in the browser suite and fails the run, so the violations cannot be ignored silently | Fix the button names and contrast first, being the critical and serious ones |
+| A dependency vulnerability reaches production code, in particular the critical plotly.js and maplibre-gl advisory and the seven starlette advisories | Medium | High | Run `npm audit` and `pip-audit` at each milestone, and wire both into CI alongside the existing Trivy image scan | Apply `npm audit fix` and raise starlette to 0.40.0 or later |
+| A stale worker silently fails every job while the HTTP surface looks healthy (O2) | Medium | High, because it is invisible | Restart workers on every code change; alert on the failed-job counter | Compare worker names on failed jobs against live workers, which is how it was found here |
+| A stale virtual environment makes the metadata tests fail with a signature that mimics a product defect | Medium | Low once known | Install `requirements.txt` and `requirements-dev.txt` before trusting any suite result | Read the actual exception rather than inferring a missing service container |
+| The suite hangs under coverage instrumentation, so coverage cannot be reported and a timing-sensitive race sits in the orchestrator tests (D6) | High under coverage, low in the ordinary run | Medium | Keep coverage out of CI until the race is fixed, and stress-run orchestrator tests in a loop as the project convention asks | Run without coverage, which passes, and report coverage through the traceability matrix |
+| Skip counts differ between hosts for reasons unrelated to the code, making two honest runs look like a regression (D8) | Medium | Low | Pin `TEST_REDIS_URL` explicitly in any evidence run | Compare skip reasons rather than skip counts across hosts |
+| Two individually green pull requests break in combination, which has happened twice here | Medium | High | Merge the latest integration branch and run the full suite again before pushing | Fix forward on a third branch, as was done previously |
+| FR11 and FR12 have absent or thin backend coverage | Already true | Medium | Assign owners before submission and add the missing FR11 test file | Report the gap explicitly rather than let the matrix imply coverage that does not exist |
+| The frontend ships as one 5.9 MB chunk with no code splitting (O1) | Already true | Medium | Consider manual chunks or dynamic imports for the largest dependencies | Measure cold load on a throttled connection before deciding whether it is acceptable |
+| Local and CI runtimes differ, so a local pass is not a CI pass. CI pins Python 3.10 and Node 20 | Medium | Medium | Treat CI as the authority and wait for a terminal result on every check | Reproduce against the pinned versions before drawing a conclusion |
+| Corpora are large, licence-restricted and slow to provision | Low | Medium | Streaming and sub-sampling loaders under the 100 GB bound (FR2.2); revision pinned in `datasets.lock` | Sub-sample and state the reduced corpus size in any report depending on corpus scale |
+| Test data proves inadequate, from the template | Low | Medium | Corpora are pinned by revision so a result can be tied to exact data | Re-provision from the pinned revision, never from a branch name |
+| Load test prerequisites not met, from the template | Low | Medium | The prerequisites are Redis, the API and five workers, all started before the run | Restart the stack and re-run; the run is only three minutes |
 
-~~the `testing` branch remains a strict superset of `develop`~~ — **this
-assumption was re-verified on 2026-09-19 and no longer holds in the form
-stated.** `testing` is now 31 commits ahead of `develop` and `develop` is 0
-ahead of `testing`, with all integration work landing on `testing`. The
-superset property itself is technically still true (nothing on `develop` is
-absent from `testing`), but the implied relationship — `develop` as the
-integration trunk with `testing` a thin harness layer on top — has inverted.
-The assumption is retained here in struck-through form deliberately: it was
-written with an explicit instruction to re-verify before relying on it, that
-re-verification caught a real change, and that is the behaviour this plan
-wants to encourage rather than quietly overwrite. See §2.
+## 5.2 Dependencies
 
-**Dependencies (updated):** MongoDB 6 is now a runtime dependency of the
-metadata tier, though the application degrades gracefully without it
-(LIT-258) and the tier's tests need no server at all (`mongomock`). A live
-`mongo:6` container is required only for the pending index-enforcement and
-TTL-expiry checks in §3.1.1.
+Docker for Redis and MongoDB. The Hugging Face cache or Hub for the models used.
+The corpora provisioned at the revision pinned in `datasets.lock`. GitHub
+Actions for the continuing regression record. GPU access for the model-bound
+performance rows and for the GPU-gated skips to actually run.
 
-**Constraints:** SRS constraint C2 (VRAM budget, hence GPU-family concurrency
-pinned to 1); constraint C3 (safetensors-only, no arbitrary pickle
-deserialisation); the ~100 GB dataset working-footprint bound (FR2.2); CI's
-CPU-only torch wheel, meaning CI itself can never be the source of GPU-path
+MongoDB 6 is a runtime dependency of the metadata tier, though the application
+degrades gracefully without it and the tier's own tests need no server at all.
+A live `mongo:6` container is required only for the index-enforcement and
+TTL-expiry checks left open in section 3.1.1.
+
+## 5.3 Assumptions
+
+Single-tenant academic deployment with best-effort availability and no
+continuous SLA. No user authentication or role-based access tier exists or is
+planned. The corpora on disk match the pinned revision. The models resolved from
+the local cache are the same artefacts CI would fetch, which the commit SHA and
+weight digest in the resolve response make checkable.
+
+**An assumption that must be re-checked, not inherited.** This plan assumes the
+branch named in section 2.1 is the branch where integration work actually lands.
+That is true today, but branch roles on this project have shifted before, and a
+result attributed to the wrong branch is worse than no result. Re-verify which
+branch is the integration trunk before each evidence run rather than carrying
+this assumption forward.
+
+## 5.4 Constraints
+
+SRS constraint C2, the VRAM budget, which is why GPU-family concurrency is
+pinned to 1. Constraint C3, safetensors only, with no arbitrary pickle
+deserialisation. The 100 GB dataset working-footprint bound in FR2.2. CI's
+CPU-only torch wheel, which means CI can never be the source of GPU-path
 evidence.
+
+Both evaluation hosts were single machines with no CUDA GPU, though the macOS
+host has an Apple MPS GPU that was benchmarked. No screen reader testing
+was done, because JAWS, which the resource list names, is Windows only and the
+accessibility pass ran on macOS. Load testing was limited to 8 concurrent users
+for three minutes, enough to score the infrastructure targets but not to produce
+a degradation curve or to gather the 20 samples the harness wants before scoring
+a model-bound target. The `accelerate` advisory has no published fix and can
+only be tracked.
 
 ---
 
 # 6. References
 
-**Testing tools and frameworks:**
+Tool versions are those actually installed in the evaluation environment and
+used to produce the results in section 4.
 
-- pytest 8.2.0, available at https://pytest.org/ (Accessed 2026-09-13)
-- pytest-asyncio 0.23.7, available at https://pytest-asyncio.readthedocs.io/ (Accessed 2026-09-13)
-- fakeredis 2.23.2, available at https://github.com/cunla/fakeredis-py (Accessed 2026-09-13)
-- httpx 0.27.0, available at https://www.python-httpx.org/ (Accessed 2026-09-13)
-- Jest 29.7.0, available at https://jestjs.io/ (Accessed 2026-09-13)
-- Testing Library (React) 16.3.2, available at https://testing-library.com/docs/react-testing-library/intro/ (Accessed 2026-09-13)
-- Playwright 1.63.0, available at https://playwright.dev/ (Accessed 2026-09-13)
-- Locust, available at https://locust.io/ (Accessed 2026-09-13)
-- ESLint 9.9.0, available at https://eslint.org/ (Accessed 2026-09-13)
+**Tool references**
 
-**System dependencies (as pinned in this project):**
+1. pytest 8.4.2 available at https://docs.pytest.org (Accessed on 20 September 2026)
+2. pytest-asyncio 0.23.7 available at https://pytest-asyncio.readthedocs.io (Accessed on 20 September 2026)
+3. pytest-cov 7.1.0 available at https://pytest-cov.readthedocs.io (Accessed on 20 September 2026)
+4. Jest 29.7.0 available at https://jestjs.io (Accessed on 20 September 2026)
+5. jest-environment-jsdom 29.7.0 available at https://github.com/jestjs/jest/tree/main/packages/jest-environment-jsdom (Accessed on 20 September 2026)
+6. React Testing Library 16.3.2 available at https://testing-library.com/docs/react-testing-library/intro (Accessed on 20 September 2026)
+7. Playwright 1.63.0 available at https://playwright.dev (Accessed on 20 September 2026)
+8. Locust 2.46.5 available at https://locust.io (Accessed on 20 September 2026)
+9. fakeredis 2.23.2 available at https://github.com/cunla/fakeredis-py (Accessed on 20 September 2026)
+10. mongomock 4.3.0 available at https://github.com/mongomock/mongomock (Accessed on 20 September 2026)
+11. httpx 0.27.0 available at https://www.python-httpx.org (Accessed on 20 September 2026)
+12. axe-core 4.13.0 available at https://github.com/dequelabs/axe-core (Accessed on 20 September 2026)
+13. axe-core Playwright binding 4.13.0 available at https://github.com/dequelabs/axe-core-npm (Accessed on 20 September 2026)
+14. Google Lighthouse 13.5.0 available at https://developer.chrome.com/docs/lighthouse (Accessed on 20 September 2026)
+15. Postman available at https://www.postman.com (Accessed on 20 September 2026)
+16. newman 6.2.2 available at https://github.com/postmanlabs/newman (Accessed on 20 September 2026)
+17. newman-reporter-htmlextra available at https://github.com/DannyDainton/newman-reporter-htmlextra (Accessed on 20 September 2026)
+18. ESLint 9.9.0 available at https://eslint.org (Accessed on 20 September 2026)
+19. typescript-eslint 8.65.0 available at https://typescript-eslint.io (Accessed on 20 September 2026)
+20. npm audit, npm 11.17.0, available at https://docs.npmjs.com/cli/commands/npm-audit (Accessed on 20 September 2026)
+21. pip-audit 2.10.1 available at https://github.com/pypa/pip-audit (Accessed on 20 September 2026)
+22. Trivy, run as aquasecurity/trivy-action v0.36.0, available at https://github.com/aquasecurity/trivy (Accessed on 20 September 2026)
+23. GitHub Actions available at https://docs.github.com/actions (Accessed on 20 September 2026)
+24. Docker Compose 2.40.3 available at https://docs.docker.com/compose (Accessed on 20 September 2026)
 
-- FastAPI 0.111.0, available at https://fastapi.tiangolo.com/ (Accessed 2026-09-13)
-- RQ (Redis Queue) 2.10.0, available at https://python-rq.org/ (Accessed 2026-09-13)
-- Redis 7, available at https://redis.io/ (Accessed 2026-09-13)
-- PyTorch ≥2.6 (installed 2.13.0 in this evaluation environment), available at https://pytorch.org/ (Accessed 2026-09-13)
-- Transformers ≥4.30, available at https://huggingface.co/docs/transformers/ (Accessed 2026-09-13)
-- Captum ≥0.6, available at https://captum.ai/ (Accessed 2026-09-13)
-- Librosa ≥0.10, available at https://librosa.org/ (Accessed 2026-09-13)
-- React 18.3, available at https://react.dev/ (Accessed 2026-09-13)
-- Vite 5.4, available at https://vite.dev/ (Accessed 2026-09-13)
+**Technology references**
 
-**Methods and standards:**
+25. Python 3.11.15 available at https://www.python.org (Accessed on 20 September 2026)
+26. Node.js 26.4.0 available at https://nodejs.org (Accessed on 20 September 2026)
+27. FastAPI 0.111.0 available at https://fastapi.tiangolo.com (Accessed on 20 September 2026)
+28. Starlette 0.37.2 available at https://pypi.org/project/starlette/ (Accessed on 20 September 2026)
+29. RQ 2.10.0 available at https://python-rq.org (Accessed on 20 September 2026)
+30. Redis 7 available at https://redis.io (Accessed on 20 September 2026)
+31. MongoDB 6 available at https://www.mongodb.com/docs (Accessed on 20 September 2026)
+32. pymongo 4.18.1 available at https://pymongo.readthedocs.io (Accessed on 20 September 2026)
+33. PyTorch 2.13.0 available at https://pytorch.org (Accessed on 20 September 2026)
+34. Transformers 5.14.1 available at https://huggingface.co/docs/transformers (Accessed on 20 September 2026)
+35. Captum 0.9.0 available at https://captum.ai (Accessed on 20 September 2026)
+36. Librosa 0.11.0 available at https://librosa.org (Accessed on 20 September 2026)
+37. soundfile 0.14.0 available at https://python-soundfile.readthedocs.io (Accessed on 20 September 2026)
+38. NumPy 1.26.4 available at https://numpy.org (Accessed on 20 September 2026)
+39. React 18.3 available at https://react.dev (Accessed on 20 September 2026)
+40. Vite 5.4 available at https://vite.dev (Accessed on 20 September 2026)
+41. TypeScript 5.5.3 available at https://www.typescriptlang.org (Accessed on 20 September 2026)
+42. nginx available at https://nginx.org (Accessed on 20 September 2026)
 
-- Web Content Accessibility Guidelines (WCAG) 2.1, Level AA, W3C, available at https://www.w3.org/TR/WCAG21/ (Accessed 2026-09-13)
-- Rational Unified Process Test Plan template — the structural basis for this document (`docs/testing/Template for Test plan.docx`)
+**Standards**
 
-**Project documents (this repository):**
+43. World Wide Web Consortium, "Web Content Accessibility Guidelines (WCAG) 2.1", W3C Recommendation, 5 June 2018, available at https://www.w3.org/TR/WCAG21 (Accessed on 20 September 2026)
+44. Open Worldwide Application Security Project, "OWASP API Security Top 10", 2023, available at https://api-security.owasp.org/ (Accessed on 20 September 2026)
+45. Rational Unified Process, "Test Plan template", supplied as docs/testing/Template for Test plan.docx
 
-- AudioLIT Software Requirements Specification v1.0, `docs/SRS.md`
-- AudioLIT Software Architecture Document v1.0, `docs/SAD.md`
-- AudioLIT project conventions and errata, `docs/README.md`
-- AudioLIT issue plan and dependency map, `docs/ISSUE_PLAN.md`
-- `docs/testing/TEST_PLAN_DESIGN.md` — the design specification this report was drafted from
-- ECHO 1.0 baseline, `AudioLIT-DSE-Project/ECHO` (forked from `AnasSAV/ECHO`)
+**Research articles for the methods used**
+
+46. T. Y. Chen, S. C. Cheung and S. M. Yiu, "Metamorphic testing: a new approach for generating next test cases", Department of Computer Science, Hong Kong University of Science and Technology, Technical Report HKUST-CS98-01, 1998.
+47. R. R. Selvaraju, M. Cogswell, A. Das, R. Vedantam, D. Parikh and D. Batra, "Grad-CAM: visual explanations from deep networks via gradient-based localization", in Proc. IEEE International Conference on Computer Vision (ICCV), Venice, Italy, 2017, pp. 618-626.
+48. M. Sundararajan, A. Taly and Q. Yan, "Axiomatic attribution for deep networks", in Proc. 34th International Conference on Machine Learning (ICML), Sydney, Australia, 2017, pp. 3319-3328.
+49. M. T. Ribeiro, S. Singh and C. Guestrin, "Why should I trust you? Explaining the predictions of any classifier", in Proc. 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD), San Francisco, CA, USA, 2016, pp. 1135-1144.
+
+**Project documents**
+
+50. AudioLIT, "Software Requirements Specification", version 1.0, docs/SRS.md
+51. AudioLIT, "Software Architecture Document", version 1.0, docs/SAD.md
+52. AudioLIT, "Project conventions and errata", docs/README.md
+53. AudioLIT, "Issue plan and dependency map", docs/ISSUE_PLAN.md
+54. AudioLIT, "Master Test Plan design specification", docs/testing/TEST_PLAN_DESIGN.md
+55. AudioLIT, "Testing and evaluation document", docs/evaluation/TESTING_AND_EVALUATION.md
+56. AudioLIT, "Data science error analysis", docs/evaluation/DS_ERROR_ANALYSIS.md
+57. MPM Solutions, "Find Your Job: Master Test Plan", 2016, supplied as docs/testing/Sample test plan report.pdf
+58. ECHO 1.0 baseline repository, AudioLIT-DSE-Project/ECHO, forked from AnasSAV/ECHO

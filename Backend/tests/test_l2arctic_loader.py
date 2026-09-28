@@ -104,3 +104,40 @@ class TestL2ArcticLoader:
         assert set(L2ArcticLoader.SPEAKER_L1.values()) == {
             "Arabic", "Mandarin", "Hindi", "Korean", "Spanish", "Vietnamese",
         }
+
+
+class TestL2ArcticCatalogLayout:
+    """The provisioned sample is flat ``<SPEAKER>_<utt>.wav`` + a catalog CSV,
+    not the per-speaker tree — the tree walk found nothing there, so the
+    corpus probed as "not provisioned" in the dataset dropdown."""
+
+    @pytest.fixture
+    def flat_root(self, tmp_path: Path):
+        root = tmp_path / "l2arctic"
+        root.mkdir()
+        _wav(root / "ABA_arctic_a0063.wav")
+        _wav(root / "HJK_arctic_b0018.wav")
+        (root / L2ArcticLoader.CATALOG_NAME).write_text(
+            "utt_id,filename,rel_path,speaker,native_language,gender,sentence_id,transcript\n"
+            "ABA_arctic_a0063,ABA_arctic_a0063.wav,audio/ABA_arctic_a0063.wav,ABA,Arabic,male,arctic_a0063,Yes it was a man\n"
+            "HJK_arctic_b0018,HJK_arctic_b0018.wav,audio/HJK_arctic_b0018.wav,HJK,Korean,female,arctic_b0018,She had your suit\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def test_reads_catalog_with_flat_audio(self, flat_root):
+        by_id = {s.sample_id: s for s in L2ArcticLoader(flat_root)}
+
+        assert set(by_id) == {"ABA-arctic_a0063", "HJK-arctic_b0018"}
+        aba = by_id["ABA-arctic_a0063"]
+        assert aba.audio_path == flat_root / "ABA_arctic_a0063.wav"
+        assert aba.label == "Yes it was a man"
+        assert aba.accent == "Arabic"
+        assert aba.demographic == {"l1": "Arabic", "gender": "male"}
+        assert by_id["HJK-arctic_b0018"].accent == "Korean"
+
+    def test_catalog_layout_counts_as_available(self, flat_root, monkeypatch):
+        from app.infrastructure import dataset_ingestion as di
+
+        monkeypatch.setattr(L2ArcticLoader, "DEFAULT_DIR", flat_root)
+        assert di.is_corpus_available("l2-arctic") is True

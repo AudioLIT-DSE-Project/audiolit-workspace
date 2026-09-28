@@ -34,7 +34,13 @@ services:
     # through the same Redis, that killed the workers rather than merely missing
     # a cache entry. LRU eviction cannot save a write larger than what it can
     # free in one pass.
-    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "allkeys-lru"]
+    #
+    # volatile-lru, not allkeys-lru: RQ's queue lists, queue registry and the
+    # per-family worker locks live in this same Redis, and allkeys-lru evicted
+    # them when the cache filled - queued jobs vanished and a live worker lost
+    # its lock. volatile-* only evicts keys with a TTL (every cache, progress
+    # and session key has one; RQ's queues do not). See docker-compose.yml.
+    command: ["redis-server", "--maxmemory", "2gb", "--maxmemory-policy", "volatile-lru"]
     ports: 
       - "6379:6379"
     restart: unless-stopped

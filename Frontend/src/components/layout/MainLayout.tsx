@@ -12,11 +12,13 @@ import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
-import { QuickStartDialog, readQuickStartDismissed } from "./QuickStartDialog";
+import { QuickStartDialog } from "./QuickStartDialog";
+import { readQuickStartDismissed } from "./quickStartStorage";
 import {
   readActiveWarmupJobId,
   writeActiveWarmupJobId,
   clearActiveWarmupJobId,
+  isTerminalWarmupStatus,
 } from "@/lib/warmupJob";
 
 interface UploadedFile {
@@ -174,7 +176,7 @@ export const MainLayout = () => {
           const data = await response.json();
           setWarmupProgress(data);
           if (data.dataset) setWarmupDataset(data.dataset);
-          if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
+          if (isTerminalWarmupStatus(data.status)) {
             clearInterval(interval);
             // Terminal: stop advertising this id so the next mount does not
             // try to reattach to a finished run.
@@ -226,14 +228,20 @@ export const MainLayout = () => {
   const handleCancelWarmup = async () => {
     if (!warmupJobId) return;
     try {
-      await fetch(`${API_BASE}/api/inference/cancel/${warmupJobId}`, {
+      const response = await fetch(`${API_BASE}/api/inference/cancel/${warmupJobId}`, {
         method: "POST",
       });
-      setWarmupProgress(prev => prev ? { ...prev, status: 'cancelling' } : null);
-      // The worker checks the cancel flag before each file, so the run is not
-      // dead yet; the id stays persisted until polling observes a terminal
-      // status, otherwise a reload during the cancelling window would lose
-      // track of a job that is still working through its current file.
+      if (!response.ok) throw new Error(`Cancel failed: ${response.status}`);
+      // The backend reports the state the run is actually in: "cancelling"
+      // while a live worker finishes its current step, or "cancelled" at once
+      // when the run was still queued or its worker had died (previously the
+      // UI assumed "cancelling" and the next poll flipped it back to running).
+      const data = await response.json();
+      const status: string = data.status === 'not_found' ? 'cancelled' : data.status;
+      setWarmupProgress(prev => prev ? { ...prev, ...data, status } : data);
+      // The id stays persisted while "cancelling", so a reload in that window
+      // can still find the run; it is only dropped once the run is terminal.
+      if (isTerminalWarmupStatus(status)) clearActiveWarmupJobId();
     } catch (err) {
       console.error("Failed to cancel warmup:", err);
     }

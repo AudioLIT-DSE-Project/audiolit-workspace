@@ -26,7 +26,12 @@ export const WarmupStatusBanner: React.FC<WarmupStatusBannerProps> = ({
 
   const isRunning = warmupProgress?.status === "running";
   const isCompleted = warmupProgress?.status === "completed";
-  const isCancelled = warmupProgress?.status === "cancelled" || warmupProgress?.status === "cancelling";
+  // "interrupted": the backend found no live worker for the run (e.g. the
+  // containers were restarted mid-run). Terminal, rendered like a cancel but
+  // labelled honestly - the user did not stop it.
+  const isInterrupted = warmupProgress?.status === "interrupted";
+  const isCancelled =
+    warmupProgress?.status === "cancelled" || warmupProgress?.status === "cancelling" || isInterrupted;
 
   return (
     <div className="fixed bottom-4 right-4 z-50 max-w-md w-full bg-card/95 backdrop-blur-md border border-border shadow-2xl rounded-xl p-4 transition-all duration-300 animate-in fade-in slide-in-from-bottom-4">
@@ -53,7 +58,12 @@ export const WarmupStatusBanner: React.FC<WarmupStatusBannerProps> = ({
               <Flame className="h-3.5 w-3.5 text-amber-500" />
               {isRunning && "Dataset Warmup Running"}
               {isCompleted && "Dataset Warmup Complete"}
-              {isCancelled && "Warmup Cancelled"}
+              {isCancelled &&
+                (isInterrupted
+                  ? "Warmup Interrupted"
+                  : warmupProgress?.status === "cancelling"
+                  ? "Cancelling Warmup…"
+                  : "Warmup Cancelled")}
             </div>
             <p className="text-[11px] text-muted-foreground font-mono mt-0.5 truncate max-w-[240px]">
               <span className="uppercase font-semibold text-foreground">{dataset}</span> · {warmupProgress?.completed || 0}/{warmupProgress?.total || 0} ({warmupProgress?.percent || 0}%)

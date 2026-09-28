@@ -51,7 +51,12 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
 }) => {
   const isRunning = !!warmupJobId && warmupProgress?.status === "running";
   const isCompleted = warmupProgress?.status === "completed";
-  const isCancelled = warmupProgress?.status === "cancelled" || warmupProgress?.status === "cancelling";
+  // "interrupted": the backend found no live worker for the run (e.g. the
+  // containers were restarted mid-run). Terminal, rendered like a cancel but
+  // labelled honestly - the user did not stop it.
+  const isInterrupted = warmupProgress?.status === "interrupted";
+  const isCancelled =
+    warmupProgress?.status === "cancelled" || warmupProgress?.status === "cancelling" || isInterrupted;
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => { if (!open && !isRunning) onClose(); }}>
@@ -63,6 +68,10 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
               ? "Dataset Warmup in Progress"
               : isCompleted
               ? "Warmup Complete"
+              : isInterrupted
+              ? "Warmup Interrupted"
+              : warmupProgress?.status === "cancelling"
+              ? "Cancelling Warmup…"
               : isCancelled
               ? "Warmup Cancelled"
               : "Confirm Dataset Warmup"}
@@ -70,6 +79,8 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
           <DialogDescription className="text-xs text-muted-foreground pt-1">
             {!warmupJobId
               ? "Pre-compute and cache XAI saliency maps, acoustic profiles, and predictions for the entire dataset."
+              : isInterrupted
+              ? "The worker running this warmup stopped (for example, the containers were restarted). Samples already processed stay cached; start a new warmup to finish the rest."
               : "Background evaluation runner is processing dataset samples."}
           </DialogDescription>
         </DialogHeader>

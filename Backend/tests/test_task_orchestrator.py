@@ -513,8 +513,11 @@ class TestGpuWorkerLock:
         run_worker(WorkerFamily.ASR)
         assert not broker.exists("audiolit:worker-lock:asr")
 
-    def test_second_worker_for_a_gpu_family_is_refused(self, broker, stub_worker):
-        # SAD C2: a second ASR worker would double the VRAM footprint.
+    def test_second_worker_for_a_gpu_family_is_refused(self, broker, stub_worker, monkeypatch):
+        # SAD C2: a second ASR worker would double the VRAM footprint. A new
+        # worker now waits for a crashed holder's lock to lapse before giving
+        # up; a live holder keeps it, so the wait is shortened here.
+        monkeypatch.setattr(task_orchestrator, "WORKER_LOCK_ACQUIRE_WAIT", 0.2)
         broker.set("audiolit:worker-lock:asr", "locked")
         with pytest.raises(RuntimeError):
             run_worker(WorkerFamily.ASR)
