@@ -78,15 +78,15 @@ async def upload_audio_file(file: UploadFile = File(...), model: str = Form("whi
     
     # Validate file extension
     allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.webm', '.ogg', '.aac', '.opus']
-    file_extension = Path(file.filename).suffix.lower()
+    file_extension = Path(file.filename).suffix.lower() if file.filename else ''
     if not file_extension or file_extension not in allowed_extensions:
         # Default fallback for blob uploads without explicit extension
         file_extension = '.webm' if 'webm' in (file.content_type or '') else '.wav'
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-    else:
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = UPLOAD_DIR / unique_filename
+    
+    unique_filename = f"{uuid.uuid4()}{file_extension}"
+    file_path = UPLOAD_DIR / unique_filename
 
+    try:
         # Stream to disk with a hard cap instead of shutil.copyfileobj's
         # unbounded copy - abort as soon as the cap is crossed rather than
         # after the whole body has already been written.
@@ -130,22 +130,11 @@ async def upload_audio_file(file: UploadFile = File(...), model: str = Form("whi
                 ),
             )
 
-        # FR3.2 / SAD §3.6.2: no model inference on the request path. This route
-        # used to await a full forward pass and an embedding extraction before
-        # responding, which made upload latency a function of model speed and
-        # made it the most visible violation of the async architecture the SAD
-        # describes.
-        #
-        # Nothing is lost: the client dispatches the real multi-task job to
-        # POST /api/inference/multitask immediately after upload and follows it
-        # over the WebSocket channel, and embeddings are computed on demand by
-        # POST /inferences/embeddings. `prediction` stays in the response shape,
-        # as null, so existing callers keep parsing.
         return JSONResponse(
             status_code=200,
             content={
                 "message": "File uploaded successfully",
-                "filename": file.filename,
+                "filename": file.filename or unique_filename,
                 "file_path": str(file_path),
                 "file_id": unique_filename,
                 "duration": duration,
@@ -156,9 +145,6 @@ async def upload_audio_file(file: UploadFile = File(...), model: str = Form("whi
         )
 
     except HTTPException:
-        # Preserve the specific status/detail raised above (413 oversized,
-        # 422 undecodable) instead of letting the generic handler below
-        # flatten it into a 500.
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
