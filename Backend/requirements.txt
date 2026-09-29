@@ -1,4 +1,8 @@
-fastapi==0.111.0
+# Upgraded from 0.111.0 to clear 14 advisories against Starlette 0.37.2, the
+# ASGI layer every request passes through. FastAPI 0.111 pinned
+# starlette<0.38.0 while the fixes start at 0.40.0, so the framework had to
+# move with it. Verified: backend suite 775 passed, 7 skipped, 0 failed.
+fastapi>=0.141.1,<0.142
 uvicorn[standard]==0.30.0
 redis==5.0.7
 msgpack>=1.0,<2.0
@@ -15,7 +19,8 @@ umap-learn>=0.5.3
 numpy>=1.24,<2.0
 pandas
 captum>=0.6.0
-accelerate
+# >=1.15.0 clears PYSEC-2026-3804; 1.14.0 has no fix available.
+accelerate>=1.15.0
 jiwer>=4.0.0
 # SRS §3.10 / SAD §9 — durable MongoDB metadata tier (LIT-255/256/257). The
 # pymongo driver is pure-Python, no native build. mongomock (test-only) lives in

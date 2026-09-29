@@ -97,22 +97,26 @@ def test_supervise_respawns_a_family_whose_process_died(tmp_path, monkeypatch):
     hard_deadline = launched + 180
 
     def done() -> bool:
+        # Wait for the third start, or give up at the ceiling. Nothing else.
+        #
+        # Two earlier shapes were wrong. A flat 30 s from launch bought exactly
+        # one start on Windows, because under the spawn start method each child
+        # re-imports the application, torch included, before it records anything:
+        # measured ~16.7 s per start here against about a second on Linux. So the
+        # test failed on a supervisor that respawned 4 times out of 4.
+        #
+        # Replacing it with a window sized from the first start's cost was also
+        # wrong, and more subtly: it could expire before the third start landed
+        # whenever later respawns ran slower than the first. Under coverage
+        # instrumentation they do, and it failed with 2 starts against 3.
+        #
+        # This version cannot give up early. On a working supervisor it returns
+        # the moment the third start appears, so the usual cost is three
+        # start-ups. Only a genuinely broken supervisor waits for the ceiling.
         n = _starts(tmp_path, WorkerFamily.ASR)
         if not first_seen and n:
             first_seen.append(time.monotonic())
-        if n >= 3:
-            return True
-        if first_seen:
-            # Budget the wait from the observed cost of one child start-up
-            # rather than from a fixed wall-clock figure. Under the spawn start
-            # method the child re-imports the application, torch included, before
-            # it records anything, which measured ~16.7 s per start on Windows
-            # against about a second on Linux. A flat 30 s from launch bought
-            # exactly one start here, so this asserted that a working supervisor
-            # was broken. The cost is measured, then three of them are allowed.
-            one_start = first_seen[0] - launched
-            return time.monotonic() - first_seen[0] > max(6.0, one_start * 3)
-        return time.monotonic() > hard_deadline
+        return n >= 3 or time.monotonic() > hard_deadline
 
     supervise(
         [WorkerFamily.ASR], target=_exit_immediately, interval=0.05, backoff=0, should_stop=done

@@ -23,6 +23,20 @@ jobs:
         run: |
           cd Frontend
           npm ci
+      # SR7 - JavaScript dependencies scanned on every build. Scoped to
+      # production dependencies, what actually ships to a user's browser, and
+      # gated at high. Production audits clean as of 2026-09-29: the one high
+      # was lodash 4.17.21 via recharts, cleared by a `lodash: ^4.18.1`
+      # override (every 4.x up to 4.17.23 is vulnerable, 4.18.1 is not, and
+      # recharts asks for ^4.17.21 so nothing else had to move).
+      #
+      # Dev dependencies are deliberately not gated: the remaining high is
+      # vite, whose fix is a three-major bump, and a dev-tool advisory does
+      # not reach a user. It is reported in the test plan rather than gated.
+      - name: Audit npm production dependencies
+        run: |
+          cd Frontend
+          npm audit --omit=dev --audit-level=high
       - name: Run ESLint
         run: |
           cd Frontend
@@ -70,11 +84,16 @@ jobs:
         run: |
           cd Backend
           pytest
+      # SR7 - Python dependencies scanned on every build. Audits the
+      # environment installed above rather than re-resolving requirements.txt,
+      # so what is scanned is exactly what the tests ran against. Runs after
+      # pytest so a new advisory never masks a test failure.
+      - name: Audit Python dependencies
+        run: |
+          cd Backend
+          python -m pip install pip-audit
+          pip-audit
 
-  # LIT-203 acceptance: both production images build and scan clean at
-  # CRITICAL severity. ignore-unfixed keeps the gate opinionated: only a
-  # fixable CRITICAL CVE fails the run (an unfixable one in a pinned base
-  # image is a bump-the-tag decision, not a red CI).
   frontend-e2e:
     # Playwright was configured in the repo but never run by the pipeline, so
     # the layout and accessibility suites could regress without anything
@@ -122,6 +141,10 @@ jobs:
           path: Frontend/playwright-report/
           retention-days: 7
 
+  # LIT-203 acceptance: both production images build and scan clean at
+  # CRITICAL severity. ignore-unfixed keeps the gate opinionated: only a
+  # fixable CRITICAL CVE fails the run (an unfixable one in a pinned base
+  # image is a bump-the-tag decision, not a red CI).
   docker-image-scan:
     runs-on: ubuntu-latest
     steps:

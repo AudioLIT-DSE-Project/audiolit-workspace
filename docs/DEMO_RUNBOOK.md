@@ -149,6 +149,17 @@ docker run -d --name audiolit-mongo -p 27017:27017 -v audiolit-mongo-data:/data/
 docker exec audiolit-mongo mongosh --quiet audiolit --eval "db.getCollectionNames()"
 ```
 
+> **Upload limits and retention.** The API enforces SR1's caps and SR4's
+> retention window with defaults that need no configuration: 100 MB, 15 minutes,
+> and uploaded audio purged after 24 hours (on each upload and at startup).
+> Override any of them for a demo with a long clip, or to keep the files:
+
+```bash
+export AUDIOLIT_MAX_UPLOAD_BYTES=209715200          # 200 MB
+export AUDIOLIT_MAX_UPLOAD_SECONDS=1800             # 30 min; 0 disables the cap
+export AUDIOLIT_UPLOAD_RETENTION_SECONDS=0          # 0 keeps every upload
+```
+
 ```bash
 # 2. API (from Backend/)
 uvicorn app.main:app --host 0.0.0.0 --port 8000

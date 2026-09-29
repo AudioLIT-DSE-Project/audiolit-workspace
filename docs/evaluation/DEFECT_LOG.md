@@ -64,14 +64,17 @@ issue.
 
 ---
 
-## 4. Open defect — confirmed, not yet fixed
+## 4. D13, since fixed
 
-**D13 — the accent-bias diagnostic transcribes accented English as another
-language.** Found on 2026-09-18 while building the LIT-252 evaluation runner.
-Listed separately from the table above because it is diagnosed and its fix is
-verified, but **no fix has been applied** — the change lives in LIT-170's code
-and would move the published FR15 figures, which is a scope decision rather than
-a bug fix to slip into an unrelated branch.
+**D13 — the accent-bias diagnostic transcribed accented English as another
+language.** Found 2026-09-18, **fixed 2026-09-20**, verified present on
+`testing` on 2026-09-28. It is kept in its own section because the fix moved
+published FR15 figures, so the before-and-after matters more than the row would
+convey.
+
+A second defect surfaced only once this one was fixed: two word-error-rate
+implementations disagreed on every cohort, because one stripped punctuation and
+the other did not. Both are recorded below.
 
 | Field | Detail |
 |-------|--------|
@@ -81,7 +84,7 @@ a bug fix to slip into an unrelated branch.
 | **Verified fix** | Passing `generate_kwargs={"language": "en", "task": "transcribe"}` collapses both: `TLV-arctic_b0251` 22.30 → **0.20**, `ABA-arctic_b0066` 17.80 → **0.30**. Measured directly, not inferred. |
 | **Impact** | Two samples (1.7 % of the corpus) move the overall mean WER from 0.1617 to 0.4931. The bias ranking itself is affected: Vietnamese and Arabic rank worst almost entirely because of one clip each. |
 | **Severity** | **High** — the diagnostic is reported as an accent-bias measurement, and for two cohorts it is substantially measuring language misdetection instead. |
-| **Guarding test** | None. |
+| **Guarding test** | `test_evaluation_scoring.py::TestWerNormalisation`, which also asserts the two word-error-rate paths agree on the same input, so they cannot drift apart again. |
 
 This also bears on the figures in `TESTING_AND_EVALUATION.md` §6 (mean WER 0.1353,
 Δ 0.0670), which a current run does not reproduce — see `docs/DEMO_RUNBOOK.md`
@@ -91,7 +94,138 @@ close it. Both belong in one follow-up issue.
 
 ---
 
-## 5. Verification-method note
+## 5. Defects found and fixed on 2026-09-28
+
+These were found by running the software, not by reading it. Each row states how
+it was measured, because three of them looked like something else first.
+
+| ID | Symptom | Root cause | Fix | Guarding test |
+| -- | ------- | ---------- | --- | ------------- |
+| **D14** | Every transcription re-paid the model load. The API log showed the weights loading over and over. | `_get_whisper_pipeline` and its `_pipeline_cache` existed with **zero callers**. `transcribe_whisper` built the pipeline inline instead, duplicating the same logic, so the cache was never populated. Dead code that nothing failed on, because the output was correct and only slow. | Call the existing helper. | `test_model_pipeline_cache.py`, 5 tests. Verified by reverting: 2 fail with the right diagnostics. |
+| **D15** | Backend suite hung outright, no error, no progress. Seen 3 times in one session. Previously attributed to coverage instrumentation. | **A re-entrancy deadlock.** redis-py's `Pipeline.__del__` calls `reset()`, which sends UNWATCH. When the collector fires that finaliser while fakeredis is mid-command, the UNWATCH re-enters a socket that is not re-entrant. Intermittent because it depends on GC timing, hence on memory pressure, hence it never appears when the tests run alone. | Suspend collection across the worker drain in the two affected test modules, plus a 300 s per-test timeout so any future hang fails instead of stalling CI. | Full suite completed twice with no hang; the timeout makes a recurrence visible. |
+| **D16** | Enqueue p95 70-75 ms against the SRS 3.4.1 budget of 50 ms at 10 concurrent users. | The three family enqueues ran sequentially. A loopback Redis round trip measured **1.67 ms** on Docker Desktop for Windows and RQ issues 16 commands per enqueue, so round-trip count, not work per command, was the cost. | Batch the three independent family enqueues into one Redis pipeline. The aggregator still follows, because its `depends_on` needs the jobs to exist. | Orchestrator suite, 78 passed. Aggregator verified still DEFERRED on 3 dependencies. |
+| **D17** | 19 nodes at critical severity: 18 unnamed buttons, 1 unlabelled form element, plus 2 unnamed ARIA inputs and no main landmark. | Icon-only buttons with no accessible name. Separately, Radix puts `role="slider"` on the **Thumb** while `aria-label` was being passed to the **Root**, so every slider reported a violation even where a label had been supplied. | Labels derived from each control's own tooltip text rather than a generic string; slider label forwarded to the Thumb in the shared wrapper. | `accessibility.spec.ts`, 4 checks, zero serious or critical. |
+| **D18** | Accessibility suite reported a false pass. | Every Playwright context is a fresh profile, so the first-run dialog opened and its modal overlay hid the workbench from the accessibility tree. The scan was examining the dialog. | Dismiss the dialog before scanning. | Fixing this is what exposed D17. |
+
+### D19, dependency vulnerabilities, 2026-09-29
+
+**Python: from 33 advisories across 5 packages to none.**
+
+| Package | Was | Now | Note |
+| ------- | --- | --- | ---- |
+| starlette | 0.37.2, **14 advisories** | 1.7.0, clear | The ASGI layer under every request, so the one that mattered. FastAPI 0.111 pinned `starlette<0.38.0` while the fixes start at 0.40.0, so the framework had to move too: 0.111.0 to 0.141.1. |
+| anyio | 4.4.0, 2 advisories | 4.15.1, clear | |
+| accelerate | 1.14.0, 1 advisory | 1.15.0, clear | 1.14.0 had no fix available. |
+| pip | 22.3, 14 advisories | 26.2.1, clear | Build tooling, never shipped. |
+| pytest | 8.4.2, 2 advisories | 9.1.1, clear | The old `<9` ceiling existed because pytest-asyncio 0.23.7 pinned `pytest<9`; both moved together, to pytest-asyncio 1.4.0. |
+
+`pip-audit` now reports **no known vulnerabilities**. Verified across the whole
+upgrade: 775 passed, 7 skipped, 0 failed; the app starts; a real multitask
+request returns a correct job envelope; and the Postman collection passes 39
+assertions over 13 requests against the upgraded API.
+
+One scare worth recording, because it was a measurement error and not a
+regression: after the upgrade `len(app.routes)` dropped from 74 to 20 and
+appeared to show the routers had failed to register. They had not. Starlette 1.x
+nests routers instead of flattening them, so `app.routes` counts something
+different. The OpenAPI document still lists all 63 endpoints. Counting the wrong
+structure is not the same as losing routes.
+
+**JavaScript production dependencies: from 15 advisories to 1.**
+
+| Package | Was | Now |
+| ------- | --- | --- |
+| plotly.js and maplibre-gl | **2 critical** (XSS sanitiser bypass) | plotly.js 3.0.3 to 4.1.1, clear |
+| react-router, react-router-dom | 2 moderate (open redirect, CVE-2025-) | 7.18.4, clear |
+| lodash, postcss, nanoid, glob, minimatch, brace-expansion, picomatch, @remix-run/router | 10 high | cleared by a non-breaking `npm audit fix` |
+
+Both majors were checked before being applied rather than after:
+`react-plotly.js` peers on `plotly.js: >1.34.0`, so v4 satisfies it, and the
+router usage is only `BrowserRouter`, `Routes`, `Route` and `useLocation`, all
+stable across v6 to v7. Verified: typecheck clean, 75 Jest tests, build
+succeeds, and 10 Playwright checks including the embedding plot that actually
+renders through plotly.
+
+**Both of these were reported as open here and have since been closed.** The
+original text is replaced rather than annotated, because one of its two claims
+was factually wrong and leaving it in place would preserve the error.
+
+*lodash, 1 high, production. **Closed.*** `_.template` code injection, reached
+through `recharts@2.13.0`. This was first recorded here as unfixable, on the
+stated grounds that "lodash 4.17.21 is the last of the 4.x line and there is no
+patched 4.x release". **That was wrong, and it was wrong because it was asserted
+from memory instead of checked.** `npm view lodash versions` lists 4.17.23,
+4.18.0 and 4.18.1; the advisory range is `<=4.17.23`, so 4.18.1 is patched.
+`npm audit` had been saying `fixAvailable: true` the whole time, which is the
+contradiction that should have been chased on the first pass. Fixed with an
+`overrides` entry pinning `lodash: ^4.18.1` in `Frontend/package.json` —
+recharts asks for `^4.17.21`, so it is satisfied and nothing else moves.
+**`npm audit --omit=dev` now reports 0 vulnerabilities**, and the CI gate was
+tightened from critical to high accordingly.
+
+*25 dev-only advisories, 1 critical. **Down to 4, 0 critical.*** These are build
+and test tooling and never reach the runtime image, which contains only `dist/`
+behind nginx. **14 of them arrived with `newman` and `newman-reporter-htmlextra`,
+added during this test effort**, carrying handlebars (the critical), node-forge,
+underscore and others transitively — a self-inflicted increase in audit surface.
+Both were removed from `devDependencies`; the collection is the artefact worth
+keeping and the runner does not need to be a declared dependency, so the
+documented command is now `npx newman run ...`. The capability is unchanged.
+
+Remaining: **4 advisories, 3 moderate and 1 high, all dev-only.** The high is
+`vite`, whose fix is a three-major bump to 8.3.1. It is reported rather than
+gated, because a dev-server advisory does not reach a user and a major bump of
+the build tool is its own change with its own testing.
+`vite` also carries one high advisory whose fix is a three-major bump to 8.3.1,
+which should be its own change.
+
+### A fix that was measured and then withdrawn
+
+The enqueue handlers were briefly changed from `async def` to `def`, on the
+reasoning that a synchronous body with blocking Redis calls should run in
+FastAPI's threadpool rather than on the event loop. A synthetic test appeared to
+confirm it: five concurrent requests went from 1.02 s to 0.22 s.
+
+Against a live Redis it was **worse**, repeatably:
+
+| | Median | p95 |
+| - | ------ | --- |
+| `async def` | 44 ms | 70-75 ms |
+| `def` plus threadpool | 70 ms | 120 ms |
+
+The synthetic test had used a 200 ms stub. A real loopback round trip is 1.67 ms,
+and per-request thread dispatch costs more than that. The change was reverted and
+the test deleted, because a test asserting the slower shape is worse than no
+test. The measurements are recorded in `inference.py` so the same reasoning is
+not repeated.
+
+The lesson generalises: a synthetic benchmark whose parameters do not match
+production can prove the opposite of the truth, confidently.
+
+### D20-D22, requirements with no implementation, 2026-09-29
+
+Found by checking the **submitted** SRS and SAD line by line against the tree,
+rather than by running the software. All three are the same shape: a requirement
+that was half-implemented and therefore never failed a test, because the half
+that existed was the visible half.
+
+| ID | Requirement | What was actually there | Fix | Guarding test |
+| -- | ----------- | ----------------------- | --- | ------------- |
+| **D20** | SR1: every upload validated for MIME type, **size (<= 100 MB)**, **duration (<= 15 min)**, magic number and structure before hashing. | The size cap was enforced (LIT-160). The duration was computed, returned to the UI, and **never compared against anything**. A 40-minute 8 kHz mono clip is ~38 MB, so it passed the size gate and fanned out to five workers each holding the whole decoded array. | Reject over the cap with 413 and delete the file, `AUDIOLIT_MAX_UPLOAD_SECONDS` configurable, 0 disables. | `test_upload_limits.py::TestDurationCap`, 3 tests. Verified by disabling the check: the rejection test fails. |
+| **D21** | SR4 and SAD §3.2 constraint C4: uploaded audio is transient and purged on a configurable TTL; only analysis records are kept. | The Mongo tier had a TTL and sessions had `SESSION_TTL_SECONDS`, but the **audio files themselves had neither**. The only deletion path was `DELETE /upload/{file_id}`, which the browser had to remember to call, so every closed tab and failed request left a clip on disk permanently. The constraint was documented, asserted in a code comment in `settings.py`, and unimplemented. | `purge_expired_uploads()`, run on each upload and at startup, `AUDIOLIT_UPLOAD_RETENTION_SECONDS` configurable, 0 keeps everything. | `test_upload_limits.py::TestRetentionSweep`, 4 tests including one that fails if the handler stops calling the sweep. Verified by removing the call. |
+| **D22** | SR7: container images **and Python and JavaScript dependencies** vulnerability-scanned on every build. | Only the images were scanned (Trivy, CRITICAL). `pip-audit` and `npm audit` were run by hand for D19 and appeared nowhere in `.github/workflows/ci.yml`, so the scan that found 33 advisories was a one-off, not a gate. | `pip-audit` on the already-installed backend environment after pytest, `npm audit --omit=dev` in the frontend job. | CI itself. The npm gate is set at `critical` rather than `high`, because the tree carries one high advisory with no patched release (lodash, via recharts); a high gate would be permanently red and would stop reporting anything. |
+
+The upload route had **no tests at all** before this, which is the more useful
+finding: D20 and D21 both sat in the one entry point every other requirement
+depends on. Two further SR claims were checked and **hold** — SR5's keys are
+digests, and SR6's CORS is regex-restricted to localhost, not a wildcard — and
+SR1's magic-number clause is met in a stronger form than written, since the
+route decodes the file with librosa and rejects what will not decode, which a
+header-byte check would not catch.
+
+---
+
+## 6. Verification-method note
 
 Three findings during this work were **wrong on first measurement** and were
 corrected before they reached a fix:
@@ -109,7 +243,7 @@ no single timing observation was treated as evidence anywhere above.
 
 ---
 
-## 6. Lessons
+## 7. Lessons
 
 The defects that mattered most were not crashes. D04, D05, D06 and D07 all
 returned a confident, well-formed, wrong answer, and D04 actively fabricated

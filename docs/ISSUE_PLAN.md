@@ -224,18 +224,27 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 | ID | Title | Assignee | Status | Blocked by (from Linear, corrected) | Notes |
 |---|---|---|---|---|---|
 | LIT-132 | Mid-eval integration testing | Tharusha | 🟢 Urgent | ✅ Done                                                                                                                                                                       | |
-| LIT-160 | Cross-browser E2E QA | Ravindu | 🟢 | LIT-132 (parent) | |
-| LIT-161 | API stress/memory profiling | Rahim | 🟢 | ✅ Done           | |
+| LIT-160 | Cross-browser E2E QA | Ravindu | ✅ Done | LIT-132 (parent) | `Frontend/e2e/*.spec.ts`, chromium + firefox + webkit via `npm run test:e2e`, wired into the `frontend-e2e` CI job. |
+| LIT-161 | API stress/memory profiling | Rahim | ✅ Done | LIT-132 (parent) | `Backend/loadtests/locustfile.py` on the `testing` branch; results in the test plan report §4. |
 | LIT-162 | Code review & mock walkthrough prep | Tharusha | 🟢 Urgent | LIT-132 (parent) | |
-| LIT-170 | Full software testing + DS evaluation | Ravindu | 🟢 | LIT-132, LIT-130, LIT-126 | |
+| LIT-170 | Full software testing + DS evaluation | Ravindu | ✅ Done | LIT-132, LIT-130, LIT-126 | `docs/testing/AudioLIT_Test_Plan_Report_Merged.md` (§4 SW testing, §5 DS evaluation) and `Backend/scripts/evaluate_models.py`. |
 | LIT-187 | Backend pytest + UI boundary testing | Ravindu | 🟢 | 🟡 In flight      | |
-| LIT-188 | WER/deletion-score metric computation | Tharusha | 🟢 | LIT-170 (parent) | |
-| LIT-171 | Testing & evaluation document | Rahim | 🟢 | LIT-170 | |
-| LIT-189 | Latency/FPS metric synthesis | Rahim | 🟢 | LIT-171 (parent) | |
-| LIT-190 | Error analysis (accent/faithfulness) | Tharusha | 🟢 | LIT-171 (parent) | |
+| LIT-188 | WER/deletion-score metric computation | Tharusha | ✅ Done | LIT-170 (parent) | `app/domain/evaluation_service.py`; measured results in the report §5.1 (WER) and §5.2 (deletion score). |
+| LIT-171 | Testing & evaluation document | Rahim | ✅ Done | LIT-170 | `docs/testing/AudioLIT_Test_Plan_Report_Merged.md`, merged from both authors' editions. |
+| LIT-189 | Latency/FPS metric synthesis | Rahim | ✅ Done | LIT-171 (parent) | Report §4, every figure with the hardware named. GPU-bound targets remain unmeasured — no GPU host. |
+| LIT-190 | Error analysis (accent/faithfulness) | Tharusha | ✅ Done | LIT-171 (parent) | Report §6: language misdetection (D13) and the two disagreeing WER calculations, with failure modes in §6.4. |
 | LIT-172 | Mentor Meetup 3 prep & sign-off | Tharusha | 🟡 In Progress, Urgent | LIT-170 | |
 | LIT-191 | Live evaluation walkthrough script | Tharusha | 🟢 | LIT-172 (parent) | |
 | LIT-192 | Mentor Meetup 3 execution | Tharusha | 🟢 | LIT-172 (parent) | |
+
+**Status reconciled against the tree, 2026-09-29.** Seven Tier-9 rows were
+marked 🟢 unstarted while their deliverables were already in the repository —
+the whole testing tier read as not begun next to a 900-line test plan report
+full of its results. Each of the seven now names the artefact that closes it, so
+the claim can be checked in one command rather than trusted. **LIT-162, LIT-172,
+LIT-191 and LIT-192 were left untouched**: they are process and meeting items
+with no artefact in the tree, so there is nothing here to verify them against,
+and Linear is the only record. Verify in Linear before relying on their status.
 
 **Corrections applied to Linear (this pass):**
 - **LIT-132** was blocked by **LIT-154**, a non-committed stretch sub-task (LIT-129 → LIT-153 "do not start until committed work done" → LIT-154, which lacked its own stretch banner). An optional diffusion-artifact task should never gate an urgent committed mid-eval deliverable — removed as a blocker; flagged LIT-154 for a stretch banner instead.

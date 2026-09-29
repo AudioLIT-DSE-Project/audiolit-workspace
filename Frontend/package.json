@@ -51,7 +51,7 @@
     "input-otp": "^1.2.4",
     "lucide-react": "^0.462.0",
     "next-themes": "^0.3.0",
-    "plotly.js": "^3.0.3",
+    "plotly.js": "^4.1.1",
     "react": "^18.3.1",
     "react-day-picker": "^8.10.1",
     "react-dom": "^18.3.1",
@@ -59,7 +59,7 @@
     "react-hook-form": "^7.53.0",
     "react-plotly.js": "^2.6.0",
     "react-resizable-panels": "^3.0.4",
-    "react-router-dom": "^6.26.2",
+    "react-router-dom": "^7.18.4",
     "recharts": "^2.12.7",
     "sonner": "^1.5.0",
     "tailwind-merge": "^2.5.2",
@@ -91,13 +91,14 @@
     "jest-environment-jsdom": "^29.7.0",
     "lighthouse": "^13.5.0",
     "lovable-tagger": "^1.1.7",
-    "newman": "^6.2.2",
-    "newman-reporter-htmlextra": "^1.23.1",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.11",
     "ts-jest": "^29.4.12",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.65.0",
     "vite": "^5.4.1"
+  },
+  "overrides": {
+    "lodash": "^4.18.1"
   }
 }

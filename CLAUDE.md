@@ -188,7 +188,15 @@ orchestrator wrapper itself. `broker` lives in the individual test files, not in
   (`feature/lit-xxx-...`, use the issue's own `gitBranchName` field), one PR
   per issue referencing its LIT-id.
 - **Do not invent FRs.** There is no FR5, FR13, or FR14 in the reconciled
-  SRS (FR5 — multi-model comparison — was demoted to non-committed stretch).
+  SRS — they are vacated identifiers, not requirements. The **submitted SRS
+  PDF numbers its FRs differently** (FR1–FR14, no gaps): submitted FR5=SER,
+  FR6=ADD, FR7=spectrogram attribution, FR8=IG, FR9=faithful attention,
+  FR13=accent bias, FR14=faithfulness auditing map to reconciled FR6, FR7,
+  FR8, FR9, FR17, FR15, FR16. Full table in `docs/README.md` erratum **E4** —
+  read it before citing an FR id from any submitted document. Multi-model
+  side-by-side comparison is an *unnumbered* SRS §4.4 out-of-scope item;
+  "dropped FR5" in `ISSUE_PLAN.md` is shorthand for the vacated identifier,
+  not for the submitted FR5 (which is SER and is committed as FR6).
 - **Never promote a §4.4 stretch item to committed scope.** Stretch issues
   are listed in `docs/ISSUE_PLAN.md`'s "Non-committed / stretch" table —
   check there before starting anything that sounds like it might be one.

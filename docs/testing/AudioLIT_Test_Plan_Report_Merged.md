@@ -511,7 +511,7 @@ The route surface is exercised a second time from a different client, so that a
 defect in the primary pytest harness cannot hide a defect in the product.
 
 ```
-newman run Backend/apitests/AudioLIT.postman_collection.json \
+npx newman run Backend/apitests/AudioLIT.postman_collection.json \
   --env-var baseUrl=http://127.0.0.1:8000 \
   -r cli,htmlextra --reporter-htmlextra-export docs/evaluation/api-reports/newman-report.html
 ```
@@ -807,7 +807,7 @@ section 4.3 for the corrected explanation.
 | FR8 | Spectrogram LIME and SHAP, Grad-CAM | 3.1.2 | `test_grad_cam.py`, `test_saliency_service.py`, `test_saliency_routes.py`, `test_spectrogram_attribution.py` | 4 files |
 | FR9 | Integrated Gradients, label correction | 3.1.2 | `test_integrated_gradients.py`, `test_grad_cam.py` | 2 files. Regression critical: the two must be asserted as distinct outputs, not merely both present |
 | FR10 | Acoustic wave profiling | 3.1.2 | `test_acoustic_profiler_service.py`, `test_acoustic_routes.py` | 2 files |
-| FR11 | Latent projection explorer | 3.1.2, 3.1.3 | No dedicated backend test file found | **0 files, a real gap** |
+| FR11 | Latent projection explorer | 3.1.2, 3.1.3 | `test_latent_projection.py` | 1 file, 10 tests. **Was 0 files at the time of the original edition; see the addendum.** |
 | FR12 | Canvas driven signal mutation | 3.1.2, 3.1.3 | `test_perturbation_service.py`, plus `PerturbationTools.test.tsx` and `SpectrogramGridSelector.test.tsx` | 1 backend file, thin for four sub clauses |
 | FR15 | Accent bias profiling | 3.1.2, and measured in section 5.1 | `test_accent_bias_profiler.py`, `test_accent_bias_runner.py`, `test_l2arctic_loader.py`, `test_evaluation_routes.py` | 4 files, plus a measured result |
 | FR16 | Attribution faithfulness auditing | 3.1.2, and measured in section 5.2 | `test_auc_faithfulness.py`, `test_faithfulness.py`, `test_evaluation_scoring.py`, `test_high_saliency_masking.py` | 4 files, plus a measured result |
@@ -815,15 +815,24 @@ section 4.3 for the corrected explanation.
 | SR1 to SR7 | Security requirements | 3.1.6 | `test_security.py`, `test_session_cookie.py`, `test_debug_and_tasks_routes.py`, `test_dataset_service.py`, plus the dependency and image scans | Automated subset executed, manual probing open |
 
 There is no FR5, FR13 or FR14 row, because the reconciled SRS does not define
-them. FR5, multi-model comparison, was moved to stretch scope. This matrix does
-not invent rows to look complete.
+them: they are vacated identifiers left by a renumbering, not requirements that
+were dropped. The submitted SRS numbers the same requirements FR1 to FR14 with
+no gaps, so its FR13 and FR14 are this matrix's FR15 and FR16, and its FR5 is
+SER, committed here as FR6. The full mapping is erratum E4 in `docs/README.md`.
+Multi-model side-by-side comparison, which internal notes call "dropped FR5", is
+an unnumbered out-of-scope item in SRS section 4.4. This matrix does not invent
+rows to look complete.
 
 **Gaps this matrix exposes.**
 
-1. **FR11 has no dedicated backend test file.** The route and the dimensionality
-   reduction dependency both exist, and the frontend has the embedding context
-   and panel, but nothing on the backend asserts the projection is correct. This
-   was confirmed by searching the test directory for this edition.
+1. ~~**FR11 has no dedicated backend test file.**~~ **Closed.** The route and the
+   dimensionality reduction dependency both existed, and the frontend had the
+   embedding context and panel, but nothing on the backend asserted the
+   projection was correct. `test_latent_projection.py` now covers output shape,
+   method selection, determinism, cluster separation and row order preservation.
+   Row order is the one that matters most: the panel binds output rows to
+   filenames by position, so a reorder attaches every point to the wrong file
+   with no visible symptom.
 2. **FR12 has thin backend coverage** relative to its four SRS sub clauses, which
    cover non destructive originals, Web Audio behaviour, shape and sample rate.
 3. **FR3 can pass at the orchestration level while the ASR result itself is
@@ -844,7 +853,7 @@ not invent rows to look complete.
 | No GPU in the test environment, so model bound targets are unmeasured | Run those measurements on a GPU host before submission | Report every figure with the hardware named, and never present a CPU number against a GPU target |
 | The backend suite can hang in the orchestrator tests rather than fail, which looks like a slow run | Stress run the orchestrator tests in a loop with a timeout. Never treat one green run as proof | Quarantine the specific test and record it, rather than rerunning until it passes |
 | Grad-CAM can fall back to encoder energy and be reported as a fallback | The provenance contract surfaces this to the user | Investigate defect 7 before relying on attributions in a demonstration |
-| FR11 has no backend test at all | Assign an owner before submission | Report the gap explicitly rather than letting the matrix imply coverage that does not exist |
+| ~~FR11 has no backend test at all~~ **Closed** | Covered by `test_latent_projection.py` | Reporting the gap explicitly is what got it assigned and closed, rather than letting the matrix imply coverage that did not exist |
 | The metadata tier degrades quietly when MongoDB is absent | Check the health endpoint and the collection list after starting the stack | A misconfigured deployment can look healthy while storing nothing, so verify rather than assume |
 | The product reloads model weights on many requests | Accept for now, since a cached read is fast | Budget tens of seconds for any live attribution during a demonstration |
 | Two separately correct changes can break in combination | Run the full stack suite after any merge, not only the fast suites | This has now happened three times, so treat it as expected |
@@ -873,7 +882,100 @@ evidence.
 
 ---
 
-# 10. References
+# 10. Addendum, 2026-09-29
+
+This section records what changed after the body of the report was written. The
+body is left as it stood, because a test report whose findings are quietly
+edited to match a later, better state stops being evidence of anything. Where a
+row above is now false, it is struck through and points here.
+
+## 10.1 Findings closed since the body was written
+
+**FR11 now has backend tests.** `test_latent_projection.py`, 10 tests over
+`reduce_dimensions`: output shape per requested width, empty input, finiteness,
+method selection raising rather than falling back to PCA, PCA and t-SNE
+producing different projections, determinism for both, cluster separation
+surviving the projection, and row order preservation. The last is the one a
+wrong answer hides in, because a reordered projection still renders as a
+plausible scatter plot with every point attached to the wrong file.
+
+**Line coverage is now available: 70 %.** The body reported it as unavailable
+because the run did not finish, and called that a finding. It was. The cause
+turned out not to be the coverage plugin at all but a re-entrancy deadlock in
+redis-py's pipeline finaliser against fakeredis, recorded as D15 in the defect
+log. With that fixed the suite completes and coverage reports 70 %. The largest
+untested surface is `app/api/routes/inferences.py`, 763 statements at 8 %.
+
+**The Python dependency advisories are cleared.** The body reported fourteen
+advisories in the web framework layer. `pip-audit` now reports none, after
+Starlette 0.37.2 to 1.7.0 (which required FastAPI 0.111.0 to 0.141.1, since
+0.111 pinned `starlette<0.38.0`), anyio, accelerate, pip and pytest. One high
+**The JavaScript side is now clean in production too.** `npm audit --omit=dev`
+reports 0 vulnerabilities. This is a correction as much as an improvement: the
+body, and an earlier version of this addendum, recorded the production `lodash`
+high as unfixable because "there is no patched 4.x release". There is —
+4.18.1, outside the advisory's `<=4.17.23` range — and `npm audit` had been
+reporting `fixAvailable: true` all along. An `overrides` entry pinning
+`lodash: ^4.18.1` clears it without moving recharts. Separately, `newman` and
+`newman-reporter-htmlextra` were removed from `devDependencies`, since they were
+added by this test effort and brought 14 advisories including the only critical
+one; the collection still runs through `npx newman`. **Total: 25 advisories
+(1 critical, 13 high) down to 4 (0 critical, 1 high).** The remaining high is
+`vite`, dev-only, fix is a three-major bump.
+
+## 10.2 Gaps found by checking the submitted documents against the tree
+
+Three requirements were implemented only in the half that was visible, so
+nothing failed. All three are now closed, and all three were in the upload
+route, which had no tests of any kind before this.
+
+| Requirement | What was missing | Now |
+| ----------- | ---------------- | --- |
+| SR1's duration cap, 15 minutes | The size cap was enforced and the duration was computed, displayed, and never compared against anything. A 40-minute 8 kHz mono clip is about 38 MB, so it passed the size gate and fanned out to five workers. | Rejected with 413, file deleted, `AUDIOLIT_MAX_UPLOAD_SECONDS` configurable. 3 tests. |
+| SR4 and constraint C4, transient audio purged on a configurable TTL | Sessions and the Mongo tier had TTLs. The audio files had none. The only deletion path was an explicit DELETE the browser had to remember to send, so every closed tab left a clip on disk permanently. The constraint was documented, asserted in a code comment, and unimplemented. | `purge_expired_uploads()` on each upload and at startup, `AUDIOLIT_UPLOAD_RETENTION_SECONDS` configurable. 4 tests. |
+| SR7, Python and JavaScript dependencies scanned on every build | Only the container images were scanned. `pip-audit` and `npm audit` were run by hand and appeared nowhere in the workflow, so the scan that found 33 advisories was a one-off rather than a gate. | Both are now CI steps. |
+
+The npm gate is set at **high** on production dependencies, which is what SR7
+asks for and which passes cleanly. It was briefly set at critical instead, on
+the false premise that the lodash high was unfixable; once that turned out to be
+wrong the premise for the looser gate went with it. Dev dependencies are
+deliberately not gated, and that is stated here rather than left as a silent
+threshold: the remaining high is `vite`, and a build-tool advisory does not reach
+a user.
+
+**One requirement is checked and open, by design.** SR3 requires TLS, and SAD
+section 3.2's last constraint requires browser-to-server traffic to be
+encrypted. The repository terminates plain HTTP: `Frontend/nginx.conf` listens
+on 8080 with no TLS block, and `COOKIE_SECURE` defaults to false. This is
+correct for the deployment the product is actually built for, a single academic
+host reached over localhost, and the cookie flag is a setting rather than a
+hardcode, so a deployment behind a TLS terminator only has to set it. It is
+recorded as open rather than claimed as met, because an operator putting this on
+a network needs to know the encryption is theirs to add and not something the
+application provides.
+
+Two further security requirements were checked and hold. SR5's cache keys are
+digests and carry no filenames or tokens. SR6's CORS is a regex restricted to
+localhost, not the wildcard the inherited baseline used. SR1's magic-number
+clause is met in a stronger form than written: the route decodes the file with
+librosa and rejects what will not decode, which catches a valid header in front
+of a corrupt body that a header-byte check would pass.
+
+## 10.3 One correction to the body
+
+The coverage matrix said "FR5, multi-model comparison, was moved to stretch
+scope". FR5 in the submitted SRS is Speech Emotion Recognition, which is
+committed and delivered as FR6. The identifier FR5 is vacated by a renumbering,
+and multi-model comparison is an unnumbered out-of-scope item. The matrix's
+conclusion was right, its reason was not. Erratum E4 in `docs/README.md` has the
+full mapping, and it is worth reading before citing any FR id from a submitted
+document, because the submitted SRS is inconsistent with itself: its requirement
+list runs FR1 to FR14 while its own later sections already cite FR7, FR16.1 and
+FR17.
+
+---
+
+# 11. References
 
 Every version below was read from the installed environment on the Windows
 evaluation host, and every link was checked on 20 September 2026. Entries marked

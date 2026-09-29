@@ -9,6 +9,8 @@ mocked at the call site).
 
 from __future__ import annotations
 
+import gc
+
 from unittest.mock import patch
 
 import pytest
@@ -20,8 +22,29 @@ from app.orchestration import multitask_orchestrator_service as multitask
 
 
 def _drain(conn, *queue_names) -> None:
+    """Run the queued jobs to completion against fakeredis.
+
+    Garbage collection is suspended for the duration, and that is load-bearing
+    rather than tidiness. redis-py's `Pipeline.__del__` calls `reset()`, which
+    sends UNWATCH on its connection. If the collector runs that finaliser while
+    fakeredis is part-way through processing another command, the UNWATCH
+    re-enters a socket that is not re-entrant and the process deadlocks with no
+    error: the run simply stops.
+
+    That is the "intermittent hang" this suite has shown for months. It is
+    intermittent because it depends on when the collector happens to fire, which
+    depends on memory pressure, which is why it appears in a full run and never
+    when these tests are run on their own. Suspending collection across the
+    drain removes the window.
+    """
     queues = [Queue(name, connection=conn) for name in queue_names]
-    SimpleWorker(queues, connection=conn).work(burst=True)
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        SimpleWorker(queues, connection=conn).work(burst=True)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
 
 @pytest.fixture

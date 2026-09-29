@@ -37,6 +37,19 @@ async def _warn_if_dataset_footprint_over_limit() -> None:
     except Exception:
         logger.warning("Could not measure dataset footprint at startup", exc_info=True)
 
+
+@app.on_event("startup")
+async def _purge_expired_uploads() -> None:
+    """SR4 / constraint C4 - the per-upload sweep only runs when someone
+    uploads, so a server that sat idle past the retention window would still be
+    holding audio on the next boot. This clears it before serving a request."""
+    try:
+        removed = upload_routes.purge_expired_uploads()
+        if removed:
+            logger.info("Purged %d upload(s) past the retention window", removed)
+    except Exception:
+        logger.warning("Could not purge expired uploads at startup", exc_info=True)
+
 # Configure CORS origins - default to common development origins if not set
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
 if allowed_origins_env:

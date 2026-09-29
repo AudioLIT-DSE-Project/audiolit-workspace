@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, Form,HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 import os
 import shutil
+import time
 from pathlib import Path
 import uuid
 import librosa
@@ -21,6 +22,44 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_UPLOAD_SIZE_BYTES = int(os.getenv("AUDIOLIT_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))  # 100MB
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 
+# SR1 - the size cap above was enforced but the duration cap in the same
+# requirement was not: duration was measured and reported, never checked. A
+# 40-minute 8 kHz mono clip is well under 100 MB and used to be accepted, then
+# fanned out to five workers holding the whole decoded array in memory.
+MAX_UPLOAD_DURATION_SECONDS = float(os.getenv("AUDIOLIT_MAX_UPLOAD_SECONDS", str(15 * 60)))  # 15 min
+
+# SR4 / constraint C4 - uploaded audio is transient. Only an explicit
+# DELETE /upload/{file_id} removed it before, so anything the browser never
+# deleted (a closed tab, a failed request) stayed on disk indefinitely. The
+# sweep below runs on upload and at startup; set to 0 to keep files.
+UPLOAD_RETENTION_SECONDS = float(os.getenv("AUDIOLIT_UPLOAD_RETENTION_SECONDS", str(24 * 60 * 60)))  # 24 h
+
+
+def purge_expired_uploads(retention_seconds: float | None = None) -> int:
+    """Delete uploads older than the retention window. Returns the count.
+
+    Best-effort by design: a file another request is mid-read on may fail to
+    unlink on Windows, and that must not fail the upload that triggered the
+    sweep.
+    """
+    window = UPLOAD_RETENTION_SECONDS if retention_seconds is None else retention_seconds
+    if window <= 0:
+        return 0
+    cutoff = time.time() - window
+    removed = 0
+    try:
+        entries = list(UPLOAD_DIR.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
 @router.get("/upload/test")
 async def test_upload_endpoint():
     """Test endpoint to verify upload service is working"""
@@ -31,6 +70,8 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
     """
     Upload an audio file and return the file path for processing
     """
+    purge_expired_uploads()
+
     # Validate file type
     if not file.content_type or not file.content_type.startswith('audio/'):
         raise HTTPException(status_code=400, detail="Invalid file type. Only audio files are allowed.")
@@ -77,6 +118,16 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
             raise HTTPException(
                 status_code=422,
                 detail="File could not be decoded as audio. It may be corrupted or in an unsupported format.",
+            )
+
+        if MAX_UPLOAD_DURATION_SECONDS > 0 and duration > MAX_UPLOAD_DURATION_SECONDS:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Audio is {duration / 60:.1f} minutes long; the maximum is "
+                    f"{MAX_UPLOAD_DURATION_SECONDS / 60:.0f} minutes."
+                ),
             )
 
         # FR3.2 / SAD §3.6.2: no model inference on the request path. This route

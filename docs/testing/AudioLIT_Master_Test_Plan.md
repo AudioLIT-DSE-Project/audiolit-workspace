@@ -625,7 +625,7 @@ application, complementing the in-process route tests. It is committed at
 newman, so it can be executed against any deployment.
 
 ```
-newman run Backend/apitests/AudioLIT.postman_collection.json \
+npx newman run Backend/apitests/AudioLIT.postman_collection.json \
   --env-var baseUrl=http://127.0.0.1:8000
 
 requests     13 executed, 0 failed
