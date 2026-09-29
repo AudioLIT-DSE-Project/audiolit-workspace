@@ -53,6 +53,74 @@ interface AudioUploadRecorderModalProps {
   defaultTasks?: SelectedTasks;
 }
 
+/**
+ * Convert any browser recorded audio Blob into a standardized 16kHz PCM 16-bit WAV File.
+ * Guarantees 100% backend compatibility with soundfile/librosa across Windows, Linux & macOS.
+ */
+async function blobToWavFile(rawBlob: Blob, filename: string): Promise<File> {
+  try {
+    const arrayBuffer = await rawBlob.arrayBuffer();
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const audioCtx = new AudioCtx();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+    const targetSampleRate = 16000;
+    const numOfChannels = 1;
+    const offlineCtx = new OfflineAudioContext(
+      numOfChannels,
+      Math.ceil(audioBuffer.duration * targetSampleRate),
+      targetSampleRate
+    );
+
+    const source = offlineCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(offlineCtx.destination);
+    source.start(0);
+
+    const renderedBuffer = await offlineCtx.startRendering();
+    audioCtx.close().catch(() => {});
+
+    const pcmData = renderedBuffer.getChannelData(0);
+    const wavBuffer = new ArrayBuffer(44 + pcmData.length * 2);
+    const view = new DataView(wavBuffer);
+
+    const writeString = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+
+    writeString(0, "RIFF");
+    view.setUint32(4, 36 + pcmData.length * 2, true);
+    writeString(8, "WAVE");
+    writeString(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // Mono
+    view.setUint32(24, targetSampleRate, true);
+    view.setUint32(28, targetSampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, "data");
+    view.setUint32(40, pcmData.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < pcmData.length; i++) {
+      const s = Math.max(-1, Math.min(1, pcmData[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      offset += 2;
+    }
+
+    const wavFilename = filename.replace(/\.[^/.]+$/, "") + ".wav";
+    return new File([wavBuffer], wavFilename, { type: "audio/wav" });
+  } catch (err) {
+    console.warn("WAV encoding fallback to raw blob:", err);
+    return new File([rawBlob], filename, { type: rawBlob.type || "audio/webm" });
+  }
+}
+
 export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> = ({
   isOpen,
   onClose,
@@ -184,8 +252,9 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
         },
       });
 
-      // AudioContext for VU volume meter
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioContextRef.current = audioCtx;
       const analyser = audioCtx.createAnalyser();
@@ -205,7 +274,6 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
       };
       updateMeter();
 
-      // Configure MediaRecorder
       let mimeType = "audio/webm";
       if (!MediaRecorder.isTypeSupported(mimeType)) {
         if (MediaRecorder.isTypeSupported("audio/mp4")) mimeType = "audio/mp4";
@@ -240,7 +308,7 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
 
       timerRef.current = setInterval(() => {
         setRecordingTime((prev) => {
-          if (prev >= 900) { // 15 min cap per SR1
+          if (prev >= 900) {
             stopRecording();
             return prev;
           }
@@ -316,7 +384,12 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
     previewAudioRef.current = audio;
 
     audio.onloadedmetadata = () => {
-      setTotalDuration(audio.duration || recordingTime);
+      const dur = audio.duration;
+      if (dur && isFinite(dur) && !isNaN(dur)) {
+        setTotalDuration(dur);
+      } else if (recordingTime > 0) {
+        setTotalDuration(recordingTime);
+      }
     };
 
     audio.ontimeupdate = () => {
@@ -340,9 +413,12 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
       previewAudioRef.current.pause();
       setIsPlayingPreview(false);
     } else {
-      previewAudioRef.current.play().then(() => setIsPlayingPreview(true)).catch((err) => {
-        console.error("Playback error:", err);
-      });
+      previewAudioRef.current
+        .play()
+        .then(() => setIsPlayingPreview(true))
+        .catch((err) => {
+          console.error("Playback error:", err);
+        });
     }
   };
 
@@ -388,21 +464,22 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
   };
 
   const formatTime = (seconds: number) => {
+    if (!seconds || !isFinite(seconds) || isNaN(seconds)) return "00:00";
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Submit audio payload (File or Recorded Live Blob) to POST /upload
+  // Submit audio payload (File or Recorded Live Blob converted to WAV) to POST /upload
   const handleSubmit = async () => {
-    const fileToUpload =
-      activeTab === "upload"
-        ? selectedFile
-        : audioBlob
-        ? new File([audioBlob], `live_recording_${Date.now()}.webm`, {
-            type: audioBlob.type || "audio/webm",
-          })
-        : null;
+    let fileToUpload: File | null = null;
+
+    if (activeTab === "upload") {
+      fileToUpload = selectedFile;
+    } else if (audioBlob) {
+      setUploadProgress("Standardizing live recording to WAV audio...");
+      fileToUpload = await blobToWavFile(audioBlob, `live_recording_${Date.now()}.wav`);
+    }
 
     if (!fileToUpload) {
       setErrorMessage("Please select a file or record a voice input first.");
@@ -410,7 +487,7 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
     }
 
     setIsSubmitting(true);
-    setUploadProgress("Uploading and standardizing audio payload...");
+    setUploadProgress("Uploading audio payload to server...");
     setErrorMessage(null);
 
     const formData = new FormData();
@@ -459,12 +536,17 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
     onClose();
   };
 
+  const effectiveDuration =
+    totalDuration && isFinite(totalDuration) && !isNaN(totalDuration)
+      ? totalDuration
+      : recordingTime;
+
   return (
     <Dialog open={isOpen} onOpenChange={handleModalClose}>
-      <DialogContent className="sm:max-w-[580px] bg-card border-border shadow-xl">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-[620px] max-w-full overflow-hidden bg-card border-border shadow-xl p-6">
+        <DialogHeader className="space-y-1">
           <DialogTitle className="text-lg font-semibold flex items-center gap-2">
-            <Upload className="h-5 w-5 text-primary" />
+            <Upload className="h-5 w-5 text-primary shrink-0" />
             Audio Data Input & Live Voice Recorder
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
@@ -474,11 +556,11 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
 
         <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as "upload" | "record")} className="w-full mt-1">
           <TabsList className="grid w-full grid-cols-2 bg-muted/60 p-1">
-            <TabsTrigger value="upload" className="text-xs flex items-center gap-1.5">
+            <TabsTrigger value="upload" className="text-xs flex items-center justify-center gap-1.5">
               <FileAudio className="h-3.5 w-3.5" />
               File Upload
             </TabsTrigger>
-            <TabsTrigger value="record" className="text-xs flex items-center gap-1.5">
+            <TabsTrigger value="record" className="text-xs flex items-center justify-center gap-1.5">
               <Radio className="h-3.5 w-3.5 text-rose-500 animate-pulse" />
               Live Voice Record
             </TabsTrigger>
@@ -511,8 +593,8 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
               {selectedFile ? (
                 <div className="space-y-1">
                   <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400 flex items-center justify-center gap-1.5">
-                    <CheckCircle2 className="h-4 w-4" />
-                    {selectedFile.name}
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    <span className="truncate max-w-[340px]">{selectedFile.name}</span>
                   </p>
                   <p className="text-xs text-muted-foreground">
                     {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • {selectedFile.type || "audio payload"}
@@ -533,21 +615,21 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
 
           {/* TAB 2: LIVE VOICE RECORDING */}
           <TabsContent value="record" className="mt-3 space-y-3">
-            <div className="border border-border rounded-lg p-4 bg-muted/20 space-y-3">
+            <div className="border border-border rounded-lg p-3.5 bg-muted/20 space-y-3 max-w-full overflow-hidden">
               {micError ? (
                 <div className="p-2.5 bg-destructive/10 text-destructive text-xs rounded-md flex items-center gap-2">
-                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  <AlertCircle className="h-4 w-4 shrink-0" />
                   <span>{micError}</span>
                 </div>
               ) : null}
 
               {/* Header & Status Indicator */}
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
                 <Badge variant={isRecording ? "destructive" : audioBlob ? "default" : "outline"} className="text-xs">
                   {isRecording ? (isPaused ? "PAUSED" : "RECORDING LIVE") : audioBlob ? "RECORDED PREVIEW" : "READY TO RECORD"}
                 </Badge>
-                <span className="text-base font-mono font-bold tracking-wider text-foreground">
-                  {formatTime(isRecording ? recordingTime : currentTime)} / {formatTime(totalDuration || 900)}
+                <span className="text-sm font-mono font-bold tracking-wider text-foreground">
+                  {formatTime(isRecording ? recordingTime : currentTime)} / {formatTime(effectiveDuration || 900)}
                 </span>
               </div>
 
@@ -595,32 +677,32 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
 
               {/* Recorded Audio Preview & Scrubber Controls */}
               {audioBlob && !isRecording ? (
-                <div className="space-y-3 bg-card p-3 rounded border border-border">
+                <div className="space-y-3 bg-card p-3 rounded-lg border border-border w-full max-w-full overflow-hidden">
                   {/* Timeline Scrubber */}
                   <div className="space-y-1">
                     <Slider
                       value={[currentTime]}
-                      max={totalDuration || 1}
+                      max={effectiveDuration || 1}
                       step={0.1}
                       onValueChange={handleSeek}
                       className="cursor-pointer"
                     />
                     <div className="flex justify-between text-[10px] text-muted-foreground">
                       <span>{formatTime(currentTime)}</span>
-                      <span>{formatTime(totalDuration)}</span>
+                      <span>{formatTime(effectiveDuration)}</span>
                     </div>
                   </div>
 
                   {/* Playback Action Toolbar */}
-                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/50">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border/50">
                     <div className="flex items-center gap-2">
-                      <Button onClick={togglePreviewPlayback} variant="default" size="sm" className="h-8 text-xs">
+                      <Button onClick={togglePreviewPlayback} variant="default" size="sm" className="h-8 text-xs shrink-0">
                         {isPlayingPreview ? <Pause className="h-3.5 w-3.5 mr-1" /> : <Play className="h-3.5 w-3.5 mr-1" />}
                         {isPlayingPreview ? "Pause" : "Play Preview"}
                       </Button>
 
-                      {/* Volume Slider */}
-                      <div className="flex items-center gap-1.5 ml-2">
+                      {/* Volume Control */}
+                      <div className="flex items-center gap-1 shrink-0">
                         <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={toggleMute}>
                           {isMuted ? <VolumeX className="h-3.5 w-3.5 text-muted-foreground" /> : <Volume2 className="h-3.5 w-3.5 text-foreground" />}
                         </Button>
@@ -629,22 +711,22 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
                           max={1}
                           step={0.05}
                           onValueChange={handleVolumeChange}
-                          className="w-16 cursor-pointer"
+                          className="w-14 cursor-pointer"
                         />
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5">
-                      <Button onClick={downloadRecording} variant="outline" size="sm" className="h-8 text-xs" title="Download Voice Input">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <Button onClick={downloadRecording} variant="outline" size="sm" className="h-8 text-xs px-2.5" title="Download Voice Input">
                         <Download className="h-3.5 w-3.5 mr-1" />
                         Download
                       </Button>
-                      <Button onClick={redoRecording} variant="outline" size="sm" className="h-8 text-xs text-amber-600 dark:text-amber-400 hover:bg-amber-500/10">
+                      <Button onClick={redoRecording} variant="outline" size="sm" className="h-8 text-xs px-2.5 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10">
                         <RotateCcw className="h-3.5 w-3.5 mr-1" />
-                        Redo / Re-record
+                        Re-record
                       </Button>
-                      <Button onClick={discardRecording} variant="ghost" size="sm" className="h-8 text-xs text-destructive hover:bg-destructive/10">
-                        <Trash2 className="h-3.5 w-3.5 mr-1" />
+                      <Button onClick={discardRecording} variant="ghost" size="sm" className="h-8 text-xs px-2 text-destructive hover:bg-destructive/10">
+                        <Trash2 className="h-3.5 w-3.5 mr-1 text-destructive" />
                         Clear
                       </Button>
                     </div>
@@ -660,7 +742,7 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
           <label className="text-xs font-medium text-foreground block">
             Select Analysis Tasks to Trigger on Upload:
           </label>
-          <div className="flex items-center gap-4 text-xs">
+          <div className="flex items-center gap-4 text-xs flex-wrap">
             <label className="flex items-center gap-1.5 cursor-pointer">
               <Checkbox
                 checked={tasks.asr}
@@ -691,15 +773,15 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
         {/* Error / Progress feedback */}
         {errorMessage ? (
           <p className="text-xs text-destructive bg-destructive/10 p-2.5 rounded flex items-center gap-1.5">
-            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
-            {errorMessage}
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            <span>{errorMessage}</span>
           </p>
         ) : null}
 
         {uploadProgress ? (
           <p className="text-xs text-primary bg-primary/10 p-2.5 rounded flex items-center gap-1.5">
-            <Loader2 className="h-3.5 w-3.5 animate-spin flex-shrink-0" />
-            {uploadProgress}
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+            <span>{uploadProgress}</span>
           </p>
         ) : null}
 

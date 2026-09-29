@@ -110,14 +110,19 @@ async def upload_audio_file(file: UploadFile = File(...), model: str = Form("whi
         # silently accepting them with duration=0, which was indistinguishable
         # from an actual zero-length clip.
         try:
-            audio_data, sample_rate = librosa.load(file_path, sr=None)
-            duration = librosa.get_duration(y=audio_data, sr=sample_rate)
+            try:
+                audio_data, sample_rate = sf.read(file_path)
+                duration = float(len(audio_data)) / float(sample_rate) if sample_rate > 0 else 0.0
+            except Exception:
+                audio_data, sample_rate = librosa.load(file_path, sr=None)
+                duration = float(librosa.get_duration(y=audio_data, sr=sample_rate))
             file_size = file_path.stat().st_size
-        except Exception:
+        except Exception as decode_err:
+            logger.error(f"Audio decoding failure on {file_path}: {decode_err}")
             file_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=422,
-                detail="File could not be decoded as audio. It may be corrupted or in an unsupported format.",
+                detail=f"File could not be decoded as audio. It may be corrupted or in an unsupported format.",
             )
 
         if MAX_UPLOAD_DURATION_SECONDS > 0 and duration > MAX_UPLOAD_DURATION_SECONDS:
