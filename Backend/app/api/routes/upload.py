@@ -66,24 +66,24 @@ async def test_upload_endpoint():
     return {"status": "Upload service is working", "upload_dir": str(UPLOAD_DIR.absolute())}
 
 @router.post("/upload")
-async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...)):
+async def upload_audio_file(file: UploadFile = File(...), model: str = Form("whisper-base")):
     """
     Upload an audio file and return the file path for processing
     """
     purge_expired_uploads()
 
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith('audio/'):
+    # Validate file type (allow audio/* and video/webm commonly emitted by browser MediaRecorder)
+    if file.content_type and not (file.content_type.startswith('audio/') or file.content_type in ['video/webm', 'application/octet-stream']):
         raise HTTPException(status_code=400, detail="Invalid file type. Only audio files are allowed.")
     
     # Validate file extension
-    allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac']
+    allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.webm', '.ogg', '.aac', '.opus']
     file_extension = Path(file.filename).suffix.lower()
-    if file_extension not in allowed_extensions:
-        raise HTTPException(status_code=400, detail=f"Invalid file extension. Allowed: {', '.join(allowed_extensions)}")
-    
-    try:
-        # Generate unique filename to avoid conflicts
+    if not file_extension or file_extension not in allowed_extensions:
+        # Default fallback for blob uploads without explicit extension
+        file_extension = '.webm' if 'webm' in (file.content_type or '') else '.wav'
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+    else:
         unique_filename = f"{uuid.uuid4()}{file_extension}"
         file_path = UPLOAD_DIR / unique_filename
 

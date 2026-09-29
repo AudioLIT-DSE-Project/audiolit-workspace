@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
+import { Slider } from "@/components/ui/slider";
 import {
   Mic,
   Square,
@@ -22,6 +23,10 @@ import {
   CheckCircle2,
   AlertCircle,
   FileAudio,
+  RotateCcw,
+  Download,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { API_BASE } from "@/lib/api";
 
@@ -58,17 +63,23 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
 
-  // Recording state
+  // Live Recording state
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [micError, setMicError] = useState<string | null>(null);
 
-  // Submission state
+  // Recorded Audio Player Preview state
+  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [totalDuration, setTotalDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [isMuted, setIsMuted] = useState(false);
+
+  // Form submission state
   const [tasks, setTasks] = useState<SelectedTasks>(defaultTasks);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
@@ -83,7 +94,6 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
   const animFrameRef = useRef<number | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Clean up recording state on modal close or unmount
   useEffect(() => {
     return () => {
       stopRecordingCleanup();
@@ -113,6 +123,10 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
       } catch (err) {
         console.error("Error stopping recorder tracks:", err);
       }
+    }
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current = null;
     }
   };
 
@@ -158,6 +172,8 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
     setAudioUrl(null);
     audioChunksRef.current = [];
     setRecordingTime(0);
+    setCurrentTime(0);
+    setTotalDuration(0);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -168,7 +184,7 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
         },
       });
 
-      // Set up AudioContext for real-time visual VU meter
+      // AudioContext for VU volume meter
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioContextRef.current = audioCtx;
@@ -224,8 +240,7 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
 
       timerRef.current = setInterval(() => {
         setRecordingTime((prev) => {
-          if (prev >= 900) {
-            // 15 minutes max cap per SR1
+          if (prev >= 900) { // 15 min cap per SR1
             stopRecording();
             return prev;
           }
@@ -274,6 +289,11 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
     setAudioLevel(0);
   };
 
+  const redoRecording = () => {
+    discardRecording();
+    startRecording();
+  };
+
   const discardRecording = () => {
     stopRecordingCleanup();
     setIsRecording(false);
@@ -283,33 +303,97 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     setAudioUrl(null);
     setAudioLevel(0);
+    setIsPlayingPreview(false);
+    setCurrentTime(0);
+    setTotalDuration(0);
   };
 
-  const togglePreviewPlayback = () => {
-    if (!previewAudioRef.current && audioUrl) {
-      const audio = new Audio(audioUrl);
-      previewAudioRef.current = audio;
-      audio.onended = () => setIsPlayingPreview(false);
-    }
+  // Audio Preview Player logic
+  useEffect(() => {
+    if (!audioUrl) return;
 
-    if (previewAudioRef.current) {
-      if (isPlayingPreview) {
-        previewAudioRef.current.pause();
-        setIsPlayingPreview(false);
-      } else {
-        previewAudioRef.current.play();
-        setIsPlayingPreview(true);
+    const audio = new Audio(audioUrl);
+    previewAudioRef.current = audio;
+
+    audio.onloadedmetadata = () => {
+      setTotalDuration(audio.duration || recordingTime);
+    };
+
+    audio.ontimeupdate = () => {
+      setCurrentTime(audio.currentTime);
+    };
+
+    audio.onended = () => {
+      setIsPlayingPreview(false);
+      setCurrentTime(0);
+    };
+
+    return () => {
+      audio.pause();
+      previewAudioRef.current = null;
+    };
+  }, [audioUrl, recordingTime]);
+
+  const togglePreviewPlayback = () => {
+    if (!previewAudioRef.current) return;
+    if (isPlayingPreview) {
+      previewAudioRef.current.pause();
+      setIsPlayingPreview(false);
+    } else {
+      previewAudioRef.current.play().then(() => setIsPlayingPreview(true)).catch((err) => {
+        console.error("Playback error:", err);
+      });
+    }
+  };
+
+  const handleSeek = (newValues: number[]) => {
+    if (previewAudioRef.current && newValues.length > 0) {
+      const seekTime = newValues[0];
+      previewAudioRef.current.currentTime = seekTime;
+      setCurrentTime(seekTime);
+    }
+  };
+
+  const handleVolumeChange = (newValues: number[]) => {
+    if (newValues.length > 0) {
+      const vol = newValues[0];
+      setVolume(vol);
+      if (previewAudioRef.current) {
+        previewAudioRef.current.volume = vol;
+        setIsMuted(vol === 0);
       }
     }
   };
 
+  const toggleMute = () => {
+    if (previewAudioRef.current) {
+      if (isMuted) {
+        previewAudioRef.current.volume = volume || 1;
+        setIsMuted(false);
+      } else {
+        previewAudioRef.current.volume = 0;
+        setIsMuted(true);
+      }
+    }
+  };
+
+  const downloadRecording = () => {
+    if (!audioUrl || !audioBlob) return;
+    const a = document.createElement("a");
+    a.href = audioUrl;
+    a.download = `voice_recording_${Date.now()}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
+    const secs = Math.floor(seconds % 60);
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Submit audio payload (File or Recorded Live Blob) to /upload/audio
+  // Submit audio payload (File or Recorded Live Blob) to POST /upload
   const handleSubmit = async () => {
     const fileToUpload =
       activeTab === "upload"
@@ -331,10 +415,10 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
 
     const formData = new FormData();
     formData.append("file", fileToUpload);
-    formData.append("tasks", JSON.stringify(tasks));
+    formData.append("model", "whisper-base");
 
     try {
-      const response = await fetch(`${API_BASE}/upload/audio`, {
+      const response = await fetch(`${API_BASE}/upload`, {
         method: "POST",
         body: formData,
         credentials: "include",
@@ -368,13 +452,16 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
     setIsRecording(false);
     setIsPaused(false);
     setRecordingTime(0);
+    setIsPlayingPreview(false);
+    setCurrentTime(0);
+    setTotalDuration(0);
     setErrorMessage(null);
     onClose();
   };
 
   return (
     <Dialog open={isOpen} onOpenChange={handleModalClose}>
-      <DialogContent className="sm:max-w-[550px] bg-card border-border shadow-xl">
+      <DialogContent className="sm:max-w-[580px] bg-card border-border shadow-xl">
         <DialogHeader>
           <DialogTitle className="text-lg font-semibold flex items-center gap-2">
             <Upload className="h-5 w-5 text-primary" />
@@ -385,7 +472,7 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as "upload" | "record")} className="w-full mt-2">
+        <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as "upload" | "record")} className="w-full mt-1">
           <TabsList className="grid w-full grid-cols-2 bg-muted/60 p-1">
             <TabsTrigger value="upload" className="text-xs flex items-center gap-1.5">
               <FileAudio className="h-3.5 w-3.5" />
@@ -398,7 +485,7 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
           </TabsList>
 
           {/* TAB 1: FILE UPLOAD */}
-          <TabsContent value="upload" className="mt-4 space-y-3">
+          <TabsContent value="upload" className="mt-3 space-y-3">
             <div
               onDragEnter={handleDrag}
               onDragLeave={handleDrag}
@@ -445,72 +532,125 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
           </TabsContent>
 
           {/* TAB 2: LIVE VOICE RECORDING */}
-          <TabsContent value="record" className="mt-4 space-y-4">
-            <div className="border border-border rounded-lg p-5 bg-muted/20 text-center space-y-4">
+          <TabsContent value="record" className="mt-3 space-y-3">
+            <div className="border border-border rounded-lg p-4 bg-muted/20 space-y-3">
               {micError ? (
-                <div className="p-3 bg-destructive/10 text-destructive text-xs rounded-md flex items-center justify-center gap-2">
+                <div className="p-2.5 bg-destructive/10 text-destructive text-xs rounded-md flex items-center gap-2">
                   <AlertCircle className="h-4 w-4 flex-shrink-0" />
                   <span>{micError}</span>
                 </div>
               ) : null}
 
-              {/* Status Header & Timer */}
-              <div className="flex items-center justify-between px-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant={isRecording ? "destructive" : "outline"} className="text-xs">
-                    {isRecording ? (isPaused ? "PAUSED" : "RECORDING LIVE") : audioBlob ? "RECORDED" : "READY"}
-                  </Badge>
-                </div>
-                <span className="text-lg font-mono font-bold tracking-wider text-foreground">
-                  {formatTime(recordingTime)} <span className="text-xs text-muted-foreground font-normal">/ 15:00</span>
+              {/* Header & Status Indicator */}
+              <div className="flex items-center justify-between">
+                <Badge variant={isRecording ? "destructive" : audioBlob ? "default" : "outline"} className="text-xs">
+                  {isRecording ? (isPaused ? "PAUSED" : "RECORDING LIVE") : audioBlob ? "RECORDED PREVIEW" : "READY TO RECORD"}
+                </Badge>
+                <span className="text-base font-mono font-bold tracking-wider text-foreground">
+                  {formatTime(isRecording ? recordingTime : currentTime)} / {formatTime(totalDuration || 900)}
                 </span>
               </div>
 
-              {/* VU Audio Level Visualizer Meter */}
-              <div className="h-4 w-full bg-muted rounded-full overflow-hidden flex items-center px-1">
-                <div
-                  className={`h-2 rounded-full transition-all duration-75 ${
-                    audioLevel > 80 ? "bg-rose-500" : audioLevel > 40 ? "bg-amber-500" : "bg-primary"
-                  }`}
-                  style={{ width: `${isRecording && !isPaused ? audioLevel : 0}%` }}
-                />
-              </div>
+              {/* VU Audio Meter during Recording */}
+              {isRecording ? (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[10px] text-muted-foreground">
+                    <span>Input Volume Level</span>
+                    <span>{audioLevel}%</span>
+                  </div>
+                  <div className="h-3 w-full bg-muted rounded-full overflow-hidden flex items-center px-1">
+                    <div
+                      className={`h-1.5 rounded-full transition-all duration-75 ${
+                        audioLevel > 80 ? "bg-rose-500" : audioLevel > 40 ? "bg-amber-500" : "bg-primary"
+                      }`}
+                      style={{ width: `${!isPaused ? audioLevel : 0}%` }}
+                    />
+                  </div>
+                </div>
+              ) : null}
 
-              {/* Recording Action Controls */}
-              <div className="flex items-center justify-center gap-3 pt-2">
-                {!isRecording && !audioBlob ? (
-                  <Button onClick={startRecording} size="sm" className="bg-rose-600 hover:bg-rose-700 text-white font-medium">
-                    <Mic className="h-4 w-4 mr-1.5" />
+              {/* Recording Controls */}
+              {!isRecording && !audioBlob ? (
+                <div className="text-center py-4 space-y-3">
+                  <Button onClick={startRecording} size="lg" className="bg-rose-600 hover:bg-rose-700 text-white font-medium rounded-full px-6">
+                    <Mic className="h-5 w-5 mr-2" />
                     Start Live Recording
                   </Button>
-                ) : null}
+                  <p className="text-xs text-muted-foreground">Click start and speak clearly into your microphone.</p>
+                </div>
+              ) : null}
 
-                {isRecording ? (
-                  <>
-                    <Button onClick={pauseRecording} variant="outline" size="sm" className="text-xs">
-                      {isPaused ? <Play className="h-3.5 w-3.5 mr-1" /> : <Pause className="h-3.5 w-3.5 mr-1" />}
-                      {isPaused ? "Resume" : "Pause"}
-                    </Button>
-                    <Button onClick={stopRecording} variant="destructive" size="sm" className="text-xs">
-                      <Square className="h-3.5 w-3.5 mr-1" />
-                      Stop
-                    </Button>
-                  </>
-                ) : null}
+              {isRecording ? (
+                <div className="flex items-center justify-center gap-3 pt-1">
+                  <Button onClick={pauseRecording} variant="outline" size="sm" className="text-xs">
+                    {isPaused ? <Play className="h-3.5 w-3.5 mr-1" /> : <Pause className="h-3.5 w-3.5 mr-1" />}
+                    {isPaused ? "Resume" : "Pause"}
+                  </Button>
+                  <Button onClick={stopRecording} variant="destructive" size="sm" className="text-xs">
+                    <Square className="h-3.5 w-3.5 mr-1" />
+                    Stop Recording
+                  </Button>
+                </div>
+              ) : null}
 
-                {audioBlob && !isRecording ? (
-                  <div className="flex items-center gap-2">
-                    <Button onClick={togglePreviewPlayback} variant="outline" size="sm" className="text-xs">
-                      {isPlayingPreview ? <Pause className="h-3.5 w-3.5 mr-1" /> : <Play className="h-3.5 w-3.5 mr-1" />}
-                      {isPlayingPreview ? "Pause Preview" : "Play Preview"}
-                    </Button>
-                    <Button onClick={discardRecording} variant="ghost" size="sm" className="text-xs text-destructive hover:bg-destructive/10">
-                      <Trash2 className="h-3.5 w-3.5 mr-1" />
-                      Discard
-                    </Button>
+              {/* Recorded Audio Preview & Scrubber Controls */}
+              {audioBlob && !isRecording ? (
+                <div className="space-y-3 bg-card p-3 rounded border border-border">
+                  {/* Timeline Scrubber */}
+                  <div className="space-y-1">
+                    <Slider
+                      value={[currentTime]}
+                      max={totalDuration || 1}
+                      step={0.1}
+                      onValueChange={handleSeek}
+                      className="cursor-pointer"
+                    />
+                    <div className="flex justify-between text-[10px] text-muted-foreground">
+                      <span>{formatTime(currentTime)}</span>
+                      <span>{formatTime(totalDuration)}</span>
+                    </div>
                   </div>
-                ) : null}
-              </div>
+
+                  {/* Playback Action Toolbar */}
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/50">
+                    <div className="flex items-center gap-2">
+                      <Button onClick={togglePreviewPlayback} variant="default" size="sm" className="h-8 text-xs">
+                        {isPlayingPreview ? <Pause className="h-3.5 w-3.5 mr-1" /> : <Play className="h-3.5 w-3.5 mr-1" />}
+                        {isPlayingPreview ? "Pause" : "Play Preview"}
+                      </Button>
+
+                      {/* Volume Slider */}
+                      <div className="flex items-center gap-1.5 ml-2">
+                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={toggleMute}>
+                          {isMuted ? <VolumeX className="h-3.5 w-3.5 text-muted-foreground" /> : <Volume2 className="h-3.5 w-3.5 text-foreground" />}
+                        </Button>
+                        <Slider
+                          value={[isMuted ? 0 : volume]}
+                          max={1}
+                          step={0.05}
+                          onValueChange={handleVolumeChange}
+                          className="w-16 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <Button onClick={downloadRecording} variant="outline" size="sm" className="h-8 text-xs" title="Download Voice Input">
+                        <Download className="h-3.5 w-3.5 mr-1" />
+                        Download
+                      </Button>
+                      <Button onClick={redoRecording} variant="outline" size="sm" className="h-8 text-xs text-amber-600 dark:text-amber-400 hover:bg-amber-500/10">
+                        <RotateCcw className="h-3.5 w-3.5 mr-1" />
+                        Redo / Re-record
+                      </Button>
+                      <Button onClick={discardRecording} variant="ghost" size="sm" className="h-8 text-xs text-destructive hover:bg-destructive/10">
+                        <Trash2 className="h-3.5 w-3.5 mr-1" />
+                        Clear
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </TabsContent>
         </Tabs>
@@ -550,14 +690,14 @@ export const AudioUploadRecorderModal: React.FC<AudioUploadRecorderModalProps> =
 
         {/* Error / Progress feedback */}
         {errorMessage ? (
-          <p className="text-xs text-destructive bg-destructive/10 p-2 rounded flex items-center gap-1.5">
+          <p className="text-xs text-destructive bg-destructive/10 p-2.5 rounded flex items-center gap-1.5">
             <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
             {errorMessage}
           </p>
         ) : null}
 
         {uploadProgress ? (
-          <p className="text-xs text-primary bg-primary/10 p-2 rounded flex items-center gap-1.5">
+          <p className="text-xs text-primary bg-primary/10 p-2.5 rounded flex items-center gap-1.5">
             <Loader2 className="h-3.5 w-3.5 animate-spin flex-shrink-0" />
             {uploadProgress}
           </p>
