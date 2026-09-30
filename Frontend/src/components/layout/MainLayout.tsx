@@ -560,11 +560,7 @@ export const MainLayout = () => {
     return () => { if (addRequestRef.current) { addRequestRef.current.abort(); addRequestRef.current = null; } };
   }, [selectedFile, selectedEmbeddingFile, model, dataset]);
 
-  const effectiveDataset = (() => {
-    if (dataset.startsWith('custom:')) return dataset;
-    if (uploadedFiles && uploadedFiles.length > 0) return "custom";
-    return dataset;
-  })();
+  const effectiveDataset = dataset;
 
   const [predictionMap, setPredictionMap] = useState<Record<string, string>>({});
 
@@ -572,46 +568,16 @@ export const MainLayout = () => {
     setPredictionMap(prev => ({ ...prev, [fileId]: prediction }));
   };
 
-  // Hook up upload action to the RQ multi-task endpoint
-  const startMultiTaskInference = async (file: UploadedFile) => {
-    // Only ASR/SER/ADD are real multitask fan-out families (task_orchestrator's
-    // _TASK_FUNCS has no XAI entry - attribution is a separate job kind,
-    // enqueued via POST /api/inference/attribution, SAD Use Case 3). Including
-    // "xai" here used to make every upload 500 with a backend KeyError before
-    // the job could even start - fixed as part of LIT-233's task selector.
-    const tasks = (Object.keys(selectedTasks) as Array<keyof SelectedTasks>).filter(
-      (task) => selectedTasks[task]
-    );
-    if (tasks.length === 0) return;
-
-    // Route the Model dropdown's chosen ADD checkpoint into the "add" task
-    // (task_orchestrator.add_task defaults to melody-machine when omitted).
-    const model_ids: Record<string, string> = {};
-    if (ADD_MODEL_KEYS.includes(model)) model_ids.add = model;
-
-    try {
-      const response = await fetch(`${API_BASE}/api/inference/multitask`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          audio_ref: file.file_path,
-          tasks,
-          ...(Object.keys(model_ids).length > 0 ? { model_ids } : {}),
-        }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setActiveTaskId(data.job_id); // Start WebSocket polling
-      }
-    } catch (error) {
-      console.error("Failed to start multi-task inference:", error);
-    }
+  const handleUploadSuccess = (uploadResponse: UploadedFile) => {
+    setUploadedFiles(prev => [uploadResponse, ...prev.filter(f => f.file_id !== uploadResponse.file_id)]);
+    setSelectedFile(uploadResponse);
   };
 
-  const handleUploadSuccess = (uploadResponse: UploadedFile) => {
-    setUploadedFiles(prev => [...prev, uploadResponse]);
-    setSelectedFile(uploadResponse);
-    startMultiTaskInference(uploadResponse); // Trigger RQ Job
+  const handleDeleteLiveRecording = (fileId: string) => {
+    setUploadedFiles(prev => prev.filter(f => f.file_id !== fileId));
+    if (selectedFile?.file_id === fileId) {
+      setSelectedFile(null);
+    }
   };
 
   const handleFileSelection = (file: UploadedFile) => {
@@ -794,7 +760,7 @@ export const MainLayout = () => {
                 <Panel defaultSize={30} minSize={20}>
                   <AudioDatasetPanel
                     apiData={apiData} uploadedFiles={uploadedFiles} selectedFile={selectedFile} onFileSelect={handleFileSelection}
-                    onUploadSuccess={handleUploadSuccess} model={model} dataset={effectiveDataset} originalDataset={dataset}
+                    onUploadSuccess={handleUploadSuccess} onDeleteLiveRecording={handleDeleteLiveRecording} model={model} dataset={effectiveDataset} originalDataset={dataset}
                     batchInferenceStatus={batchInferenceStatus} onBatchInferenceStart={handleBatchInferenceStart}
                     onBatchInferenceComplete={handleBatchInferenceComplete} onAvailableFilesChange={setAvailableFiles}
                     onPredictionUpdate={handlePredictionUpdate} predictionMap={predictionMap}

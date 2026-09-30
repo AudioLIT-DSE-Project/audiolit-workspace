@@ -10,7 +10,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, ChevronLeft, ChevronRight, RotateCw } from "lucide-react";
+import { Play, ChevronLeft, ChevronRight, RotateCw, FolderPlus, Trash2 } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
 
 interface UploadedFile {
@@ -46,6 +46,8 @@ interface AudioDataTableProps {
   datasetMetadata?: Record<string, string | number>[];
   uploadedFiles?: UploadedFile[];
   onFilePlay?: (file: UploadedFile) => void;
+  onDeleteLiveRecording?: (fileId: string) => void;
+  onSaveLiveToCustom?: (file: UploadedFile) => void;
   predictionMap?: Record<string, string>;
   inferenceStatus?: Record<string, 'idle' | 'loading' | 'done' | 'error'>;
   onVisibleRowIdsChange?: (rowIds: string[]) => void;
@@ -63,7 +65,7 @@ const predictionColumnNoun = (model: string): string => {
   return "Emotion";
 };
 
-export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange, onRegenerateRow }: AudioDataTableProps) => {
+export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, onDeleteLiveRecording, onSaveLiveToCustom, predictionMap, inferenceStatus, onVisibleRowIdsChange, onRegenerateRow }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads
   const hasDatasetMetadata = (datasetMetadata?.length || 0) > 0;
   const hasUploadedFiles = uploadedFiles && uploadedFiles.length > 0;
@@ -125,26 +127,31 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         // Handle both AudioData (uploaded files) and DatasetRow (dataset files)
         if ('file_id' in (row.original as any)) {
           // This is an uploaded file (AudioData)
-        const data = row.original as AudioData;
-        const file = uploadedFiles?.find(f => f.file_id === data.id);
-        return (
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="h-6 w-6 p-0"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                if (file && onFilePlay) onFilePlay(file);
-              }}
-            >
-              <Play className="h-3 w-3" />
-            </Button>
-            <span className="font-mono text-xs">{data.filename}</span>
-          </div>
-        );
+          const data = row.original as AudioData;
+          const file = uploadedFiles?.find(f => f.file_id === data.id);
+          return (
+            <div className="flex items-center gap-1.5">
+              <Badge variant="outline" className="text-[9px] px-1 py-0 bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30 shrink-0">
+                LIVE
+              </Badge>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-6 w-6 p-0 shrink-0"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  if (file && onFilePlay) onFilePlay(file);
+                }}
+              >
+                <Play className="h-3 w-3" />
+              </Button>
+              <span className="font-mono text-xs truncate max-w-[180px]" title={data.filename}>
+                {data.filename}
+              </span>
+            </div>
+          );
         } else {
           // This is a dataset file (DatasetRow)
           const data = row.original as DatasetRow;
@@ -171,7 +178,6 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           const pred = predictionMap?.[rowId] || data.prediction || "";
           if (!pred) return "";
           
-          // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
@@ -182,7 +188,6 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           // This is a dataset file (DatasetRow)
           const pred = predictionMap?.[rowId] ?? "";
           
-          // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
@@ -196,13 +201,10 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "groundTruthLabel",
       header: "Ground Truth",
       cell: ({ row }) => {
-        // Handle both AudioData and DatasetRow
         if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData)
-        const data = row.original as AudioData;
-        return <span className="text-xs">{data.groundTruthLabel}</span>;
+          const data = row.original as AudioData;
+          return <span className="text-xs font-mono">{data.groundTruthLabel || "—"}</span>;
         } else {
-          // This is a dataset file (DatasetRow)
           const data = row.original as DatasetRow;
           return <span className="text-xs">{getFrom(data, ["sentence", "transcript", "text", "emotion", "label"], "")}</span>;
         }
@@ -212,14 +214,11 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "confidence",
       header: "Confidence",
       cell: ({ row }) => {
-        // Only show confidence for uploaded files (AudioData)
         if ('file_id' in (row.original as any)) {
-        const data = row.original as AudioData;
-        // Don't display confidence if it's 0
-        if (data.confidence === 0) return null;
-        return <span className="text-xs">{data.confidence}</span>;
+          const data = row.original as AudioData;
+          if (data.confidence === 0) return null;
+          return <span className="text-xs">{data.confidence}</span>;
         } else {
-          // For dataset files, show N/A or empty
           return <span className="text-xs text-muted-foreground">N/A</span>;
         }
       },
@@ -228,14 +227,11 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "duration",
       header: "Duration",
       cell: ({ row }) => {
-        // Handle both AudioData and DatasetRow
         if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData)
-        const data = row.original as AudioData;
+          const data = row.original as AudioData;
           const duration = typeof data.duration === 'number' ? data.duration : 0;
           return <span className="text-xs">{duration.toFixed(2)}s</span>;
         } else {
-          // This is a dataset file (DatasetRow)
           const data = row.original as DatasetRow;
           const d = Number(getFrom(data, ["duration", "length"], "0"));
           if (d > 0) {
@@ -249,13 +245,51 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "actions",
       header: "Actions",
       cell: ({ row }) => {
-        // Regenerate only applies to dataset rows - uploaded files run
-        // through the separate async multitask job, not /inferences/run.
-        if ('file_id' in (row.original as any)) return null;
+        if ('file_id' in (row.original as any)) {
+          const data = row.original as AudioData;
+          const file = uploadedFiles?.find(f => f.file_id === data.id);
+          return (
+            <div className="flex items-center gap-1">
+              {regenerateCell(data.id)}
+              {file && onSaveLiveToCustom && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
+                  title="Save live audio to custom dataset"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    onSaveLiveToCustom(file);
+                  }}
+                >
+                  <FolderPlus className="h-3 w-3" />
+                </Button>
+              )}
+              {file && onDeleteLiveRecording && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+                  title="Delete live recording from session"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    onDeleteLiveRecording(data.id);
+                  }}
+                >
+                  <Trash2 className="h-3 w-3 text-destructive" />
+                </Button>
+              )}
+            </div>
+          );
+        }
         return regenerateCell(row.id as string);
       },
     },
-  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell]);
+  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell, onDeleteLiveRecording, onSaveLiveToCustom]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
     const v = row["filename"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["id"];

@@ -367,36 +367,6 @@ export const Toolbar = ({
               </Select>
             </div>
 
-            {uploadedFiles && uploadedFiles.length > 0 && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-medium text-foreground">
-                  File:
-                </span>
-                <Select
-                  value={selectedFile?.file_id || ""}
-                  onValueChange={(fileId) => {
-                    const file = uploadedFiles.find(
-                      (f) => f.file_id === fileId,
-                    );
-                    if (file && onFileSelect) {
-                      onFileSelect(file);
-                    }
-                  }}
-                >
-                  <SelectTrigger className="w-48 h-7 border-border text-xs" aria-label="Uploaded file">
-                    <SelectValue placeholder="Select uploaded file" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {uploadedFiles.map((file) => (
-                      <SelectItem key={file.file_id} value={file.file_id}>
-                        {file.filename}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
             <div className="flex items-center gap-1.5">
               <div className="flex items-center gap-1">
                 <span className="text-xs font-medium text-foreground">

@@ -62,6 +62,8 @@ interface AudioDatasetPanelProps {
   selectedFile?: UploadedFile | null;
   onFileSelect?: (file: UploadedFile) => void;
   onUploadSuccess?: (uploadResponse: UploadedFile) => void;
+  onDeleteLiveRecording?: (fileId: string) => void;
+  onSaveLiveToCustom?: (file: UploadedFile) => void;
   batchInferenceStatus?: 'idle' | 'running' | 'done';
   onBatchInferenceStart?: () => void;
   onBatchInferenceComplete?: () => void;
@@ -75,9 +77,12 @@ export const AudioDatasetPanel = ({
   model,
   dataset,
   originalDataset,
+  uploadedFiles,
   selectedFile, 
   onFileSelect, 
   onUploadSuccess,
+  onDeleteLiveRecording,
+  onSaveLiveToCustom,
   batchInferenceStatus,
   onBatchInferenceStart,
   onBatchInferenceComplete,
@@ -772,6 +777,8 @@ export const AudioDatasetPanel = ({
               datasetMetadata={datasetMetadata}
               uploadedFiles={uploadedFiles}
               onFilePlay={handleFilePlay}
+              onDeleteLiveRecording={onDeleteLiveRecording}
+              onSaveLiveToCustom={onSaveLiveToCustom}
               predictionMap={predictionMap}
               inferenceStatus={inferenceStatus}
               onVisibleRowIdsChange={handleVisibleRowIdsChange}
