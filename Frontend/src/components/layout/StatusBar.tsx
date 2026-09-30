@@ -51,7 +51,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({ activeTaskId, taskState })
             Job {activeTaskId?.slice(0, 8)} · {taskState || 'PENDING'}
           </span>
         ) : (
-          <span>Idle</span>
+          <span title="Background Worker Queue Status: No asynchronous ML jobs or batch workers are currently running">Worker Queue: Idle</span>
         )}
       </div>
     </div>

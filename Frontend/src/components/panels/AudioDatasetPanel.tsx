@@ -161,14 +161,16 @@ export const AudioDatasetPanel = ({
       return;
     }
     
-    // When showing combined data (uploaded + dataset files), check if it's an uploaded file first
-    if (dataset === "custom") {
-      const uploadedFile = uploadedFiles?.find(f => f.file_id === id);
-      if (uploadedFile) {
-        onFileSelect(uploadedFile);
-        return;
-      }
-      // If not an uploaded file, treat it as a dataset file (fall through to dataset logic)
+    // Always check if the selected row is an uploaded live recording file first, regardless of active dataset mode
+    const uploadedFile = uploadedFiles?.find(f => 
+      f.file_id === id || 
+      f.filename === id || 
+      f.file_path === id ||
+      (f.file_id && id.includes(f.file_id))
+    );
+    if (uploadedFile) {
+      onFileSelect(uploadedFile);
+      return;
     }
 
     const findMatch = () => {
