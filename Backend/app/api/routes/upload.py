@@ -87,7 +87,9 @@ async def upload_audio_file(file: UploadFile = File(...), model: str = Form("whi
     # Validate file extension
     allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.webm', '.ogg', '.aac', '.opus']
     file_extension = Path(file.filename).suffix.lower() if file.filename else ''
-    if not file_extension or file_extension not in allowed_extensions:
+    if file_extension and file_extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"Invalid file extension '{file_extension}'. Only audio files are allowed.")
+    if not file_extension:
         # Default fallback for blob uploads without explicit extension
         file_extension = '.webm' if 'webm' in (file.content_type or '') else '.wav'
     
