@@ -644,7 +644,6 @@ export const AudioDatasetPanel = ({
       }
 
       const data = await response.json();
-      setUploadedFiles(prevFiles => [...prevFiles, data]);
       toast.success(`Uploaded: ${file.name}`);
       
       if (onUploadSuccess) {
