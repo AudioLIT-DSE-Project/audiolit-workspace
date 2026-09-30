@@ -45,6 +45,7 @@ interface ToolbarProps {
   selectedFile?: UploadedFile | null;
   uploadedFiles?: UploadedFile[];
   onFileSelect?: (file: UploadedFile) => void;
+  onUploadSuccess?: (file: UploadedFile) => void;
   model: string;
   setModel: (model: string) => void; // important for lifting state
   dataset: string;
@@ -117,6 +118,7 @@ export const Toolbar = ({
   selectedFile,
   uploadedFiles,
   onFileSelect,
+  onUploadSuccess,
   model,
   setModel,
   dataset,
@@ -532,6 +534,7 @@ export const Toolbar = ({
         isOpen={isUploadModalOpen}
         onClose={() => setIsUploadModalOpen(false)}
         onFileUploaded={(file) => {
+          onUploadSuccess?.(file);
           onFileSelect?.(file);
           fetchCustomDatasets();
         }}

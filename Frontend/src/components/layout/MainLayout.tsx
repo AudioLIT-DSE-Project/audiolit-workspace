@@ -707,7 +707,7 @@ export const MainLayout = () => {
       <div className="h-screen flex flex-col bg-background">
         <Toolbar
           apiData={apiData} setApiData={setApiData} selectedFile={selectedFile} uploadedFiles={uploadedFiles}
-          onFileSelect={setSelectedFile} model={model} setModel={setModel} dataset={dataset} setDataset={setDataset}
+          onFileSelect={setSelectedFile} onUploadSuccess={handleUploadSuccess} model={model} setModel={setModel} dataset={dataset} setDataset={setDataset}
           onBatchInference={handleBatchInference}
           selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
           onWarmupClick={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}

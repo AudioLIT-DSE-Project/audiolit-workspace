@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form,HTTPException
 from fastapi.responses import JSONResponse, FileResponse
+import logging
 import os
 import shutil
 import time
@@ -8,6 +9,13 @@ import uuid
 import librosa
 import soundfile as sf
 import requests
+
+# The decode-failure handler below logs before raising. Without this the
+# handler itself raised NameError, which the outer `except Exception` turned
+# into a 500 "name 'logger' is not defined" - so every undecodable upload
+# reported an internal error instead of the 422 it was written to return.
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # Ensure uploads directory exists

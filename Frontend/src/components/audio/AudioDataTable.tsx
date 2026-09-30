@@ -21,7 +21,8 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
-  prediction?:string;
+  prediction?: string;
+  ground_truth?: string;
 }
 
 interface AudioData {
@@ -108,7 +109,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: file.file_id,
       filename: file.filename,
       prediction: file.prediction || "",
-      groundTruthLabel: "",
+      groundTruthLabel: file.ground_truth || "",
       confidence: 0,
       duration: typeof file.duration === 'number' ? file.duration : 0,
       file_path: file.file_path,

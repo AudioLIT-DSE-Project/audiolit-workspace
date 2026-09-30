@@ -91,6 +91,36 @@ class TestDurationCap:
         assert response.status_code == 200, response.text
 
 
+class TestDecodeRejection:
+    """An undecodable body must be reported as such, not as a server error.
+
+    The handler for this path logged before raising, and `logger` was never
+    defined in the module, so the handler itself raised NameError. The outer
+    `except Exception` caught that and returned
+    `500 name 'logger' is not defined` - an internal error for what is
+    actually a bad request, with the real reason hidden from the user and the
+    422 branch unreachable. Found by sending a non-audio body, which no test
+    had done.
+    """
+
+    async def test_a_non_audio_body_is_rejected_as_unprocessable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(upload, "UPLOAD_DIR", tmp_path)
+
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            response = await client.post(
+                "/upload",
+                files={"file": ("broken.wav", b"not audio at all" * 50, "audio/wav")},
+                data={"model": "whisper-base"},
+            )
+
+        assert response.status_code == 422, (
+            f"an undecodable upload returned {response.status_code}: "
+            f"{response.text[:200]}"
+        )
+        assert "decoded" in response.json()["detail"]
+        assert not list(tmp_path.iterdir()), "the undecodable file was left on disk"
+
+
 class TestRetentionSweep:
     def test_files_past_the_window_are_removed(self, monkeypatch, tmp_path):
         monkeypatch.setattr(upload, "UPLOAD_DIR", tmp_path)

@@ -19,6 +19,7 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
+  ground_truth?: string;
 }
 
 interface Wav2Vec2Prediction {
