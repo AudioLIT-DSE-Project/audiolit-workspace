@@ -285,11 +285,11 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       cell: ({ row }) => {
         if (isUploadedRow(row.original)) {
           const data = row.original as any;
-          return <span className="text-xs font-mono">{data.groundTruthLabel || data.ground_truth || "—"}</span>;
+          return <span className="text-xs font-mono">{data.groundTruthLabel || data.ground_truth || "N/A"}</span>;
         } else {
           const data = row.original as DatasetRow;
           const gt = getFrom(data, ["sentence", "transcript", "text", "emotion", "label"], "");
-          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={gt}>{gt || "—"}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={gt}>{gt || "N/A"}</span>;
         }
       },
     },
@@ -399,7 +399,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
           const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
-          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={groundTruthValue}>{groundTruthValue || "—"}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={groundTruthValue}>{groundTruthValue || "N/A"}</span>;
         },
       });
     }

@@ -36,7 +36,7 @@ export const DatasetLicenseNotice = ({
         <Info className="h-3.5 w-3.5 shrink-0" />
         <span className="truncate">
           <span className="font-medium">{datasetLabel || datasetName}</span> is a
-          non-commercial / research-use corpus — licence: {license}.
+          non-commercial / research-use corpus (licence: {license}).
         </span>
       </div>
       <button
