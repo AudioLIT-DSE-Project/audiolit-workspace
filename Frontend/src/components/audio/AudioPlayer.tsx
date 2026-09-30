@@ -49,38 +49,48 @@ export const AudioPlayer = ({
           max={duration || 100}
           step={0.1}
           className="w-full"
+          aria-label="Playback position"
         />
       </div>
 
       {/* Controls */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1">
-          <Button size="sm" variant="ghost" className="h-8 w-8 p-0">
+          {/* Icon-only controls carry an aria-label. Without one a screen
+              reader announces "button" with no indication of what it does,
+              which axe reports as a critical button-name violation. */}
+          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" aria-label="Skip back">
             <SkipBack className="h-4 w-4" />
           </Button>
-          
-          <Button size="sm" onClick={onPlayPause} className="h-8 w-8 p-0">
+
+          <Button
+            size="sm"
+            onClick={onPlayPause}
+            className="h-8 w-8 p-0"
+            aria-label={isPlaying ? "Pause" : "Play"}
+          >
             {isPlaying ? (
               <Pause className="h-4 w-4" />
             ) : (
               <Play className="h-4 w-4" />
             )}
           </Button>
-          
-          <Button size="sm" variant="ghost" className="h-8 w-8 p-0">
+
+          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" aria-label="Skip forward">
             <SkipForward className="h-4 w-4" />
           </Button>
         </div>
 
         {/* Volume */}
         <div className="flex items-center gap-2">
-          <Volume2 className="h-4 w-4 text-muted-foreground" />
+          <Volume2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
           <Slider
             value={volume}
             onValueChange={handleVolumeChange}
             max={100}
             step={1}
             className="w-16"
+            aria-label="Volume"
           />
         </div>
       </div>

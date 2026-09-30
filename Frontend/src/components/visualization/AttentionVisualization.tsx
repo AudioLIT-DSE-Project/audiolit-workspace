@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState, useEffect } from "react";
 import { API_BASE } from "@/lib/api";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface AttentionPair {
   from_word: string;
@@ -61,9 +62,12 @@ export const AttentionVisualization = ({ selectedFile, model, dataset }: Attenti
         head: selectedHead
       };
 
-      // Handle file path resolution following your patterns
-      if (typeof selectedFile === 'string') {
-        // Dataset file
+      const sfAny = selectedFile as any;
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
+
+      if (isUploadedFile) {
+        requestBody.file_path = selectedFile.file_path;
+      } else if (typeof selectedFile === 'string') {
         if (dataset) {
           requestBody.dataset = dataset;
           requestBody.dataset_file = selectedFile;
@@ -71,13 +75,10 @@ export const AttentionVisualization = ({ selectedFile, model, dataset }: Attenti
           throw new Error("Dataset required for dataset file selection");
         }
       } else if (selectedFile?.file_path) {
-        // Check if we have a dataset - if so, this is a dataset file
-        if (dataset) {
-          // This is a dataset file (either custom or standard dataset)
+        if (dataset && dataset !== 'custom') {
           requestBody.dataset = dataset;
-          requestBody.dataset_file = selectedFile.file_path;
+          requestBody.dataset_file = selectedFile.filename || selectedFile.file_path;
         } else {
-          // Regular uploaded file
           requestBody.file_path = selectedFile.file_path;
         }
       } else {

@@ -1,0 +1,101 @@
+name: Main Branch Hygiene
+
+# `main` holds the production-ready codebase that ships to a client. Development
+# artefacts - the handbook, the SAD/SRS, the defect log, agent instruction files,
+# working plans, scratch output - must never reach it.
+#
+# This is a gate rather than a convention, because a convention is a thing people
+# remember and `main` currently *does* contain `docs/`, `CLAUDE.md`, `GEMINI.md`
+# and a stray `.DS_Store` - which is exactly what happens when the rule lives
+# only in a document. A release built by `scripts/prepare-release.sh` strips
+# them; this job proves it, and fails the release if anything slipped through.
+#
+# What is deliberately KEPT on main, and why:
+#   * Backend/tests, Frontend e2e + component tests, apitests, loadtests - a
+#     client who cannot run the test suite cannot verify their own deployment,
+#     and CI on main cannot gate a release without them.
+#   * .github/workflows - main needs its own CI.
+#   * README.md, DEPLOYMENT.md - the client-facing guides.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  no-development-artefacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert no development-only paths are present
+        run: |
+          set -u
+          # Paths that must not exist on main. Add here, and to
+          # scripts/prepare-release.sh's STRIP list, together - the two are a
+          # pair, and a path in one but not the other is how this drifts.
+          FORBIDDEN="
+          docs
+          plans
+          scratch
+          CLAUDE.md
+          GEMINI.md
+          .DS_Store
+          newman-report.html
+          scripts
+          "
+          FAILED=0
+          for path in $FORBIDDEN; do
+            if [ -e "$path" ]; then
+              echo "::error file=$path::'$path' is a development artefact and must not be on main. Build the release with scripts/prepare-release.sh."
+              FAILED=1
+            fi
+          done
+
+          # Catch anything that looks like a stray agent instruction file, so a
+          # new tool's dotfile does not need this list updated first.
+          while IFS= read -r stray; do
+            echo "::error file=$stray::'$stray' looks like an agent/instruction file and must not be on main."
+            FAILED=1
+          done < <(find . -maxdepth 2 \
+                     \( -iname "*.agent.md" -o -iname "AGENTS.md" -o -iname ".cursorrules" -o -iname ".DS_Store" \) \
+                     -not -path "./node_modules/*" -not -path "./.git/*" 2>/dev/null)
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo ""
+            echo "main must contain the production codebase only."
+            exit 1
+          fi
+          echo "No development artefacts on main."
+
+      - name: Assert the client-facing guides exist
+        run: |
+          set -u
+          MISSING=0
+          # The inverse check. Stripping docs/ is only correct if the client is
+          # left with something to read; an empty main is not a release.
+          for required in README.md DEPLOYMENT.md docker-compose.yml Backend/Dockerfile Frontend/Dockerfile; do
+            if [ ! -f "$required" ]; then
+              echo "::error::'$required' is required on main and is missing."
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then exit 1; fi
+          echo "Client-facing guides present."
+
+      - name: Assert README is a deployment guide, not the development readme
+        run: |
+          set -u
+          # A release that merely inherits develop's README hands the client a
+          # contributor guide. Check for the sections a deployment guide must
+          # have; this is a smoke test, not a style review.
+          MISSING=0
+          for heading in "Requirements" "Install" "Verify"; do
+            if ! grep -qi "$heading" README.md; then
+              echo "::error::README.md has no '$heading' section - it does not look like a deployment guide."
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then exit 1; fi
+          echo "README.md looks like a deployment guide."

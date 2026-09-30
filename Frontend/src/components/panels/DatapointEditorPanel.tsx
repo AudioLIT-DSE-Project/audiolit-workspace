@@ -10,6 +10,7 @@ import { PredictionDisplay } from "../predictions/PredictionDisplay";
 import { Play, Pause, RotateCcw, Trash2, Plus, HelpCircle } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -19,6 +20,7 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
+  ground_truth?: string;
 }
 
 interface Wav2Vec2Prediction {
@@ -41,6 +43,13 @@ interface WhisperPrediction {
   word_count_truth: number;
 }
 
+interface AddPrediction {
+  predicted_label: string; // "bona-fide" | "spoof"
+  synthetic_probability: number;
+  confidence: number;
+  probabilities: Record<string, number>;
+}
+
 interface PerturbationResult {
   perturbed_file: string;
   filename: string;
@@ -56,6 +65,13 @@ interface PerturbationResult {
   error?: string;
 }
 
+// Mirrors Backend/app/infrastructure/dataset_ingestion.py's TARGET_SAMPLE_RATE.
+// Every corpus is resampled to this before it reaches a model, so it's the
+// rate that actually matters for inference — not a given source file's native
+// encoding (which wavesurfer would otherwise surface and which varies per clip,
+// e.g. some Common Voice samples are natively 8kHz).
+const PROCESSING_SAMPLE_RATE_HZ = 16_000;
+
 interface DatapointEditorPanelProps {
   selectedFile?: UploadedFile | null;
   selectedEmbeddingFile?: string | null;
@@ -66,22 +82,24 @@ interface DatapointEditorPanelProps {
   model?: string;
   wav2vecPrediction?: Wav2Vec2Prediction | null;
   whisperPrediction?: WhisperPrediction | null;
+  addPrediction?: AddPrediction | null;
   perturbedPredictions?: Wav2Vec2Prediction | WhisperPrediction | null;
   isLoadingPredictions?: boolean;
   isLoadingPerturbed?: boolean;
   predictionError?: string | null;
 }
 
-export const DatapointEditorPanel = ({ 
-  selectedFile, 
+export const DatapointEditorPanel = ({
+  selectedFile,
   selectedEmbeddingFile,
-  dataset = "custom", 
+  dataset = "custom",
   originalDataset,
-  perturbationResult, 
+  perturbationResult,
   predictionMap,
   model,
   wav2vecPrediction,
   whisperPrediction,
+  addPrediction,
   perturbedPredictions,
   isLoadingPredictions,
   isLoadingPerturbed,
@@ -105,13 +123,7 @@ export const DatapointEditorPanel = ({
     if (!selectedFile) return undefined;
     
     // Check if this is an uploaded file - more precise detection
-    const isUploadedFile = selectedFile.file_path && (
-      selectedFile.file_path.includes('uploads/') || 
-      selectedFile.file_path.startsWith('uploads/') ||
-      selectedFile.message === "Perturbed file" ||
-      selectedFile.message === "File uploaded successfully" ||
-      selectedFile.message === "File uploaded and processed successfully"
-    ) && selectedFile.message !== "Selected from embeddings" && selectedFile.message !== "Selected from dataset";
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
     
     if (isUploadedFile) {
       // This is an uploaded file, use the upload endpoint
@@ -168,7 +180,6 @@ export const DatapointEditorPanel = ({
   // Add a state to track audio metadata from wavesurfer
   const [audioMetadata, setAudioMetadata] = useState<{
     duration?: number;
-    sampleRate?: number;
   }>({});
 
   // Debug logging for selectedFile and audioUrl
@@ -195,9 +206,9 @@ export const DatapointEditorPanel = ({
           <h3 className="font-semibold text-sm text-foreground flex items-center gap-1.5">
             Datapoint Editor
             <Tooltip>
-              <TooltipTrigger>
-                <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
-              </TooltipTrigger>
+              <TooltipTrigger aria-label="Edit and analyze individual audio samples with predictions and...">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
+                  </TooltipTrigger>
               <TooltipContent>
                 Edit and analyze individual audio samples with predictions and perturbations
               </TooltipContent>
@@ -213,8 +224,8 @@ export const DatapointEditorPanel = ({
               <CardTitle className="text-xs flex items-center gap-1.5">
                 Sample Info
                 <Tooltip>
-                  <TooltipTrigger>
-                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
+                  <TooltipTrigger aria-label="Detailed information about the selected audio sample">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
                   </TooltipTrigger>
                   <TooltipContent>
                     Detailed information about the selected audio sample
@@ -286,11 +297,7 @@ export const DatapointEditorPanel = ({
             <div className="text-xs-tight">
               <span className="text-gray-500">Sample Rate:</span>
               <span className="ml-2 text-gray-700">
-                {currentFileInfo?.sample_rate 
-                  ? `${(currentFileInfo.sample_rate / 1000).toFixed(1)}kHz` 
-                  : audioMetadata.sampleRate 
-                  ? `${(audioMetadata.sampleRate / 1000).toFixed(1)}kHz` 
-                  : "Loading..."}
+                {(PROCESSING_SAMPLE_RATE_HZ / 1000).toFixed(1)}kHz
               </span>
             </div>
             {currentFileInfo?.size && (
@@ -331,6 +338,7 @@ export const DatapointEditorPanel = ({
           model={model}
           wav2vecPrediction={wav2vecPrediction}
           whisperPrediction={whisperPrediction}
+          addPrediction={addPrediction}
           perturbedPredictions={perturbedPredictions}
           isLoading={isLoadingPredictions}
           isLoadingPerturbed={isLoadingPerturbed}
@@ -344,9 +352,9 @@ export const DatapointEditorPanel = ({
             <CardTitle className="text-xs flex items-center gap-1.5">
               Audio Playback
               <Tooltip>
-                <TooltipTrigger>
-                  <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
-                </TooltipTrigger>
+                <TooltipTrigger aria-label="Interactive audio player with waveform visualization">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
+                  </TooltipTrigger>
                 <TooltipContent>
                   Interactive audio player with waveform visualization
                 </TooltipContent>
@@ -365,8 +373,7 @@ export const DatapointEditorPanel = ({
                 
                 // Update metadata state for file info display
                 setAudioMetadata({
-                  duration: duration,
-                  sampleRate: wavesurfer.getDecodedData()?.sampleRate || undefined
+                  duration: duration
                 });
               }}
               onProgress={(time, dur) => {

@@ -246,7 +246,10 @@ class _FakeWhisperModel(nn.Module):
         return x
 
     @classmethod
-    def from_pretrained(cls, path, attn_implementation="eager"):
+    def from_pretrained(cls, path, attn_implementation="eager", **kwargs):
+        # **kwargs so a loader-side flag (low_cpu_mem_usage, device_map, ...)
+        # does not break the double. The double exists to stand in for the
+        # transformers API, which accepts arbitrary keywords.
         return cls()
 
 
@@ -256,7 +259,10 @@ class _FakeUnresolvableModel(nn.Module):
     doesn't actually match (download_and_load must degrade, not crash)."""
 
     @classmethod
-    def from_pretrained(cls, path, attn_implementation="eager"):
+    def from_pretrained(cls, path, attn_implementation="eager", **kwargs):
+        # **kwargs so a loader-side flag (low_cpu_mem_usage, device_map, ...)
+        # does not break the double. The double exists to stand in for the
+        # transformers API, which accepts arbitrary keywords.
         return cls()
 
 
@@ -289,3 +295,153 @@ class TestDownloadAndLoadHookWiring:
         with loaded.attach_hooks() as hooks:
             loaded.model(torch.randn(1, 4, 8))
             assert set(hooks.captured) == set(loaded.available_layers)
+
+
+class TestVramFallback:
+    """FR1.4 — VRAM overflow degrades to CPU with a user-visible warning."""
+
+    def _resolved(self, monkeypatch, mrs):
+        monkeypatch.setattr(mrs, "resolve_model_id",
+                            lambda mid, revision="main", api=None: mrs.ResolvedModel(
+                                model_id=mid, revision="deadbeef", family="whisper"))
+        monkeypatch.setattr(mrs, "snapshot_download", lambda **kw: "/tmp/fake")
+        monkeypatch.setattr(mrs, "_sha256_of_safetensors", lambda d: "abc123")
+
+    def test_oom_falls_back_to_cpu_and_says_so(self, monkeypatch):
+        import app.domain.model_registry_service as mrs
+
+        class _Model:
+            def __init__(self):
+                self.moved = []
+
+            @classmethod
+            def from_pretrained(cls, path, **kwargs):
+                return cls()
+
+            def to(self, device):
+                self.moved.append(device)
+                if device != "cpu":
+                    raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+                return self
+
+            def eval(self):
+                return self
+
+        self._resolved(monkeypatch, mrs)
+        monkeypatch.setattr(mrs.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(mrs, "HookManager", lambda model, family: type(
+            "H", (), {"available_layers": lambda self: []})())
+
+        loaded = mrs.download_and_load(
+            mrs.ResolvedModel(model_id="openai/whisper-base", revision="d", family="whisper"),
+            model_class=_Model,
+        )
+
+        assert loaded.device == "cpu"
+        assert loaded.device_fallback is True
+        assert "CPU" in (loaded.device_fallback_reason or "")
+
+    def test_a_non_oom_error_is_not_swallowed(self, monkeypatch):
+        import app.domain.model_registry_service as mrs
+
+        class _Model:
+            @classmethod
+            def from_pretrained(cls, path, **kwargs):
+                return cls()
+
+            def to(self, device):
+                raise RuntimeError("some unrelated failure")
+
+        self._resolved(monkeypatch, mrs)
+        monkeypatch.setattr(mrs.torch.cuda, "is_available", lambda: True)
+        with pytest.raises(RuntimeError, match="unrelated"):
+            mrs.download_and_load(
+                mrs.ResolvedModel(model_id="openai/whisper-base", revision="d", family="whisper"),
+                model_class=_Model,
+            )
+
+
+class TestModelLoadMetadataWriteThrough:
+    """LIT-257: each model load writes a `models` reproducibility record
+    (revision + weight digest) to the durable metadata tier."""
+
+    @staticmethod
+    def _mongomock_store():
+        import mongomock
+
+        from app.infrastructure import metadata_store as ms
+
+        mock_db = mongomock.MongoClient().db
+        store = ms.MetadataStore(client=mock_db.client, db=mock_db)
+        store.ensure_schema()
+        return store
+
+    def test_records_a_loaded_model(self, tmp_path, monkeypatch):
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        store = self._mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        docs = list(store._collection("models").find())
+        assert len(docs) == 1
+        doc = docs[0]
+        assert doc["model_id"] == "fake/whisper@abc123"
+        assert doc["name"] == "fake/whisper"
+        assert doc["architecture"] == "whisper"
+        assert doc["revision"] == "abc123"
+        assert doc["hf_model_id"] == "fake/whisper"
+        assert doc["weight_digest"] == loaded.weights_sha256
+
+    def test_loading_the_same_model_twice_leaves_one_document(self, tmp_path, monkeypatch):
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        store = self._mongomock_store()
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: store)
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+            mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        assert len(list(store._collection("models").find())) == 1
+
+    def test_failing_store_never_fails_the_model_load(self, tmp_path, monkeypatch):
+        """LIT-258 (SRS §3.3.1): a dead metadata tier must not prevent a model
+        loading. `_record_model_load` logs-and-swallows; download_and_load still
+        returns the loaded model and its reproducibility data."""
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        class _FailingStore:
+            def upsert_model(self, *args, **kwargs):
+                raise RuntimeError("mongo down")
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: _FailingStore())
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        assert loaded.model_id == "fake/whisper"
+        assert loaded.revision == "abc123"
+        assert loaded.weights_sha256
+
+    def test_skips_the_record_when_metadata_tier_is_configured_off(self, tmp_path, monkeypatch):
+        """LIT-258: get_metadata_store() -> None means no write is even attempted,
+        and the load never notices either way."""
+        import app.domain.model_registry_service as mrs
+        from app.infrastructure import metadata_store as ms
+
+        monkeypatch.setattr(ms, "get_metadata_store", lambda: None)
+
+        resolved = mrs.ResolvedModel(model_id="fake/whisper", revision="abc123", family="whisper")
+        with patch("app.domain.model_registry_service.snapshot_download", return_value=str(tmp_path)):
+            loaded = mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
+
+        assert loaded.model_id == "fake/whisper"

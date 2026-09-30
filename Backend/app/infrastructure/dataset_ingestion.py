@@ -30,7 +30,7 @@ import csv
 import logging
 import random
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from itertools import islice
 from pathlib import Path
@@ -121,6 +121,27 @@ def is_silent(audio: np.ndarray, rms_floor: float = SILENCE_RMS_FLOOR) -> bool:
     return rms < rms_floor
 
 
+#: FR2.3 / SAD C5 — corpora whose licence requires a user-visible notice on
+#: load. Matches the four corpora FR2.3 names explicitly; kept as one place
+#: so the API and frontend don't each maintain their own copy of this list.
+NON_COMMERCIAL_CORPORA = frozenset({"ravdess", "l2-arctic", "esd", "asvspoof-2021"})
+
+
+@dataclass(frozen=True)
+class IntegrityReport:
+    """One sample's FR2.1 integrity verdict.
+
+    ``reason`` is only set when ``ok`` is False: ``"missing"`` (no file at
+    ``audio_path``), ``"undecodable"`` (soundfile/librosa raised while
+    reading it), or ``"silent"`` (decodes fine but is empty/below the RMS
+    floor per :func:`is_silent`).
+    """
+
+    sample_id: str
+    ok: bool
+    reason: Optional[str] = None
+
+
 class DatasetLoader(ABC):
     """Common interface every corpus loader exposes.
 
@@ -133,11 +154,78 @@ class DatasetLoader(ABC):
         self.name = name
         self.task_family = task_family
         self.license = license
+        self._license_notice_logged = False
 
     @abstractmethod
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         """Yield each sample's metadata lazily, in catalog order."""
         raise NotImplementedError
+
+    def _maybe_log_license_notice(self) -> None:
+        """FR2.3 / SAD C5 — log a licence notice once per loader instance.
+
+        Concrete loaders for the four non-commercial corpora call this as the
+        first line of their :meth:`iter_metadata`; centralized here so every
+        one of them logs the same message instead of each hand-rolling it
+        (this replaced a one-off implementation that only ``ASVspoofLoader``
+        had).
+        """
+        if self._license_notice_logged or self.name not in NON_COMMERCIAL_CORPORA:
+            return
+        logger.warning(
+            "%s is a non-commercial/research-use corpus (licence: %s) — "
+            "SAD constraint C5 applies.",
+            self.name,
+            self.license or "unknown",
+        )
+        self._license_notice_logged = True
+
+    def check_integrity(self, meta: SampleMetadata, *, deep: bool = True) -> IntegrityReport:
+        """FR2.1 — validate one sample before it reaches a batch or a listing.
+
+        ``deep=False`` only checks the file exists (cheap — safe to run on
+        every row of a metadata listing). ``deep=True`` additionally decodes
+        the audio and runs :func:`is_silent`, for batch/evaluation callers
+        where a wrong WER/label attributed to the model is a worse outcome
+        than the extra decode cost.
+        """
+        if not meta.audio_path.exists():
+            return IntegrityReport(meta.sample_id, False, "missing")
+        if not deep:
+            return IntegrityReport(meta.sample_id, True)
+        try:
+            audio, _ = self.load_sample_audio(meta)
+        except Exception:
+            return IntegrityReport(meta.sample_id, False, "undecodable")
+        if is_silent(audio):
+            return IntegrityReport(meta.sample_id, False, "silent")
+        return IntegrityReport(meta.sample_id, True)
+
+    def validated_stream(
+        self,
+        limit: Optional[int] = None,
+        *,
+        deep: bool = True,
+        on_reject: Optional[Callable[[IntegrityReport], None]] = None,
+    ) -> Iterator[SampleMetadata]:
+        """Stream only samples that pass :meth:`check_integrity` (FR2.1).
+
+        ``limit`` counts accepted samples, not samples examined, so a caller
+        asking for 50 valid clips actually gets 50 (skipping rejects) rather
+        than getting fewer because some of the first 50 catalog rows were
+        corrupt. ``on_reject`` lets a caller collect/log what was excluded
+        instead of it disappearing silently.
+        """
+        accepted = 0
+        for meta in self.iter_metadata():
+            if limit is not None and accepted >= limit:
+                return
+            report = self.check_integrity(meta, deep=deep)
+            if report.ok:
+                accepted += 1
+                yield meta
+            elif on_reject is not None:
+                on_reject(report)
 
     def stream(self, limit: Optional[int] = None) -> Iterator[SampleMetadata]:
         """Stream metadata, optionally stopping after ``limit`` samples."""
@@ -219,21 +307,29 @@ class CsvCatalogLoader(DatasetLoader):
         *,
         delimiter: str = ",",
         license: Optional[str] = None,
+        encoding: str = "utf-8",
     ):
         super().__init__(name=name, task_family=task_family, license=license)
         self.catalog_path = Path(catalog_path)
         self.audio_base_dir = Path(audio_base_dir)
         self.column_map = column_map
         self.delimiter = delimiter
+        # "utf-8-sig" transparently strips a leading BOM if present and is
+        # otherwise identical to "utf-8" -- corpora whose CSV export carries a
+        # BOM on the header row (LIT-236) would otherwise have every row
+        # silently skipped, since the BOM makes the first column name never
+        # match its ColumnMap entry.
+        self.encoding = encoding
 
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         if not self.catalog_path.exists():
             raise FileNotFoundError(
                 f"Catalog for dataset '{self.name}' not found: {self.catalog_path}"
             )
+        self._maybe_log_license_notice()
 
         cmap = self.column_map
-        with self.catalog_path.open("r", encoding="utf-8", newline="") as fh:
+        with self.catalog_path.open("r", encoding=self.encoding, newline="") as fh:
             reader = csv.DictReader(fh, delimiter=self.delimiter)
             for index, raw in enumerate(reader):
                 row = {
@@ -327,6 +423,31 @@ class CommonVoiceLoader(CsvCatalogLoader):
         )
 
 
+def _read_catalog_rows(catalog: Path) -> Iterator[Dict[str, str]]:
+    """Stream a sample catalog CSV as dicts with stripped string values."""
+    with catalog.open("r", encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            yield {k.strip(): (v or "").strip() for k, v in row.items() if k}
+
+
+def _resolve_catalog_audio(root: Path, row: Dict[str, str]) -> Optional[Path]:
+    """Locate a catalog row's audio under ``root``.
+
+    The sample catalogs record ``rel_path`` as ``audio/<file>``, but the
+    provisioned copies keep the files flat at the corpus root — so try the
+    recorded relative path first, then the bare ``filename`` at the root.
+    """
+    for rel in (row.get("rel_path"), row.get("filename")):
+        if rel:
+            candidate = root / rel
+            if candidate.is_file():
+                return candidate
+    filename = row.get("filename")
+    # Fall back to the flat location even when missing, so FR2.1 integrity
+    # checks report it as "missing" instead of the row vanishing silently.
+    return root / filename if filename else None
+
+
 class LibriSpeechLoader(DatasetLoader):
     """Loader for LibriSpeech (ASR; LIT-141).
 
@@ -337,10 +458,16 @@ class LibriSpeechLoader(DatasetLoader):
     ``SPEAKERS.TXT`` (``ID | SEX | SUBSET | MINUTES | NAME``) when present, and
     exposed as demographic metadata. Audio is standardised to 16 kHz mono.
 
+    The repo's provisioned copy is not that tree but a flat stratified sample
+    (``*.flac`` at the root) described by ``CATALOG_NAME``. When that catalog
+    is present it is read instead of walking for ``*.trans.txt`` — which found
+    nothing in the flat layout, so the corpus probed as "not provisioned".
+
     Paths default to the real data location but are injectable for tests.
     """
 
     DEFAULT_DIR = DATA_DIR / "librispeech"
+    CATALOG_NAME = "librispeech_test_clean_120_metadata.csv"
 
     def __init__(
         self,
@@ -359,6 +486,11 @@ class LibriSpeechLoader(DatasetLoader):
                 f"LibriSpeech root for '{self.name}' not found: {self.root_dir}"
             )
         genders = self._load_speaker_genders()
+
+        catalog = self.root_dir / self.CATALOG_NAME
+        if catalog.is_file():
+            yield from self._iter_catalog(catalog, genders)
+            return
 
         for trans_file in sorted(self.root_dir.rglob("*.trans.txt")):
             with trans_file.open("r", encoding="utf-8") as fh:
@@ -379,6 +511,26 @@ class LibriSpeechLoader(DatasetLoader):
                         license=self.license,
                         demographic=demographic,
                     )
+
+    def _iter_catalog(self, catalog: Path, genders: Dict[str, str]) -> Iterator[SampleMetadata]:
+        """Yield samples from the flat-sample catalog (``utt_id``/``text``/``speaker``)."""
+        for row in _read_catalog_rows(catalog):
+            utt_id = row.get("utt_id", "")
+            audio_path = _resolve_catalog_audio(self.root_dir, row)
+            if not utt_id or audio_path is None:
+                continue
+            speaker = row.get("speaker") or utt_id.split("-")[0]
+            demographic = {"gender": genders[speaker]} if speaker in genders else {}
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=utt_id,
+                audio_path=audio_path,
+                task_family=TaskFamily.ASR,
+                label=row.get("text") or None,
+                speaker_id=speaker,
+                license=self.license,
+                demographic=demographic,
+            )
 
     def _load_speaker_genders(self) -> Dict[str, str]:
         """Parse SPEAKERS.TXT (``ID | SEX | …``) into {speaker_id: gender}."""
@@ -412,6 +564,11 @@ class ASVspoofLoader(DatasetLoader):
     path. Audio is the per-utterance FLAC named by the file-id column,
     standardised to 16 kHz mono like every other loader.
 
+    The repo's provisioned copy ships no protocol file: it is a flat stratified
+    sample (``*.flac`` at the root) described by ``CATALOG_NAME``. When the
+    protocol is absent and that catalog is present, it is read instead — the
+    protocol-only path made the corpus probe as unavailable.
+
     Research-use-only corpus (SAD constraint C5): a licence notice is logged the
     first time samples are read. Paths default to the real data location but are
     injectable for tests.
@@ -419,6 +576,10 @@ class ASVspoofLoader(DatasetLoader):
 
     DEFAULT_DIR = DATA_DIR / "asvspoof2021_df"
     DEFAULT_PROTOCOL = DEFAULT_DIR / "trial_metadata.txt"
+    CATALOG_NAME = "asvspoof2021_df_240_metadata.csv"
+    # Catalog columns carried through as SampleMetadata.extra (attack/codec
+    # breakdowns for FR7 evaluation); absent columns are simply skipped.
+    CATALOG_EXTRA_COLS = ("attack", "source", "vocoder", "codec", "class")
 
     def __init__(
         self,
@@ -436,19 +597,18 @@ class ASVspoofLoader(DatasetLoader):
         self.audio_ext = audio_ext
         self.file_col = file_col
         self.speaker_col = speaker_col
-        self._notice_logged = False
 
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         if not self.protocol_path.exists():
-            raise FileNotFoundError(
-                f"ASVspoof protocol for '{self.name}' not found: {self.protocol_path}"
-            )
-        if not self._notice_logged:
-            logger.warning(
-                "ASVspoof 2021 DF is a research-use-only corpus (SAD C5) — "
-                "ensure your use complies with its licence."
-            )
-            self._notice_logged = True
+            catalog = self.audio_base_dir / self.CATALOG_NAME
+            if not catalog.is_file():
+                raise FileNotFoundError(
+                    f"ASVspoof protocol for '{self.name}' not found: {self.protocol_path}"
+                )
+            self._maybe_log_license_notice()
+            yield from self._iter_catalog(catalog)
+            return
+        self._maybe_log_license_notice()
 
         with self.protocol_path.open("r", encoding="utf-8") as fh:
             for index, line in enumerate(fh, start=1):
@@ -486,6 +646,25 @@ class ASVspoofLoader(DatasetLoader):
                     license=self.license,
                 )
 
+    def _iter_catalog(self, catalog: Path) -> Iterator[SampleMetadata]:
+        """Yield samples from the flat-sample catalog (``utt_id``/``label``/``speaker``)."""
+        for row in _read_catalog_rows(catalog):
+            file_id = row.get("utt_id", "")
+            label = _ASVSPOOF_LABEL_TOKENS.get(row.get("label", "").lower())
+            audio_path = _resolve_catalog_audio(self.audio_base_dir, row)
+            if not file_id or label is None or audio_path is None:
+                continue
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=file_id,
+                audio_path=audio_path,
+                task_family=TaskFamily.DEEPFAKE,
+                label=label,
+                speaker_id=row.get("speaker") or None,
+                license=self.license,
+                extra={c: row[c] for c in self.CATALOG_EXTRA_COLS if row.get(c)},
+            )
+
     @staticmethod
     def _extract_label(tokens: List[str]) -> Optional[str]:
         for token in tokens:
@@ -518,11 +697,22 @@ class L2ArcticLoader(DatasetLoader):
     exposed as ``accent`` / ``demographic["l1"]`` — the grouping the FR15 bias
     diagnostics slice on. Audio is standardised to 16 kHz mono for the ASR path.
 
+    The repo's provisioned copy is a flat stratified sample (``*.wav`` at the
+    root, named ``<SPEAKER>_<utt>.wav``) described by ``CATALOG_NAME``; when
+    that catalog is present it is read instead of the per-speaker tree walk,
+    which found nothing in the flat layout. (``population_manifest.csv`` beside
+    it describes the full corpus, whose audio isn't provisioned, so it is not
+    read.)
+
     Research-use-only corpus; paths default to the real data location but are
     injectable for tests.
     """
 
-    DEFAULT_DIR = DATA_DIR / "l2_arctic"
+    # Real data directory is "l2arctic" (no underscore) - was "l2_arctic" here,
+    # a mismatch against the actual Backend/data/ layout that made this loader
+    # unable to find its data by default (LIT-235).
+    DEFAULT_DIR = DATA_DIR / "l2arctic"
+    CATALOG_NAME = "l2arctic_metadata.csv"
     SPEAKER_L1 = L2_ARCTIC_SPEAKER_L1
 
     def __init__(self, root_dir: Optional[Path | str] = None, *, name: str = "l2-arctic"):
@@ -534,6 +724,13 @@ class L2ArcticLoader(DatasetLoader):
             raise FileNotFoundError(
                 f"L2-ARCTIC root for '{self.name}' not found: {self.root_dir}"
             )
+        self._maybe_log_license_notice()
+
+        catalog = self.root_dir / self.CATALOG_NAME
+        if catalog.is_file():
+            yield from self._iter_catalog(catalog)
+            return
+
         for speaker in sorted(self.SPEAKER_L1):
             wav_dir = self.root_dir / speaker / "wav"
             if not wav_dir.is_dir():
@@ -555,6 +752,35 @@ class L2ArcticLoader(DatasetLoader):
                     license=self.license,
                     demographic={"l1": l1},
                 )
+
+    def _iter_catalog(self, catalog: Path) -> Iterator[SampleMetadata]:
+        """Yield samples from the flat-sample catalog.
+
+        ``sample_id`` keeps the tree walk's ``<SPEAKER>-<utt>`` shape so ids
+        are stable whichever layout is provisioned; L1 comes from the fixed
+        ``SPEAKER_L1`` map, falling back to the catalog's ``native_language``.
+        """
+        for row in _read_catalog_rows(catalog):
+            speaker = row.get("speaker", "")
+            audio_path = _resolve_catalog_audio(self.root_dir, row)
+            if not speaker or audio_path is None:
+                continue
+            utt = row.get("sentence_id") or audio_path.stem.removeprefix(f"{speaker}_")
+            l1 = self.SPEAKER_L1.get(speaker) or row.get("native_language") or None
+            demographic = {"l1": l1} if l1 else {}
+            if row.get("gender"):
+                demographic["gender"] = row["gender"]
+            yield SampleMetadata(
+                dataset=self.name,
+                sample_id=f"{speaker}-{utt}",
+                audio_path=audio_path,
+                task_family=TaskFamily.ASR,
+                label=row.get("transcript") or None,
+                speaker_id=speaker,
+                accent=l1,
+                license=self.license,
+                demographic=demographic,
+            )
 
     @staticmethod
     def _read_transcript(path: Path) -> Optional[str]:
@@ -626,9 +852,16 @@ class CremaDLoader(DatasetLoader):
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         audio_dir = self.root_dir / self.AUDIO_SUBDIR
         if not audio_dir.is_dir():
-            raise FileNotFoundError(
-                f"CREMA-D audio directory for '{self.name}' not found: {audio_dir}"
-            )
+            # Some CREMA-D distributions get extracted/copied flat, without
+            # the official AudioWAV/ subfolder - fall back to the root itself
+            # if it directly contains the .wav files (LIT-235), rather than
+            # failing on a structural variant that still has real data.
+            if self.root_dir.is_dir() and next(self.root_dir.glob("*.wav"), None) is not None:
+                audio_dir = self.root_dir
+            else:
+                raise FileNotFoundError(
+                    f"CREMA-D audio directory for '{self.name}' not found: {audio_dir}"
+                )
         demographics = self._load_demographics()
         for wav_path in sorted(audio_dir.glob("*.wav")):
             parsed = self._parse_filename(wav_path.stem)
@@ -717,7 +950,10 @@ class RavdessLoader(DatasetLoader):
         include_song: bool = False,
     ):
         super().__init__(name=name, task_family=TaskFamily.SER, license=RAVDESS_LICENSE)
-        self.root_dir = Path(root_dir or self.DEFAULT_DIR)
+        if root_dir:
+            self.root_dir = Path(root_dir)
+        else:
+            self.root_dir = self.DEFAULT_DIR if self.DEFAULT_DIR.is_dir() else (DATA_DIR / "ravdess_subset")
         self.include_song = include_song
 
     def iter_metadata(self) -> Iterator[SampleMetadata]:
@@ -725,6 +961,7 @@ class RavdessLoader(DatasetLoader):
             raise FileNotFoundError(
                 f"RAVDESS root for '{self.name}' not found: {self.root_dir}"
             )
+        self._maybe_log_license_notice()
         # Actor_* subdirectories are the documented layout, but tolerate a flat
         # dump too -- both appear in the wild depending on how it was unzipped.
         wav_paths = sorted(self.root_dir.glob("Actor_*/*.wav")) or sorted(
@@ -776,6 +1013,86 @@ class RavdessLoader(DatasetLoader):
             repetition,
             actor,
         )
+
+
+#: ESD's raw emotion values are Title case and spell the fifth class
+#: "Surprise" rather than the classifier vocabulary's "surprised" -- resolved
+#: case-insensitively so a stray casing difference in the catalog doesn't
+#: silently drop a class (LIT-236).
+_ESD_EMOTION = {
+    "angry": "angry",
+    "happy": "happy",
+    "neutral": "neutral",
+    "sad": "sad",
+    "surprise": "surprised",
+}
+ESD_LICENSE = "Research-only"
+
+
+class ESDLoader(CsvCatalogLoader):
+    """Loader for the ESD (Emotional Speech Database) corpus (LIT-236; FR2/FR6).
+
+    Catalog-driven like Common Voice, not filename-encoded like CREMA-D/RAVDESS:
+    a single CSV (``filename,sample_id,speaker_id,emotion,emotion_cn,
+    transcription,dataset``) lists every clip, with all ``.wav`` files flat in
+    the corpus root.
+
+    The shipped catalog carries a UTF-8 BOM on its header row, which the base
+    class's default ``encoding="utf-8"`` does not strip -- the BOM merges into
+    the first column name, so it never matches ``ColumnMap.filename`` and every
+    row is silently skipped. Opting into ``encoding="utf-8-sig"`` here fixes
+    that without changing behaviour for any other catalog corpus.
+
+    Raw emotion values are Title case (``Angry``, ``Surprise``, ...); they're
+    remapped onto the canonical ``EMOTION_LABELS`` vocabulary via
+    ``_ESD_EMOTION`` after the base class resolves them, the same normalisation
+    CREMA-D/RAVDESS do from their filename encodings -- otherwise ``"Surprise"``
+    never matches the SER classifier's own ``"surprised"`` output and any
+    accuracy scoring against this corpus is silently wrong.
+    """
+
+    DEFAULT_DIR = DATA_DIR / "esd"
+    DEFAULT_CATALOG = DEFAULT_DIR / "esd_test_100_metadata.csv"
+
+    COLUMN_MAP = ColumnMap(
+        filename="filename",
+        label="emotion",
+        sample_id="sample_id",
+        speaker_id="speaker_id",
+    )
+
+    def __init__(
+        self,
+        catalog_path: Optional[Path | str] = None,
+        audio_base_dir: Optional[Path | str] = None,
+        *,
+        name: str = "esd",
+    ):
+        super().__init__(
+            name=name,
+            task_family=TaskFamily.SER,
+            catalog_path=catalog_path or self.DEFAULT_CATALOG,
+            audio_base_dir=audio_base_dir or self.DEFAULT_DIR,
+            column_map=self.COLUMN_MAP,
+            license=ESD_LICENSE,
+            encoding="utf-8-sig",
+        )
+
+    def iter_metadata(self) -> Iterator[SampleMetadata]:
+        for meta in super().iter_metadata():
+            if meta.label is None:
+                yield meta
+                continue
+            normalized = _ESD_EMOTION.get(meta.label.strip().lower())
+            if normalized is None:
+                logger.warning(
+                    "esd: unrecognised emotion label %r for sample %s -- passing through unmapped",
+                    meta.label,
+                    meta.sample_id,
+                )
+                yield meta
+                continue
+            yield replace(meta, label=normalized)
 
 
 def demo_clips_by_emotion(
@@ -834,11 +1151,7 @@ CORPUS_REGISTRY: Dict[str, CorpusSpec] = {
     "librispeech": CorpusSpec("librispeech", TaskFamily.ASR, "CC-BY-4.0", loader_factory=LibriSpeechLoader, owner_issue="LIT-141"),
     "crema-d": CorpusSpec("crema-d", TaskFamily.SER, CREMA_D_LICENSE, loader_factory=CremaDLoader, owner_issue="LIT-208"),
     "ravdess": CorpusSpec("ravdess", TaskFamily.SER, RAVDESS_LICENSE, loader_factory=RavdessLoader, owner_issue="LIT-208"),
-    # ESD is the third SER corpus in the LIT-106 inventory but is out of LIT-208's
-    # scope (that issue covers CREMA-D + RAVDESS only, which is enough for the MVP
-    # demo). Left unwired deliberately: get_loader raises naming the issue rather
-    # than returning empty data.
-    "esd": CorpusSpec("esd", TaskFamily.SER, "Research-only", owner_issue="LIT-208"),
+    "esd": CorpusSpec("esd", TaskFamily.SER, ESD_LICENSE, loader_factory=ESDLoader, owner_issue="LIT-236"),
     "l2-arctic": CorpusSpec("l2-arctic", TaskFamily.ASR, L2_ARCTIC_LICENSE, loader_factory=L2ArcticLoader, owner_issue="LIT-181"),
     "asvspoof-2021": CorpusSpec("asvspoof-2021", TaskFamily.DEEPFAKE, ASVSPOOF_LICENSE, loader_factory=ASVspoofLoader, owner_issue="LIT-142"),
 }
@@ -850,8 +1163,17 @@ def list_supported_corpora() -> List[str]:
 
 
 def get_corpus_spec(name: str) -> CorpusSpec:
-    """Look up a corpus spec, case-insensitively."""
-    key = name.strip().lower()
+    """Look up a corpus spec, case-insensitively with alias normalization."""
+    key = name.strip().lower().replace("_", "-")
+    if key == "l2arctic":
+        key = "l2-arctic"
+    elif key == "cremad":
+        key = "crema-d"
+    elif key == "commonvoice":
+        key = "common-voice"
+    elif key == "asvspoof2021":
+        key = "asvspoof-2021"
+
     if key not in CORPUS_REGISTRY:
         raise ValueError(
             f"Unknown corpus '{name}'. Supported: {', '.join(list_supported_corpora())}"
@@ -873,3 +1195,45 @@ def get_loader(name: str, **kwargs) -> DatasetLoader:
             f"{spec.owner_issue or 'a child issue of LIT-123'}."
         )
     return spec.loader_factory(**kwargs)
+
+
+def is_corpus_available(name: str) -> bool:
+    """FR2 §5.1 — does ``name`` have both a loader *and* provisioned data?
+
+    ``list_supported_corpora``/``CORPUS_REGISTRY`` only tell you whether code
+    is wired (a ``loader_factory``); they say nothing about whether
+    ``Backend/data/<corpus>`` actually exists on this machine. A corpus that
+    is wired but unprovisioned (LibriSpeech, until someone downloads it)
+    would otherwise appear selectable and then 404 on first use. This does
+    one lazy single-row probe rather than a full catalog walk.
+    """
+    try:
+        loader = get_loader(name)
+    except (ValueError, NotImplementedError):
+        return False
+    try:
+        next(iter(loader.stream(limit=1)))
+        return True
+    except (FileNotFoundError, StopIteration):
+        return False
+    except Exception:
+        logger.warning("Availability probe raised for corpus %r", name, exc_info=True)
+        return False
+
+
+def measure_footprint(data_dir: Optional[Path | str] = None) -> Dict[str, int]:
+    """FR2.2 — bytes on disk per corpus directory under ``data_dir``.
+
+    Walks ``Backend/data/<subdir>`` (one entry per provisioned corpus) rather
+    than the registry, so it reports what is actually on disk today,
+    including any corpus directory that isn't (yet) wired to a loader.
+    """
+    base = Path(data_dir) if data_dir is not None else DATA_DIR
+    if not base.is_dir():
+        return {}
+    usage: Dict[str, int] = {}
+    for entry in sorted(base.iterdir()):
+        if not entry.is_dir():
+            continue
+        usage[entry.name] = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+    return usage

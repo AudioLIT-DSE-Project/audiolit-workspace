@@ -114,3 +114,34 @@ class TestSilenceValidation:
         from app.infrastructure.dataset_ingestion import load_standardized_audio
         audio, _ = load_standardized_audio(p)
         assert is_silent(audio) is True
+
+
+class TestLibriSpeechCatalogLayout:
+    """The provisioned sample is flat ``*.flac`` + a catalog CSV with no
+    ``*.trans.txt`` files, which the tree walk alone yielded nothing for."""
+
+    @pytest.fixture
+    def flat_root(self, tmp_path: Path):
+        root = tmp_path / "librispeech"
+        root.mkdir()
+        _flac(root / "1089-134686-0014.flac")
+        (root / LibriSpeechLoader.CATALOG_NAME).write_text(
+            "utt_id,filename,rel_path,speaker,chapter,text\n"
+            "1089-134686-0014,1089-134686-0014.flac,audio/1089-134686-0014.flac,1089,134686,HE TRIED TO THINK\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def test_reads_catalog_with_flat_audio(self, flat_root):
+        (sample,) = list(LibriSpeechLoader(flat_root))
+
+        assert sample.sample_id == "1089-134686-0014"
+        assert sample.audio_path == flat_root / "1089-134686-0014.flac"
+        assert sample.label == "HE TRIED TO THINK"
+        assert sample.speaker_id == "1089"
+
+    def test_catalog_layout_counts_as_available(self, flat_root, monkeypatch):
+        from app.infrastructure import dataset_ingestion as di
+
+        monkeypatch.setattr(LibriSpeechLoader, "DEFAULT_DIR", flat_root)
+        assert di.is_corpus_available("librispeech") is True

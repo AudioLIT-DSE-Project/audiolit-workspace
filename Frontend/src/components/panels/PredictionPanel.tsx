@@ -2,13 +2,32 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { SaliencyVisualization } from "../visualization/SaliencyVisualization";
 import { AttentionVisualization } from "../visualization/AttentionVisualization";
 import { PerturbationTools } from "../analysis/PerturbationTools";
-import { XAIOverlayCanvas, XAIMethod, XAIResult, F0Point } from "../visualization/XAIOverlayCanvas";
+import { AcousticProfilePanel } from "./AcousticProfilePanel";
+import { AccentBiasPanel } from "./AccentBiasPanel";
+import { FaithfulnessAuditPanel } from "./FaithfulnessAuditPanel";
+import {
+  XAIOverlayCanvas,
+  XAIMethod,
+  XAIResult,
+  F0Point,
+} from "../visualization/XAIOverlayCanvas";
 import { useState, useEffect } from "react";
-import { API_BASE } from '@/lib/api';
-import { AlertTriangle, ShieldCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  ShieldCheck,
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+} from "lucide-react";
+import { API_BASE } from "@/lib/api";
+import { ProvenanceBadge, provenanceOverlayStyle } from "../ui/ProvenanceBadge";
+import { DeepfakeForensicPanel } from "./DeepfakeForensicPanel";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -18,25 +37,10 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
-}
-
-interface Wav2Vec2Prediction {
-  predicted_emotion: string;
-  probabilities: Record<string, number>;
-  confidence: number;
-}
-
-interface WhisperPrediction {
-  predicted_transcript: string;
-  ground_truth: string;
-  accuracy_percentage: number;
-  word_error_rate: number;
-  character_error_rate: number;
-  levenshtein_distance: number;
-  exact_match: number;
-  character_similarity: number;
-  word_count_predicted: number;
-  word_count_truth: number;
+  // Present on rows coming from the dataset table, which carry a cached
+  // transcript alongside the file reference.
+  prediction?: string;
+  predicted_transcript?: string;
 }
 
 interface PerturbationResult {
@@ -72,8 +76,9 @@ export interface UnifiedTaskResult {
       probabilities: Record<string, number>;
     };
     add?: {
-      label: 'bona-fide' | 'synthetic';
+      label: "bona-fide" | "spoof" | "synthetic";
       confidence: number;
+      synthetic_probability?: number;
     };
     xai?: XAIResult;
     acoustic?: {
@@ -94,34 +99,116 @@ interface PredictionPanelProps {
   onPerturbationComplete?: (result: PerturbationResult) => void;
   onPredictionRefresh?: (file: UploadedFile, prediction: string) => void;
   onPredictionUpdate?: (fileId: string, prediction: string) => void;
-  unifiedResult?: UnifiedTaskResult | null; 
-  audioDuration?: number; 
+  unifiedResult?: UnifiedTaskResult | null;
+  audioDuration?: number;
+  whisperPrediction?: any;
+  wav2vecPrediction?: any;
+  addPrediction?: any;
 }
 
-export const PredictionPanel = ({ 
-  selectedFile, 
-  selectedEmbeddingFile, 
-  model, 
-  dataset, 
-  originalDataset, 
-  onPerturbationComplete, 
-  onPredictionRefresh, 
+export const PredictionPanel = ({
+  selectedFile,
+  selectedEmbeddingFile,
+  model,
+  dataset,
+  originalDataset,
+  onPerturbationComplete,
+  onPredictionRefresh,
   onPredictionUpdate,
   unifiedResult,
-  audioDuration = 10.0
+  audioDuration = 10.0,
+  whisperPrediction,
+  wav2vecPrediction,
+  addPrediction,
 }: PredictionPanelProps) => {
-  const [wav2vecPrediction, setWav2vecPrediction] = useState<Wav2Vec2Prediction | null>(null);
-  const [whisperPrediction, setWhisperPrediction] = useState<WhisperPrediction | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [perturbedPredictions, setPerturbedPredictions] = useState<Wav2Vec2Prediction | WhisperPrediction | null>(null);
-  const [originalFile, setOriginalFile] = useState<UploadedFile | null>(selectedFile || null);
+  const [originalFile, setOriginalFile] = useState<UploadedFile | null>(
+    selectedFile || null,
+  );
   const [perturbedFile, setPerturbedFile] = useState<UploadedFile | null>(null);
   const [isLoadingPerturbed, setIsLoadingPerturbed] = useState(false);
   const [hoveredToken, setHoveredToken] = useState<ASRToken | null>(null);
-  
-  // State for dynamic XAI canvas layer opacity swapping
-  const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>('saliency');
+
+  // Progressive disclosure (SRS §3.6.6): Accent Bias / Faithfulness stay
+  // hidden behind this toggle so the default view isn't overloaded.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // State for dynamic XAI canvas layer opacity swapping and on-demand fetch
+  const [activeXAIMethod, setActiveXAIMethod] = useState<XAIMethod>("gradcam");
+  // FR8.4: overlay transparency must be adjustable, not hardcoded.
+  const [overlayOpacity, setOverlayOpacity] = useState(0.7);
+  // FR17.1: the saliency response says whether the map is measured or a
+  // synthesised stand-in. Rendering it is the half the requirement asks for.
+  const [xaiProvenance, setXaiProvenance] = useState<{
+    provenance?: string;
+    reason?: string;
+  } | null>(null);
+  const [spectrogramData, setSpectrogramData] = useState<
+    number[][] | undefined
+  >(unifiedResult?.tasks?.acoustic?.spectrogram);
+  const [xaiResult, setXaiResult] = useState<XAIResult | undefined>(
+    unifiedResult?.tasks?.xai,
+  );
+  const [xaiLoading, setXaiLoading] = useState(false);
+  const [xaiError, setXaiError] = useState<string | null>(null);
+  // The acoustic profile carries the pitch track. Fetched on demand rather
+  // than read from cachedTaskResults alone, so the F0 contour appears for any
+  // file instead of only ones a previous warmup happened to touch.
+  const [acousticProfile, setAcousticProfile] = useState<any | null>(null);
+
+  // Fetch /saliency/generate on demand for XAI Overlay Canvas
+  useEffect(() => {
+    let isMounted = true;
+    const targetFile = selectedFile?.filename || selectedEmbeddingFile;
+    if (!targetFile || !model) return;
+
+    setXaiLoading(true);
+    setXaiError(null);
+
+    const sfAny = selectedFile as any;
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
+
+    const saliencyBody = isUploadedFile
+      ? { file_path: selectedFile?.file_path, model, method: activeXAIMethod }
+      : { dataset, dataset_file: targetFile, model, method: activeXAIMethod };
+
+    fetch(`${API_BASE}/saliency/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(saliencyBody),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Saliency generate failed: ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (!isMounted) return;
+        if (data.base_spectrogram) {
+          setSpectrogramData(data.base_spectrogram);
+        }
+        setXaiProvenance({
+          provenance: data.provenance,
+          reason: data.provenance_reason,
+        });
+        if (data.saliency_matrix) {
+          setXaiResult({
+            method: data.method || activeXAIMethod,
+            matrix: data.saliency_matrix,
+            max_val: data.max_val ?? 1.0,
+          });
+        }
+        setXaiLoading(false);
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setXaiError(err.message || "Failed to load XAI overlay");
+        setXaiLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedFile, selectedEmbeddingFile, model, dataset, activeXAIMethod]);
 
   // Handle perturbation completion
   const handlePerturbationComplete = async (result: PerturbationResult) => {
@@ -136,152 +223,273 @@ export const PredictionPanel = ({
       file_path: result.perturbed_file,
       message: "Perturbed audio",
       duration: result.duration_ms / 1000,
-      sample_rate: result.sample_rate
+      sample_rate: result.sample_rate,
     };
-    
+
     setPerturbedFile(perturbedFileObj);
-    
+
     if (onPerturbationComplete) {
       onPerturbationComplete(result);
     }
   };
 
-  // Fetch wav2vec prediction when model is wav2vec2 and file is selected
+  // Fetch /acoustic/profile on demand for the F0 contour and its mel ceiling
   useEffect(() => {
     let isMounted = true;
-    const abortController = new AbortController();
-    
-    const fetchWav2vecPrediction = async () => {
-      if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile)) {
-        if (isMounted) {
-          setWav2vecPrediction(null);
-          setError(null);
-          setIsLoading(false);
-        }
-        return;
-      }
+    const targetFile = selectedFile?.filename || selectedEmbeddingFile;
+    if (!targetFile) {
+      setAcousticProfile(null);
+      return;
+    }
 
-      setIsLoading(true);
-      setError(null);
+    const sfAny = selectedFile as any;
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
-      try {
-        const requestBody: any = {};
-        
-        if (selectedFile) {
-          const isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
-            selectedFile.file_path.startsWith('uploads/') ||
-            selectedFile.message === "Perturbed file" ||
-            selectedFile.message === "File uploaded successfully" ||
-            selectedFile.message === "File uploaded and processed successfully"
-          ) && selectedFile.message !== "Selected from dataset";
-          
-          if (isUploadedFile) {
-            requestBody.file_path = selectedFile.file_path;
-          } else {
-            requestBody.dataset = originalDataset || dataset;
-            requestBody.dataset_file = selectedFile.filename;
-          }
-        } else if (selectedEmbeddingFile && dataset) {
-          requestBody.dataset = originalDataset || dataset;
-          requestBody.dataset_file = selectedEmbeddingFile;
-        }
+    const body = isUploadedFile
+      ? { file_path: selectedFile?.file_path }
+      : { dataset, dataset_file: targetFile };
 
-        const response = await fetch(`${API_BASE}/inferences/wav2vec2-detailed`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: 'include',
-          body: JSON.stringify(requestBody),
-          signal: abortController.signal
-        });
+    fetch(`${API_BASE}/acoustic/profile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(body),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (isMounted) setAcousticProfile(data);
+      })
+      .catch(() => {
+        // No placeholder pitch track (A2). An absent contour is honest; an
+        // invented one is not.
+        if (isMounted) setAcousticProfile(null);
+      });
 
-        if (!response.ok) throw new Error(`Failed to fetch prediction: ${response.status}`);
-
-        const prediction = await response.json();
-        if (isMounted) setWav2vecPrediction(prediction);
-        
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-        const errorMessage = err instanceof Error ? err.message : "Unknown error";
-        if (isMounted) setError(errorMessage);
-      } finally {
-        if (isMounted) setIsLoading(false);
-      }
-    };
-
-    fetchWav2vecPrediction();
     return () => {
       isMounted = false;
-      abortController.abort();
     };
-  }, [selectedFile, selectedEmbeddingFile, model, dataset, originalDataset]);
+  }, [
+    selectedFile?.filename,
+    selectedFile?.file_path,
+    selectedEmbeddingFile,
+    dataset,
+  ]);
 
-  const hasAttention = !!model && model.includes('whisper');
-  const addResult = unifiedResult?.tasks?.add;
-  const serResult = unifiedResult?.tasks?.ser;
-  const asrResult = unifiedResult?.tasks?.asr;
-  
-  // Extract XAI and Acoustic data from unified result
-  const xaiResult = unifiedResult?.tasks?.xai;
-  const spectrogramData = unifiedResult?.tasks?.acoustic?.spectrogram;
-  const waveformData = unifiedResult?.tasks?.acoustic?.waveform || []; // Extract waveform
-  const f0Data = unifiedResult?.tasks?.acoustic?.f0 || [];
+  // On-demand fetch for cached multi-task results (ASR, SER, ADD, acoustic)
+  const [cachedTaskResults, setCachedTaskResults] = useState<{
+    asr?: any;
+    ser?: any;
+    add?: any;
+    acoustic?: any;
+  } | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    const targetFile =
+      selectedFile?.file_path ||
+      selectedFile?.filename ||
+      selectedFile?.file_id ||
+      selectedEmbeddingFile;
+    if (!targetFile) return;
+
+    fetch(`${API_BASE}/api/inference/cached-results`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        audio_ref: selectedFile?.file_path || targetFile,
+        dataset: dataset,
+        dataset_file: selectedFile?.filename || targetFile,
+        model: model || "whisper-base",
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (isMounted && data?.tasks) {
+          setCachedTaskResults(data.tasks);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    selectedFile?.file_id,
+    selectedFile?.filename,
+    selectedFile?.file_path,
+    selectedEmbeddingFile,
+    model,
+    dataset,
+  ]);
+
+  const hasAttention = !!model && model.includes("whisper");
+
+  // Synchronize ADD (Deepfake Warning Banner & Card)
+  const rawAdd = unifiedResult?.tasks?.add || cachedTaskResults?.add;
+  const addResult =
+    rawAdd ||
+    (addPrediction?.probabilities
+      ? {
+          label: addPrediction.predicted_label,
+          synthetic_probability: addPrediction.synthetic_probability,
+          confidence: addPrediction.confidence,
+          probabilities: addPrediction.probabilities,
+        }
+      : undefined);
+
+  // Synchronize SER (Emotion Analytics)
+  const rawSer = unifiedResult?.tasks?.ser || cachedTaskResults?.ser;
+  const serResult =
+    rawSer ||
+    (wav2vecPrediction?.probabilities
+      ? {
+          predicted_emotion: wav2vecPrediction.predicted_emotion,
+          probabilities: wav2vecPrediction.probabilities,
+          confidence: wav2vecPrediction.confidence,
+        }
+      : undefined);
+
+  // Synchronize ASR (Transcription Timeline)
+  const rawAsr = unifiedResult?.tasks?.asr || cachedTaskResults?.asr;
+  const fileTranscript =
+    whisperPrediction?.predicted_transcript ||
+    selectedFile?.prediction ||
+    selectedFile?.predicted_transcript;
+  const asrResult =
+    rawAsr ||
+    (fileTranscript ? { transcript: fileTranscript, tokens: [] } : undefined);
+
+  // extract_acoustic_profile returns `timeline: [{t_ms, f0_hz, rms}]`. It has no
+  // top-level `f0` key, which is why this contour was empty on every file.
+  const acoustic = acousticProfile || cachedTaskResults?.acoustic;
+  const f0Data: F0Point[] = (acoustic?.timeline || []).map(
+    (pt: { t_ms: number; f0_hz: number | null }) => ({
+      time_ms: pt.t_ms,
+      freq_hz: pt.f0_hz,
+    }),
+  );
+  // librosa's mel ceiling is sr/2; the canvas would otherwise assume 8 kHz.
+  const maxFreqHz = acoustic?.sample_rate ? acoustic.sample_rate / 2 : 8000;
+  // One peak per frame, so it shares the spectrogram's time axis. Nothing in
+  // the backend produced a waveform before, so this layer never drew.
+  const waveformData: number[] = acoustic?.waveform || [];
 
   return (
     <div className="h-full bg-panel-background border-t border-border flex flex-col">
-      
       {/* 1. High-Visibility Deepfake (ADD) Warning Banner (Main Viewport Layout) */}
-      {addResult && (
-        <div className={`p-3 flex items-center justify-between transition-all duration-500 border-b-2 ${
-          addResult.label === 'synthetic'
-            ? 'bg-red-50 border-red-500 text-red-700 dark:bg-red-950/50 dark:text-red-400'
-            : 'bg-green-50 border-green-500 text-green-700 dark:bg-green-950/50 dark:text-green-400'
-        }`}>
-          <div className="flex items-center gap-3">
-            {addResult.label === 'synthetic' ? (
-              <AlertTriangle className="h-6 w-6" />
-            ) : (
-              <ShieldCheck className="h-6 w-6" />
-            )}
-            <div>
-              <h3 className="text-sm font-bold tracking-tight">
-                {addResult.label === 'synthetic' ? 'Deepfake Detected' : 'Bona-fide Audio'}
-              </h3>
-              <p className="text-[10px] opacity-80">
-                Binary classification (ASVspoof 2021 DF) - No multi-class fingerprinting (SRS §4.4)
-              </p>
+      {addResult &&
+        (() => {
+          const isSpoof =
+            addResult.label === "spoof" ||
+            addResult.label === "synthetic" ||
+            (typeof addResult.synthetic_probability === "number" &&
+              addResult.synthetic_probability > 0.5);
+          return (
+            <div
+              className={`p-3 flex items-center justify-between transition-all duration-500 border-b-2 ${
+                isSpoof
+                  ? "bg-red-50 border-red-500 text-red-700 dark:bg-red-950/50 dark:text-red-400"
+                  : "bg-green-50 border-green-500 text-green-700 dark:bg-green-950/50 dark:text-green-400"
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                {isSpoof ? (
+                  <AlertTriangle className="h-6 w-6" />
+                ) : (
+                  <ShieldCheck className="h-6 w-6" />
+                )}
+                <div>
+                  <h3 className="text-sm font-bold tracking-tight">
+                    {isSpoof ? "Deepfake Detected" : "Bona-fide Audio"}
+                  </h3>
+                  <p className="text-[10px] opacity-80">
+                    Binary classification (ASVspoof 2021 DF) - No multi-class
+                    fingerprinting
+                  </p>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-xl font-bold">
+                  {(addResult.confidence * 100).toFixed(1)}%
+                </div>
+                <div className="text-[10px] opacity-80">Confidence</div>
+              </div>
             </div>
-          </div>
-          <div className="text-right">
-            <div className="text-xl font-bold">
-              {(addResult.confidence * 100).toFixed(1)}%
-            </div>
-            <div className="text-[10px] opacity-80">Confidence</div>
-          </div>
-        </div>
-      )}
+          );
+        })()}
 
       <Tabs defaultValue="analytics" className="h-full flex flex-col">
-        <div className="bg-panel-header border-b border-border px-3 py-2">
-          <TabsList className={`h-7 grid w-full ${hasAttention ? 'grid-cols-4' : 'grid-cols-3'} bg-muted`}>
-            <TabsTrigger value="analytics" className="text-xs">Analytics</TabsTrigger>
-            <TabsTrigger value="saliency" className="text-xs">Saliency</TabsTrigger>
-            {hasAttention && <TabsTrigger value="attention" className="text-xs">Attention</TabsTrigger>}
-            <TabsTrigger value="perturbation" className="text-xs">Perturbation</TabsTrigger>
+        <div className="bg-panel-header border-b border-border px-3 py-2 flex items-center gap-2">
+          <TabsList
+            className={`h-7 grid flex-1 ${
+              hasAttention
+                ? showAdvanced
+                  ? "grid-cols-7"
+                  : "grid-cols-4"
+                : showAdvanced
+                  ? "grid-cols-6"
+                  : "grid-cols-3"
+            } bg-muted`}
+          >
+            <TabsTrigger value="analytics" className="text-xs">
+              Analytics
+            </TabsTrigger>
+            <TabsTrigger value="saliency" className="text-xs">
+              Saliency
+            </TabsTrigger>
+            <TabsTrigger value="acoustic" className="text-xs">
+              Acoustic
+            </TabsTrigger>
+            <TabsTrigger value="perturbation" className="text-xs">
+              Perturbation
+            </TabsTrigger>
+            {showAdvanced && hasAttention && (
+              <TabsTrigger value="attention" className="text-xs">
+                Attention
+              </TabsTrigger>
+            )}
+            {showAdvanced && (
+              <TabsTrigger value="accent-bias" className="text-xs">
+                Accent Bias
+              </TabsTrigger>
+            )}
+            {showAdvanced && (
+              <TabsTrigger value="faithfulness" className="text-xs">
+                Faithfulness
+              </TabsTrigger>
+            )}
           </TabsList>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-[10px] shrink-0"
+            onClick={() => setShowAdvanced((v) => !v)}
+          >
+            Advanced
+            {showAdvanced ? (
+              <ChevronUp className="h-3 w-3 ml-1" />
+            ) : (
+              <ChevronDown className="h-3 w-3 ml-1" />
+            )}
+          </Button>
         </div>
 
         <div className="flex-1 overflow-auto bg-background">
           {/* Analytics Tab Content for Unified RQ Results */}
-          <TabsContent value="analytics" className="m-0 h-full p-3 space-y-4">
-            
+          <TabsContent
+            value="analytics"
+            forceMount
+            className="m-0 h-full p-3 space-y-4 data-[state=inactive]:hidden"
+          >
             {/* Interactive ASR Token Timeline */}
             {asrResult && (
               <Card>
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm flex items-center gap-2">
                     Transcription Timeline
-                    <Badge variant="outline" className="text-[10px]">ASR</Badge>
+                    <Badge variant="outline" className="text-[10px]">
+                      ASR
+                    </Badge>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -294,15 +502,17 @@ export const PredictionPanel = ({
                           onMouseLeave={() => setHoveredToken(null)}
                           className={`cursor-pointer px-1 rounded transition-colors duration-150 ${
                             hoveredToken?.text === token.text
-                              ? 'bg-blue-200 dark:bg-blue-800 text-blue-900 dark:text-blue-100'
-                              : 'hover:bg-muted'
+                              ? "bg-blue-200 dark:bg-blue-800 text-blue-900 dark:text-blue-100"
+                              : "hover:bg-muted"
                           }`}
                         >
                           {token.text}
                         </span>
                       ))
                     ) : (
-                      <span className="text-muted-foreground italic">{asrResult.transcript || "No transcript available"}</span>
+                      <span className="text-muted-foreground italic">
+                        {asrResult.transcript || "No transcript available"}
+                      </span>
                     )}
                   </div>
 
@@ -310,14 +520,17 @@ export const PredictionPanel = ({
                     <div className="relative h-8 w-full bg-gray-100 dark:bg-gray-800 rounded-md overflow-hidden">
                       {asrResult.tokens.map((token, idx) => {
                         const left = (token.start / audioDuration) * 100;
-                        const width = ((token.end - token.start) / audioDuration) * 100;
+                        const width =
+                          ((token.end - token.start) / audioDuration) * 100;
                         return (
                           <div
                             key={idx}
                             onMouseEnter={() => setHoveredToken(token)}
                             onMouseLeave={() => setHoveredToken(null)}
                             className={`absolute h-full bg-blue-400 dark:bg-blue-600 opacity-70 hover:opacity-100 hover:bg-blue-600 dark:hover:bg-blue-400 transition-all flex items-center justify-center ${
-                              hoveredToken?.start === token.start ? 'ring-2 ring-blue-500 z-10' : ''
+                              hoveredToken?.start === token.start
+                                ? "ring-2 ring-blue-500 z-10"
+                                : ""
                             }`}
                             style={{
                               left: `${left}%`,
@@ -327,8 +540,12 @@ export const PredictionPanel = ({
                           />
                         );
                       })}
-                      <div className="absolute bottom-0 left-0 text-[9px] text-gray-500 p-0.5">0s</div>
-                      <div className="absolute bottom-0 right-0 text-[9px] text-gray-500 p-0.5">{audioDuration.toFixed(1)}s</div>
+                      <div className="absolute bottom-0 left-0 text-[9px] text-gray-500 p-0.5">
+                        0s
+                      </div>
+                      <div className="absolute bottom-0 right-0 text-[9px] text-gray-500 p-0.5">
+                        {audioDuration.toFixed(1)}s
+                      </div>
                     </div>
                   )}
                 </CardContent>
@@ -341,26 +558,44 @@ export const PredictionPanel = ({
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm flex items-center gap-2">
                     Emotion Analytics
-                    <Badge variant="outline" className="text-[10px]">SER</Badge>
+                    <Badge variant="outline" className="text-[10px]">
+                      SER
+                    </Badge>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2">
-                  {Object.entries(serResult.probabilities)
+                  {Object.entries(
+                    serResult.probabilities as Record<string, number>,
+                  )
                     .sort(([, a], [, b]) => b - a)
                     .map(([emotion, probability]) => {
-                      const isPredicted = emotion === serResult.predicted_emotion;
+                      const isPredicted =
+                        emotion === serResult.predicted_emotion;
                       return (
-                        <div key={emotion} className="flex items-center justify-between text-xs">
+                        <div
+                          key={emotion}
+                          className="flex items-center justify-between text-xs"
+                        >
                           <div className="flex items-center gap-2 w-24">
-                            <span className={`capitalize ${isPredicted ? 'font-bold text-blue-600' : ''}`}>
+                            <span
+                              className={`capitalize ${isPredicted ? "font-bold text-blue-600" : ""}`}
+                            >
                               {emotion}
                             </span>
                             {isPredicted && (
-                              <Badge variant="default" className="text-[9px] h-4 px-1">Predicted</Badge>
+                              <Badge
+                                variant="default"
+                                className="text-[9px] h-4 px-1"
+                              >
+                                Predicted
+                              </Badge>
                             )}
                           </div>
                           <div className="flex items-center gap-2 flex-1 max-w-[200px]">
-                            <Progress value={probability * 100} className={`h-2 ${isPredicted ? 'bg-blue-200' : ''}`} />
+                            <Progress
+                              value={probability * 100}
+                              className={`h-2 ${isPredicted ? "bg-blue-200" : ""}`}
+                            />
                             <span className="text-muted-foreground min-w-[2.5rem] text-right">
                               {(probability * 100).toFixed(1)}%
                             </span>
@@ -372,55 +607,163 @@ export const PredictionPanel = ({
               </Card>
             ) : (
               !asrResult && (
-                <Card className="w-full h-full flex items-center justify-center min-h-[200px] bg-muted/20">
-                  <CardContent className="text-center text-muted-foreground">
-                    <p className="text-sm">Awaiting multi-task inference results...</p>
+                <Card className="w-full flex items-center justify-center min-h-[220px] bg-muted/20 border-dashed">
+                  <CardContent className="text-center text-muted-foreground p-6 max-w-md">
+                    <p className="text-sm font-semibold mb-1.5 text-foreground">
+                      Awaiting multi-task inference results
+                    </p>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Click{" "}
+                      <span className="font-semibold text-primary">
+                        "Get Inferences"
+                      </span>{" "}
+                      in the top dataset toolbar to run multi-task (ASR, SER,
+                      ADD) analytics on this sample.
+                    </p>
                   </CardContent>
                 </Card>
               )
             )}
-
           </TabsContent>
 
           {/* Saliency Tab with integrated XAI Canvas */}
-          <TabsContent value="saliency" className="m-0 h-full">
+          <TabsContent
+            value="saliency"
+            forceMount
+            className="m-0 h-full data-[state=inactive]:hidden"
+          >
             <div className="p-3 space-y-4">
               {/* Dynamic XAI Method Toggle Buttons */}
-              <div className="flex gap-2 mb-2">
-                {(['saliency', 'shap', 'lime', 'ig'] as XAIMethod[]).map(m => (
-                  <button 
-                    key={m} 
-                    onClick={() => setActiveXAIMethod(m)}
-                    className={`px-3 py-1 text-xs rounded-md border transition-colors ${
-                      activeXAIMethod === m 
-                        ? 'bg-primary text-primary-foreground border-primary' 
-                        : 'bg-muted text-muted-foreground border-border hover:bg-accent'
-                    }`}
-                  >
-                    {m.toUpperCase()}
-                  </button>
-                ))}
+              <div className="flex gap-2 mb-2 flex-wrap">
+                {/*
+                  All four methods for every model family. The deepfake
+                  detectors used to 400 on everything but Grad-CAM, so an
+                  earlier revision of this panel offered them only Grad-CAM;
+                  LIT-164/#128 then implemented Integrated Gradients, LIME and
+                  SHAP for ADD via generate_add_saliency. Both changes were
+                  correct in isolation and wrong together - the gate survived
+                  the merge and hid three working methods. Verified against this
+                  branch's backend: all four return 200 with a measured matrix
+                  for melody-machine.
+                */}
+                <TooltipProvider>
+                  {(
+                    [
+                      "gradcam",
+                      "integrated_gradients",
+                      "lime",
+                      "shap",
+                    ] as XAIMethod[]
+                  ).map((m) => (
+                    <Tooltip key={m}>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={() => setActiveXAIMethod(m)}
+                          className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                            activeXAIMethod === m
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-muted text-muted-foreground border-border hover:bg-accent"
+                          }`}
+                        >
+                          {m === "integrated_gradients"
+                            ? "INTEGRATED GRADIENTS"
+                            : m.toUpperCase()}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="text-xs max-w-[220px]">
+                          {m === "gradcam" &&
+                            "Gradient-weighted class activation: which time-frequency regions most raised the predicted class's score."}
+                          {m === "integrated_gradients" &&
+                            "Integrates gradients along a path from a baseline (silence) to the input, attributing the prediction to each input region."}
+                          {m === "lime" &&
+                            "Fits a local surrogate model over perturbed versions of the clip to approximate which regions drove this prediction."}
+                          {m === "shap" &&
+                            "Shapley-value attribution: each region's fair-share contribution to the prediction, based on cooperative game theory."}
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                </TooltipProvider>
+              </div>
+
+              {/* Overlay opacity (FR8.4) */}
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xs text-muted-foreground w-16">
+                  Overlay
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={Math.round(overlayOpacity * 100)}
+                  onChange={(e) =>
+                    setOverlayOpacity(Number(e.target.value) / 100)
+                  }
+                  className="flex-1 max-w-[180px]"
+                  aria-label="XAI overlay opacity"
+                />
+                <span className="text-xs text-muted-foreground w-10 tabular-nums">
+                  {Math.round(overlayOpacity * 100)}%
+                </span>
+                <ProvenanceBadge
+                  provenance={xaiProvenance?.provenance}
+                  reason={xaiProvenance?.reason}
+                />
               </div>
 
               {/* New High-Performance XAI Overlay Canvas */}
-              {spectrogramData || xaiResult ? (
-                <XAIOverlayCanvas
-                  audioDuration={audioDuration}
-                  baseSpectrogram={spectrogramData}
-                  waveformData={waveformData} // Pass waveform data to canvas
-                  xaiResults={xaiResult ? [xaiResult] : []}
-                  f0Data={f0Data}
-                  activeMethod={activeXAIMethod}
-                  width={800}
-                  height={400}
-                />
+              {xaiError ? (
+                <Card className="w-full h-[400px] flex items-center justify-center bg-red-50 dark:bg-red-950/20 border-red-200 dark:border-red-900">
+                  <CardContent className="text-center text-red-600 dark:text-red-400 p-6">
+                    <AlertTriangle className="h-8 w-8 mx-auto mb-2 opacity-80" />
+                    <p className="text-sm font-semibold">
+                      Failed to load XAI Overlay Canvas
+                    </p>
+                    <p className="text-xs mt-1 opacity-90">{xaiError}</p>
+                  </CardContent>
+                </Card>
+              ) : xaiLoading ? (
+                <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
+                  <CardContent className="text-center text-muted-foreground flex flex-col items-center gap-2">
+                    <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                    <p className="text-sm">
+                      Loading XAI Saliency & Spectrogram overlay...
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : spectrogramData || xaiResult ? (
+                <div style={provenanceOverlayStyle(xaiProvenance?.provenance)}>
+                  <XAIOverlayCanvas
+                    audioDuration={audioDuration}
+                    baseSpectrogram={spectrogramData}
+                    waveformData={waveformData} // Pass waveform data to canvas
+                    xaiResults={xaiResult ? [xaiResult] : []}
+                    f0Data={f0Data}
+                    maxFreqHz={maxFreqHz}
+                    overlayOpacity={overlayOpacity}
+                    activeMethod={activeXAIMethod}
+                    width={800}
+                    height={400}
+                  />
+                </div>
               ) : (
                 <Card className="w-full h-[400px] flex items-center justify-center bg-muted/20">
                   <CardContent className="text-center text-muted-foreground">
-                    <p className="text-sm">Awaiting XAI & Spectrogram data from worker...</p>
+                    <p className="text-sm">
+                      Select an audio file and saliency method to render XAI
+                      overlay canvas.
+                    </p>
                   </CardContent>
                 </Card>
               )}
+
+              {/* FR7.2 — where in the clip the detector suspects synthesis */}
+              <DeepfakeForensicPanel
+                selectedFile={selectedFile}
+                dataset={dataset}
+                clipVerdict={addResult}
+              />
 
               {/* Existing inherited Saliency Visualization */}
               <SaliencyVisualization
@@ -431,8 +774,25 @@ export const PredictionPanel = ({
             </div>
           </TabsContent>
 
-          {hasAttention && (
-            <TabsContent value="attention" className="m-0 h-full">
+          <TabsContent
+            value="acoustic"
+            forceMount
+            className="m-0 h-full data-[state=inactive]:hidden"
+          >
+            <AcousticProfilePanel
+              selectedFile={selectedFile}
+              selectedEmbeddingFile={selectedEmbeddingFile}
+              dataset={dataset}
+              originalDataset={originalDataset}
+            />
+          </TabsContent>
+
+          {showAdvanced && hasAttention && (
+            <TabsContent
+              value="attention"
+              forceMount
+              className="m-0 h-full data-[state=inactive]:hidden"
+            >
               <div className="p-3">
                 <AttentionVisualization
                   selectedFile={selectedFile || selectedEmbeddingFile}
@@ -443,7 +803,37 @@ export const PredictionPanel = ({
             </TabsContent>
           )}
 
-          <TabsContent value="perturbation" className="m-0 h-full">
+          {showAdvanced && (
+            <TabsContent
+              value="accent-bias"
+              forceMount
+              className="m-0 h-full data-[state=inactive]:hidden"
+            >
+              <AccentBiasPanel model={model} />
+            </TabsContent>
+          )}
+
+          {showAdvanced && (
+            <TabsContent
+              value="faithfulness"
+              forceMount
+              className="m-0 h-full data-[state=inactive]:hidden"
+            >
+              <FaithfulnessAuditPanel
+                selectedFile={selectedFile}
+                selectedEmbeddingFile={selectedEmbeddingFile}
+                model={model}
+                dataset={dataset}
+                originalDataset={originalDataset}
+              />
+            </TabsContent>
+          )}
+
+          <TabsContent
+            value="perturbation"
+            forceMount
+            className="m-0 h-full data-[state=inactive]:hidden"
+          >
             <div className="p-3">
               <PerturbationTools
                 selectedFile={selectedFile}
