@@ -195,7 +195,11 @@ Status legend: 🟢 Todo (not started) · 🟡 In Progress · 🔵 In Review · 
 
 | ID | Title | Assignee | Status | Blocked by | Notes |
 |---|---|---|---|---|---|
+<<<<<<< HEAD
 | LIT-223 | Remediate inherited security gaps | — | 🟡 PR #142 open | In flight         | Implemented (commit merged-ready, CI green on PR #142); awaiting review. Touches `dataset_service.py`, which LIT-227 also restructures — sequence to avoid rework. |
+=======
+| LIT-223 | Remediate inherited security gaps | — | 🟢 | 🟡 In flight         | Touches `dataset_service.py`, which LIT-227 also restructures — sequence to avoid rework. |
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 ---
 
@@ -255,12 +259,18 @@ Not Tier-C stamped (per LIT-228 rule 2 — process/deliverable issues carry no F
 | LIT-195 | GitHub landing page | — |
 | LIT-202 | Landing page deployment | LIT-195 (parent) |
 | LIT-196 | Package source, finalize report | LIT-194 |
+<<<<<<< HEAD
 | LIT-203 | Production containerization | LIT-196 (parent) — **PR #145 open (In review, CI green)** |
 | LIT-204 | Final IEEE-style report | LIT-196 (parent) |
 | LIT-205 | Academic portal submission | LIT-196 (parent) |
 | LIT-259 | Structured JSON task logs + operational metrics | — (Rahim) — **PR #144 open (In review)** |
 | LIT-263 | Viva-doc evidence: conversations + claims checklist | — (Rahim) — **PR #143 open (In review)** |
 | LIT-265 | IEEE report §4 (Authored work) drafting | — not started |
+=======
+| LIT-203 | Production containerization | LIT-196 (parent) |
+| LIT-204 | Final IEEE-style report | LIT-196 (parent) |
+| LIT-205 | Academic portal submission | LIT-196 (parent) |
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 ---
 

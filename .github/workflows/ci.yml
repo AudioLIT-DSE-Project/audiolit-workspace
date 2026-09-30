@@ -42,6 +42,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+<<<<<<< HEAD
           # Cache pip's wheel downloads, keyed on the dev requirements (which
           # includes requirements.txt). On a cache hit the heavy wheels
           # (torch/transformers/umap/...) aren't re-fetched.
@@ -49,6 +50,12 @@ jobs:
           cache-dependency-path: |
             Backend/requirements.txt
             Backend/requirements-dev.txt
+=======
+          # Cache pip's wheel downloads, keyed on requirements.txt. On a cache
+          # hit the heavy wheels (torch/transformers/umap/...) aren't re-fetched.
+          cache: 'pip'
+          cache-dependency-path: Backend/requirements.txt
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
       - name: Install Dependencies
         run: |
           cd Backend
@@ -59,7 +66,11 @@ jobs:
           # torch>=2.6.0 is then already satisfied, so the -r install won't
           # re-fetch it. This shrinks both the download and the cache entry.
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+<<<<<<< HEAD
           python -m pip install -r requirements-dev.txt
+=======
+          python -m pip install -r requirements.txt pytest httpx
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
       - name: Verify torch is the CPU build
         run: |
           cd Backend
@@ -68,6 +79,7 @@ jobs:
         run: |
           cd Backend
           pytest
+<<<<<<< HEAD
 
   # LIT-203 acceptance: both production images build and scan clean at
   # CRITICAL severity. ignore-unfixed keeps the gate opinionated: only a
@@ -95,3 +107,5 @@ jobs:
           severity: CRITICAL
           exit-code: '1'
           ignore-unfixed: true
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

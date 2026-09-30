@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+<<<<<<< HEAD
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { HelpCircle } from "lucide-react";
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 import {
   Area, AreaChart, CartesianGrid, ReferenceLine, ResponsiveContainer,
   Tooltip as RechartsTooltip, XAxis, YAxis,
@@ -93,11 +96,15 @@ export const DeepfakeForensicPanel = ({
     : null;
 
   return (
+<<<<<<< HEAD
     <TooltipProvider>
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
           Deepfake Forensics
+<<<<<<< HEAD
           <Tooltip>
             <TooltipTrigger><HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" /></TooltipTrigger>
             <TooltipContent className="space-y-1">
@@ -124,6 +131,16 @@ export const DeepfakeForensicPanel = ({
                 </p>
               </TooltipContent>
             </Tooltip>
+=======
+          <Badge variant="outline" className="text-[10px]">ADD</Badge>
+          {clipVerdict?.predicted_label && (
+            <Badge
+              variant={clipVerdict.predicted_label === "spoof" ? "destructive" : "default"}
+              className="text-[10px]"
+            >
+              {clipVerdict.predicted_label}
+            </Badge>
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
           )}
         </CardTitle>
       </CardHeader>
@@ -188,6 +205,9 @@ export const DeepfakeForensicPanel = ({
         )}
       </CardContent>
     </Card>
+<<<<<<< HEAD
     </TooltipProvider>
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
   );
 };

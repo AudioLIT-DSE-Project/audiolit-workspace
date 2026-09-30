@@ -170,6 +170,7 @@ def make_whisper_transcriber(model_id: str) -> TranscribeFn:
 
     def _transcribe(audio_path: str) -> str:
         audio, _ = librosa.load(audio_path, sr=16_000)
+<<<<<<< HEAD
         # Force English decoding. Without this Whisper runs language
         # identification per utterance, and on heavily accented English it
         # selects the speaker's L1 and transcribes into that language, then
@@ -184,6 +185,9 @@ def make_whisper_transcriber(model_id: str) -> TranscribeFn:
             chunk_length_s=30,
             generate_kwargs={"language": "en", "task": "transcribe"},
         )
+=======
+        result = asr_pipeline(audio.astype(np.float32), chunk_length_s=30)
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         return result["text"]
 
     return _transcribe

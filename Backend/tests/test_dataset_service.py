@@ -17,7 +17,10 @@ import pytest
 import soundfile as sf
 
 from app.infrastructure import dataset_ingestion, dataset_service
+<<<<<<< HEAD
 from app.infrastructure.custom_dataset_service import format_custom_dataset_name
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 from app.infrastructure.dataset_ingestion import DatasetLoader, SampleMetadata, TaskFamily
 
 
@@ -228,6 +231,7 @@ class TestResolveAudioReference:
         assert resolved.name == "sample-000775.mp3"
 
 
+<<<<<<< HEAD
 class TestCrossSessionCustomDatasetDenied:
     """LIT-223: custom datasets embed the owning session in their name
     ('custom:<session_id>:<name>'). The inherited check logged a warning for a
@@ -287,4 +291,6 @@ class TestCrossSessionCustomDatasetDenied:
         assert resolved.name == "clip.wav"
 
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 

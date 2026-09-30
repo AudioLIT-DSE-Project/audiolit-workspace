@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 import logging
@@ -23,3 +24,23 @@ async def get_session_info(request: Request):
     session_id = getattr(request.state, 'sid', None)
 
     return JSONResponse({"session_id": session_id})
+=======
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+import logging
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+@router.get("/debug/session")
+async def get_session_info(request: Request):
+    """Debug endpoint to see current session information"""
+    session_id = getattr(request.state, 'sid', None)
+    cookies = dict(request.cookies)
+    
+    return JSONResponse({
+        "session_id": session_id,
+        "cookies": cookies,
+        "headers": dict(request.headers)
+    })
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

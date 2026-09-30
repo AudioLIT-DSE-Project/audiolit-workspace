@@ -100,6 +100,10 @@ async def get_dataset_metadata(
 
 @router.get("/{dataset}/file/{file_path:path}")
 @router.head("/{dataset}/file/{file_path:path}")
+<<<<<<< HEAD
+=======
+@router.options("/{dataset}/file/{file_path:path}")
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 async def serve_dataset_file(dataset: str, file_path: str, request: Request):
     logger.info(f"serve_dataset_file called: dataset='{dataset}', file_path='{file_path}'")
     try:
@@ -126,6 +130,7 @@ async def serve_dataset_file(dataset: str, file_path: str, request: Request):
 
     safe_name = audio_path.name
     file_size = audio_path.stat().st_size
+<<<<<<< HEAD
 
     # CORS is handled by the app's CORSMiddleware (restricted origin
     # allow-list); LIT-223 removed the inherited route-level
@@ -133,6 +138,30 @@ async def serve_dataset_file(dataset: str, file_path: str, request: Request):
     headers = {
         "Accept-Ranges": "bytes",
         "Cache-Control": "public, max-age=3600",
+=======
+    
+    # Handle OPTIONS request for CORS preflight
+    if request.method == "OPTIONS":
+        return JSONResponse(
+            content="",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                "Access-Control-Allow-Headers": "Range, Accept-Encoding, Origin, X-Requested-With, Content-Type, Accept, Authorization",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+    
+    # Return audio file with Starlette FileResponse for non-blocking async streaming and native Range support
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=3600",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "Range, Accept-Encoding, Origin, X-Requested-With, Content-Type, Accept, Authorization",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         "Content-Disposition": f"inline; filename=\"{safe_name}\"",
         "X-Content-Type-Options": "nosniff",
     }

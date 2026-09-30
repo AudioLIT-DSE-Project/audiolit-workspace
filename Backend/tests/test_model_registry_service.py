@@ -359,6 +359,7 @@ class TestVramFallback:
                 mrs.ResolvedModel(model_id="openai/whisper-base", revision="d", family="whisper"),
                 model_class=_Model,
             )
+<<<<<<< HEAD
 
 
 class TestModelLoadMetadataWriteThrough:
@@ -445,3 +446,5 @@ class TestModelLoadMetadataWriteThrough:
             loaded = mrs.download_and_load(resolved, model_class=_FakeWhisperModel)
 
         assert loaded.model_id == "fake/whisper"
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

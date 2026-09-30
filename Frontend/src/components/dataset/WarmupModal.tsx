@@ -133,14 +133,22 @@ export const WarmupModal: React.FC<WarmupModalProps> = ({
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Active Pipeline:</span>
+<<<<<<< HEAD
                 <span className="font-semibold text-amber-700 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+=======
+                <span className="font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
                   {warmupProgress?.active_subtask || "Processing..."}
                 </span>
               </div>
               {isRunning && warmupProgress?.eta_formatted && (
                 <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Estimated Time Remaining:</span>
+<<<<<<< HEAD
                   <span className="font-mono text-amber-700 dark:text-amber-400 font-semibold bg-amber-500/10 px-1.5 py-0.5 rounded">
+=======
+                  <span className="font-mono text-amber-600 dark:text-amber-400 font-semibold bg-amber-500/10 px-1.5 py-0.5 rounded">
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
                     ~{warmupProgress.eta_formatted}
                   </span>
                 </div>

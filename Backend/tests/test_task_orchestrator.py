@@ -17,7 +17,11 @@ import sys
 import pytest
 from fakeredis import FakeServer, FakeStrictRedis
 from rq import Queue, SimpleWorker, Worker
+<<<<<<< HEAD
 from rq.job import Job, JobStatus
+=======
+from rq.job import Job
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 from app.infrastructure import rq_connection
 from app.orchestration import task_orchestrator
@@ -173,6 +177,7 @@ class TestMultiTaskFanOut:
         result = enqueue_multitask_analysis("audio://sha256/abc", tasks=[WorkerFamily.ASR])
         assert result.websocket_url == f"/api/ws/tasks/{result.job_id}"
 
+<<<<<<< HEAD
     def test_aggregator_dependency_receives_audio_ref(self, broker):
         # LIT-257: the fan-in needs the path ref to write the sample + analysis
         # records, so enqueue_multitask_analysis must thread it into the
@@ -380,6 +385,8 @@ class TestAggregatorMetadataWriteThrough:
         assert analyses[0]["task"] == "asr"
         assert list(store._collection("audio_samples").find())[0]["sample_rate"] == 16000
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 class TestProgressChannel:
     def test_channel_is_keyed_by_job_id(self):
@@ -578,6 +585,7 @@ class TestMutationTask:
         assert "_scaffold" not in result
 
 
+<<<<<<< HEAD
 class TestStripArrayPayloads:
     """LIT-258: `_strip_array_fields` is the C4/SR4 boundary - tensor/heatmap
     payloads must never reach the durable tier; short plain lists survive."""
@@ -764,6 +772,8 @@ class TestWriteAnalysisMetadataEdgeCases:
         assert len(calls) == 1
 
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 class TestAccentBiasTask:
     def test_runs_diagnostic_and_returns_json_dict(self, broker, monkeypatch):
         from app.domain import accent_bias_profiler, accent_bias_runner
@@ -792,6 +802,7 @@ class TestAccentBiasTask:
         assert captured["model_id"] == "openai/whisper-base"
         assert captured["samples_per_cohort"] == 5
 
+<<<<<<< HEAD
     def test_writes_bias_report_after_a_run(self, broker, monkeypatch):
         # LIT-257: an accent-bias run writes one `bias_reports` document per
         # cohort (retained permanently, SAD §9).
@@ -918,6 +929,8 @@ class TestBiasReportWriteDegrades:
         result = accent_bias_task("openai/whisper-base", "l2-arctic", 5)
         assert result == report.to_json_dict()
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 class TestEnqueueAccentBias:
     def test_places_job_on_asr_queue(self, broker):

@@ -3,7 +3,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
+<<<<<<< HEAD
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 import { SaliencyVisualization } from "../visualization/SaliencyVisualization";
 import { AttentionVisualization } from "../visualization/AttentionVisualization";
 import { PerturbationTools } from "../analysis/PerturbationTools";
@@ -642,6 +645,7 @@ export const PredictionPanel = ({
                   branch's backend: all four return 200 with a measured matrix
                   for melody-machine.
                 */}
+<<<<<<< HEAD
                 <TooltipProvider>
                   {(
                     [
@@ -681,6 +685,30 @@ export const PredictionPanel = ({
                     </Tooltip>
                   ))}
                 </TooltipProvider>
+=======
+                {(
+                  [
+                    "gradcam",
+                    "integrated_gradients",
+                    "lime",
+                    "shap",
+                  ] as XAIMethod[]
+                ).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setActiveXAIMethod(m)}
+                    className={`px-3 py-1 text-xs rounded-md border transition-colors ${
+                      activeXAIMethod === m
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-muted text-muted-foreground border-border hover:bg-accent"
+                    }`}
+                  >
+                    {m === "integrated_gradients"
+                      ? "INTEGRATED GRADIENTS"
+                      : m.toUpperCase()}
+                  </button>
+                ))}
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
               </div>
 
               {/* Overlay opacity (FR8.4) */}

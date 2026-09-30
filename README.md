@@ -41,6 +41,7 @@ Before running AudioLIT locally, ensure your system has:
 - **Node.js**: `18.0` or higher (with `npm`)
 - **Redis Server**: `7.0+` (running via Docker or local installation on port `6379`)
 - **FFmpeg**: Required for audio decoding & resampling
+<<<<<<< HEAD
 - **MongoDB**: `6.0+` — **optional** (Step 1b); the durable metadata tier degrades gracefully when absent
 
 ---
@@ -287,6 +288,157 @@ To achieve sub-second XAI visualization on CPU environments, AudioLIT features a
 
 ---
 
+=======
+
+---
+
+## 🚀 Step-by-Step Execution Guide
+
+### Step 1: Clone the Repository
+```bash
+git clone https://github.com/AudioLIT-DSE-Project/audiolit-workspace.git
+cd audiolit-workspace
+```
+
+---
+
+### Step 2: Start the Redis Infrastructure Broker
+AudioLIT requires a running Redis instance for background RQ task queues, session tracking, and prediction/XAI result caching.
+
+**Option A: Using Docker (Recommended)**
+```bash
+cd Backend
+docker compose up -d
+```
+
+**Option B: Using Local Redis**
+Ensure Redis is running on port `6379`:
+```bash
+redis-server --port 6379
+```
+
+---
+
+### Step 3: Setup & Launch the Backend FastAPI Service
+
+1. Create and activate a Python virtual environment:
+   ```bash
+   cd Backend
+   python -m venv .venv
+   
+   # Windows (PowerShell):
+   .venv\Scripts\Activate.ps1
+   # Linux / macOS:
+   source .venv/bin/activate
+   ```
+
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Launch the FastAPI server:
+   ```bash
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+   The backend API will be available at `http://127.0.0.1:8000`.
+
+   > **Windows: use `127.0.0.1`, not `localhost`, for API calls from scripts
+   > and tools.** `--host 0.0.0.0` binds IPv4 only, while Windows resolves
+   > `localhost` to `::1` (IPv6) first — so every *new* TCP connection waits out
+   > an IPv6 connect timeout before falling back. Measured on this repo:
+   > **2063 ms** per fresh connection via `localhost` against **23 ms** via
+   > `127.0.0.1` (a reused keep-alive connection is 13 ms either way, which is
+   > why it hides so easily). `--host ::` is not a fix on Windows: it binds IPv6
+   > *only*, which breaks IPv4 clients. The browser app is unaffected because it
+   > keeps connections alive and its session cookie is `SameSite=Lax`, which
+   > requires the page and the API to share a host name.
+
+   Interactive OpenAPI docs: `http://127.0.0.1:8000/docs`.
+
+---
+
+### Step 4: Start the Background RQ Workers
+
+AudioLIT delegates heavy PyTorch inference and XAI attribution tasks to background workers so the API remains responsive.
+
+#### Understanding Worker Task Queues
+There are 5 specialized task queues:
+- **`asr`**: Speech-to-Text transcription & accent bias profiling
+- **`ser`**: Speech Emotion Recognition
+- **`add`**: Audio Deepfake Detection
+- **`xai`**: Grad-CAM saliency heatmaps, Integrated Gradients, & attention weights
+- **`mutation`**: Audio perturbation & downstream faithfulness auditing
+
+#### Option 1: Run All Worker Queues in One Terminal (Recommended)
+Launch a unified multi-worker process listening across all queues:
+```bash
+# From the Backend/ directory with active .venv:
+python -m app.orchestration.worker all
+```
+*Note: The unified launcher automatically purges stale Redis locks upon startup to prevent execution deadlocks.*
+
+#### Option 2: Run Dedicated Family Workers in Separate Terminals
+For distributed setups or fine-grained resource control:
+```bash
+# Terminal 1: ASR Worker
+python -m app.orchestration.worker asr
+
+# Terminal 2: SER Worker
+python -m app.orchestration.worker ser
+
+# Terminal 3: ADD Worker
+python -m app.orchestration.worker add
+
+# Terminal 4: XAI Worker (Saliency & Attention)
+python -m app.orchestration.worker xai
+
+# Terminal 5: Mutation Worker (Perturbation & Faithfulness)
+python -m app.orchestration.worker mutation
+```
+
+#### Worker Health & Monitoring
+Check worker status and active queue depth via HTTP:
+```bash
+curl http://localhost:8000/health/workers
+```
+
+---
+
+### Step 5: Setup & Launch the Frontend Web UI
+
+1. Open a new terminal and navigate to `Frontend`:
+   ```bash
+   cd Frontend
+   ```
+
+2. Install frontend dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Start the Vite development server:
+   ```bash
+   npm run dev
+   ```
+   Open your browser and navigate to `http://localhost:8080`.
+   (`vite.config.ts` sets `server.port` to 8080; Vite's own 5173 default
+   does not apply here.)
+
+---
+
+## ⚡ Dataset Pre-warming & Cache Performance
+
+To achieve sub-second XAI visualization on CPU environments, AudioLIT features an automated **Dataset Warmup Engine**:
+
+1. Click **"Warmup Dataset"** in the top navigation bar of the Web UI.
+2. Select a dataset (`Common Voice`, `RAVDESS`, or `CREMA-D`) and specify a sample range (e.g. 100 samples).
+3. The background worker pre-populates Redis with predictions, acoustic profiles, and Grad-CAM saliency heatmaps.
+4. Active progress is displayed in real-time with step badges (`Inference`, `Acoustic`, `Saliency`).
+
+---
+
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 ## 🤖 Custom Hugging Face Model Integration
 
 AudioLIT supports loading custom fine-tuned models from Hugging Face Hub:

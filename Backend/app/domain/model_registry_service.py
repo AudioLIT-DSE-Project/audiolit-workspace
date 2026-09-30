@@ -176,6 +176,7 @@ def _is_vram_exhaustion(exc: BaseException) -> bool:
     return "out of memory" in str(exc).lower()
 
 
+<<<<<<< HEAD
 def _record_model_load(loaded: LoadedModel) -> None:
     """Write-through the loaded model's reproducibility record (LIT-257).
 
@@ -208,6 +209,8 @@ def _record_model_load(loaded: LoadedModel) -> None:
         logger.warning("metadata.write_failed collection=models: %s", exc)
 
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 def download_and_load(
     resolved: ResolvedModel,
     attn_implementation: str = "eager",
@@ -291,7 +294,11 @@ def download_and_load(
         len(available_layers),
     )
 
+<<<<<<< HEAD
     loaded = LoadedModel(
+=======
+    return LoadedModel(
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         model_id=resolved.model_id,
         revision=resolved.revision,
         family=resolved.family,
@@ -302,8 +309,11 @@ def download_and_load(
         device_fallback=device_fallback_reason is not None,
         device_fallback_reason=device_fallback_reason,
     )
+<<<<<<< HEAD
     _record_model_load(loaded)
     return loaded
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 
 import threading

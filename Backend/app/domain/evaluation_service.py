@@ -1,5 +1,8 @@
 import logging
+<<<<<<< HEAD
 import re
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 import numpy as np
 import torch
 from typing import List, Dict, Any, Optional
@@ -64,6 +67,7 @@ def compute_deletion_auc(degradation_curve: Dict[str, float]) -> float:
     auc_val = float(np.trapz(y_vals, x_vals))
     return round(auc_val, 4)
 
+<<<<<<< HEAD
 def _normalise_for_wer(text: str) -> List[str]:
     """Lowercase, strip punctuation, split into words.
 
@@ -83,15 +87,23 @@ def _normalise_for_wer(text: str) -> List[str]:
     return re.sub(r"[^\w\s]", " ", text.lower()).split()
 
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 def calculate_wer(reference: str, hypothesis: str) -> float:
     """
     Computes Word Error Rate (WER) using word-level Levenshtein distance.
     WER = (Substitutions + Deletions + Insertions) / Total_Reference_Words
+<<<<<<< HEAD
 
     Punctuation and casing are normalised away first; see _normalise_for_wer.
     """
     ref_words = _normalise_for_wer(reference)
     hyp_words = _normalise_for_wer(hypothesis)
+=======
+    """
+    ref_words = reference.strip().lower().split()
+    hyp_words = hypothesis.strip().lower().split()
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     
     if not ref_words:
         return 0.0 if not hyp_words else 1.0

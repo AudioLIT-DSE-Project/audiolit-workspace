@@ -43,6 +43,9 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+<<<<<<< HEAD
 
 volumes:
   lit-mongo-data:
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

@@ -54,6 +54,7 @@ test.beforeEach(async () => {
   );
 });
 
+<<<<<<< HEAD
 /**
  * Suppress the first-run quick-start dialog (LIT-261).
  *
@@ -74,6 +75,8 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 /** Click the first dataset row and wait for the workspace to bind to it. */
 async function selectFirstClip(page: Page): Promise<string> {
   await page.goto("/");

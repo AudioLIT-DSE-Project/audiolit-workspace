@@ -326,14 +326,23 @@ async def serve_dataset_file(
         }
         media_type = media_type_map.get(file_extension, 'audio/*')
         
+<<<<<<< HEAD
         # LIT-223: remove the route-level Access-Control-Allow-Origin: "*" -
         # CORS is the app's CORSMiddleware's job, with a restricted origin allow-list.
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         return FileResponse(
             path=file_path,
             media_type=media_type,
             headers={
                 'Accept-Ranges': 'bytes',
                 'Cache-Control': 'public, max-age=3600',
+<<<<<<< HEAD
+=======
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                'Access-Control-Allow-Headers': 'Range, Accept-Encoding',
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
                 'Content-Disposition': f'inline; filename="{filename}"'
             }
         )

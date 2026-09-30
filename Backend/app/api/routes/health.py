@@ -2,7 +2,10 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 from ...infrastructure import redis as redis_module
+<<<<<<< HEAD
 from ...infrastructure import metrics as metrics_module
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 router = APIRouter()
 
@@ -51,6 +54,7 @@ async def health_workers():
     except Exception as e:
         return JSONResponse({"status": "degraded", "detail": str(e)}, status_code=500)
 
+<<<<<<< HEAD
 
 def _cuda_state() -> dict:
     """Lazily imported so a CPU-only box (or when torch is not installed) never
@@ -119,3 +123,5 @@ async def operational_metrics():
         "gpu": gpu,
     }
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

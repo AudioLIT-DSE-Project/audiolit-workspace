@@ -90,6 +90,7 @@ async def post_batch_warmup(req: BatchWarmupRequest):
         conn = get_redis_connection()
         if conn:
             conn.set(f"job_progress_{job_id}", json.dumps({
+<<<<<<< HEAD
                 "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0,
                 # The dataset is recorded on the job itself so a client that has
                 # lost its job id (page reload, tab discard) can rediscover the
@@ -97,6 +98,9 @@ async def post_batch_warmup(req: BatchWarmupRequest):
                 # dataset it belongs to. See GET /inference/warmup/active.
                 "dataset": req.dataset,
                 "model": req.model,
+=======
+                "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
             }), ex=86400)
     except Exception as e:
         logger.warning(f"Could not initialize Redis progress for job {job_id}: {e}")
@@ -129,6 +133,7 @@ async def post_batch_warmup(req: BatchWarmupRequest):
     return {"job_id": job_id, "status": "running", "message": "Batch warmup started"}
 
 
+<<<<<<< HEAD
 @router.get("/inference/warmup/active")
 async def list_active_warmups():
     """Warmup runs that are still in flight, so a client can reattach to one.
@@ -179,6 +184,8 @@ async def list_active_warmups():
         return {"active_job_id": None, "jobs": [], "status": "error", "error": str(e)}
 
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 @router.get("/inference/progress/{job_id}")
 async def get_job_progress(job_id: str):
     import json

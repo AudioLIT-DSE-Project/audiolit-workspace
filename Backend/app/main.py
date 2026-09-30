@@ -10,12 +10,15 @@ from .api.routes import session as session_routes, results as results_routes, in
 from .api.routes import datasets as datasets_routes, saliency as saliency_routes, perturbations as perturbations_routes, dataset_management as dataset_management_routes, debug as debug_routes
 from .api.routes import tasks as tasks_routes
 from .api.routes import models as models_routes, acoustic as acoustic_routes, evaluation as evaluation_routes
+<<<<<<< HEAD
 from .api.routes import metrics as metrics_routes
 from .infrastructure.logging_config import configure_logging
 
 # One call at startup: every audiolit.* log becomes a single JSON line
 # (LIT-259). Workers call the same function in `run_worker`.
 configure_logging()
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="LIT for Voice – API")
@@ -78,4 +81,7 @@ app.include_router(debug_routes.router, tags=["Debug"])
 app.include_router(models_routes.router, tags=["Models"])
 app.include_router(acoustic_routes.router, tags=["Acoustic"])
 app.include_router(evaluation_routes.router, tags=["Evaluation"])
+<<<<<<< HEAD
 app.include_router(metrics_routes.router, tags=["Metrics"])
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

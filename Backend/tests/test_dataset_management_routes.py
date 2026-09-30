@@ -17,7 +17,10 @@ real on-disk state.
 from __future__ import annotations
 
 import io
+<<<<<<< HEAD
 from urllib.parse import quote
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 import numpy as np
 import pytest
@@ -436,6 +439,7 @@ class TestGroundTruthUpload:
         )
         meta = await client.get("/upload/dataset/gt-none/metadata", cookies=cookies)
         assert "ground_truth" not in meta.json()["files"][0]
+<<<<<<< HEAD
 
 
 class TestLIT223CrossSessionAndCorsRemediation:
@@ -564,3 +568,5 @@ class TestLIT223CrossSessionAndCorsRemediation:
 
         md = await client.get(f"/{quote(dsn, safe='')}/metadata", cookies=cookies)
         assert md.status_code == 200
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

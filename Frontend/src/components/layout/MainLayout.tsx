@@ -12,12 +12,15 @@ import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
+<<<<<<< HEAD
 import { QuickStartDialog, readQuickStartDismissed } from "./QuickStartDialog";
 import {
   readActiveWarmupJobId,
   writeActiveWarmupJobId,
   clearActiveWarmupJobId,
 } from "@/lib/warmupJob";
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 interface UploadedFile {
   file_id: string;
@@ -93,6 +96,7 @@ export const MainLayout = () => {
   const { state, result } = useTaskStatus(activeTaskId);
 
   // Global Warmup Runner State
+<<<<<<< HEAD
   const [isQuickStartOpen, setIsQuickStartOpen] = useState(false);
   // Auto-open once per browser, gated by localStorage - never runs a second
   // time in the same session so it doesn't re-fight a user who reopened it
@@ -101,11 +105,14 @@ export const MainLayout = () => {
     if (!readQuickStartDismissed()) setIsQuickStartOpen(true);
   }, []);
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
   const [isWarmupModalOpen, setIsWarmupModalOpen] = useState(false);
   const [warmupJobId, setWarmupJobId] = useState<string | null>(null);
   const [warmupProgress, setWarmupProgress] = useState<WarmupProgress | null>(null);
   const [isStartingWarmup, setIsStartingWarmup] = useState(false);
   const [isWarmupMinimized, setIsWarmupMinimized] = useState(false);
+<<<<<<< HEAD
   // Dataset the running job belongs to, which is not necessarily the one
   // currently selected in the UI when we reattach to a job after a reload.
   const [warmupDataset, setWarmupDataset] = useState<string | null>(null);
@@ -162,6 +169,8 @@ export const MainLayout = () => {
     reattach();
     return () => { cancelled = true; };
   }, []);
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
   // Poll for Warmup Progress
   useEffect(() => {
@@ -173,6 +182,7 @@ export const MainLayout = () => {
         if (response.ok) {
           const data = await response.json();
           setWarmupProgress(data);
+<<<<<<< HEAD
           if (data.dataset) setWarmupDataset(data.dataset);
           if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
             clearInterval(interval);
@@ -184,6 +194,10 @@ export const MainLayout = () => {
             // The progress record expired or was flushed; nothing to track.
             clearInterval(interval);
             clearActiveWarmupJobId();
+=======
+          if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
+            clearInterval(interval);
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
           }
         }
       } catch (err) {
@@ -211,10 +225,13 @@ export const MainLayout = () => {
       if (response.ok) {
         const data = await response.json();
         setWarmupJobId(data.job_id);
+<<<<<<< HEAD
         setWarmupDataset(dataset);
         // Persisted immediately: if the tab is reloaded or discarded a second
         // later, this is what lets the banner and the cancel button come back.
         writeActiveWarmupJobId(data.job_id);
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
       }
     } catch (err) {
       console.error("Failed to start batch warmup:", err);
@@ -230,10 +247,13 @@ export const MainLayout = () => {
         method: "POST",
       });
       setWarmupProgress(prev => prev ? { ...prev, status: 'cancelling' } : null);
+<<<<<<< HEAD
       // The worker checks the cancel flag before each file, so the run is not
       // dead yet; the id stays persisted until polling observes a terminal
       // status, otherwise a reload during the cancelling window would lose
       // track of a job that is still working through its current file.
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     } catch (err) {
       console.error("Failed to cancel warmup:", err);
     }
@@ -704,10 +724,14 @@ export const MainLayout = () => {
           selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
           onWarmupClick={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
           warmupJobId={warmupJobId}
+<<<<<<< HEAD
           onQuickStartClick={() => setIsQuickStartOpen(true)}
         />
 
         <QuickStartDialog open={isQuickStartOpen} onOpenChange={setIsQuickStartOpen} />
+=======
+        />
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         
         {/* Global Dataset Warmup Modal (Confirmation & Active Progress) */}
         <WarmupModal
@@ -728,6 +752,7 @@ export const MainLayout = () => {
         <WarmupStatusBanner
           warmupJobId={warmupJobId}
           warmupProgress={warmupProgress}
+<<<<<<< HEAD
           dataset={warmupDataset || effectiveDataset || dataset}
           isMinimized={isWarmupMinimized || !isWarmupModalOpen}
           onExpand={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
@@ -741,6 +766,13 @@ export const MainLayout = () => {
             setWarmupProgress(null);
             setWarmupDataset(null);
           }}
+=======
+          dataset={effectiveDataset || dataset}
+          isMinimized={isWarmupMinimized || !isWarmupModalOpen}
+          onExpand={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
+          onCancel={handleCancelWarmup}
+          onDismiss={() => { setWarmupJobId(null); setWarmupProgress(null); }}
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         />
         <div className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">

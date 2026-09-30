@@ -377,7 +377,11 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                           return (
                             <Badge
                               variant="outline"
+<<<<<<< HEAD
                               className={complete ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" : "bg-amber-500/10 text-amber-700 border-amber-500/20"}
+=======
+                              className={complete ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" : "bg-amber-500/10 text-amber-600 border-amber-500/20"}
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
                             >
                               Ground truth: {withGroundTruth}/{dataset.total_files}
                             </Badge>

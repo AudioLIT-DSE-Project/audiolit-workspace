@@ -26,7 +26,10 @@ import json
 import logging
 import os
 import time
+<<<<<<< HEAD
 from datetime import datetime, timezone
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence
@@ -40,8 +43,11 @@ from ..infrastructure.rq_connection import (
     get_redis_connection,
     get_worker_redis_connection,
 )
+<<<<<<< HEAD
 from ..infrastructure.logging_config import configure_logging
 from ..infrastructure import metrics as metrics_module
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
 logger = logging.getLogger("audiolit.orchestration")
 
@@ -207,6 +213,7 @@ def _current_job_id() -> str:
     return job.id if job is not None else "unknown"
 
 
+<<<<<<< HEAD
 # LIT-259: where each task function keeps its ``model_id`` argument, for the
 # structured task-event logs. The slot is the *only* argument ever read - never
 # the ``audio_ref`` position (SR6: no audio identities, filenames, session ids
@@ -234,6 +241,8 @@ def _task_model_id(job: Job) -> str | None:
     return str(value) if value is not None else None
 
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 # --------------------------------------------------------------------------- #
 # Worker
 # --------------------------------------------------------------------------- #
@@ -315,6 +324,7 @@ class AudioLITWorker(SimpleWorker):
         finally:
             _WORKER_CTX = None
 
+<<<<<<< HEAD
     def _task_event_extra(
         self,
         job: Job,
@@ -356,12 +366,15 @@ class AudioLITWorker(SimpleWorker):
         except Exception:
             logger.debug("task.failure.metric_record_failed", exc_info=True)
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     def perform_job(self, job: Job, queue: Queue, *args: Any, **kwargs: Any) -> Any:
         publish_progress(job.id, "PROCESSING", {"family": self.family.value})
         started = time.monotonic()
         try:
             assert self._ctx is not None
             self._ctx.load_libraries()
+<<<<<<< HEAD
             try:
                 metrics_module.record_task(
                     get_redis_connection(), self.family.value, "processing"
@@ -388,18 +401,31 @@ class AudioLITWorker(SimpleWorker):
             logger.info("task.success", extra=self._task_event_extra(job, queue, duration_s))
             publish_progress(
                 job.id, "SUCCESS", {"duration_s": round(duration_s, 3)}
+=======
+            result = super().perform_job(job, queue, *args, **kwargs)
+            publish_progress(
+                job.id, "SUCCESS", {"duration_s": round(time.monotonic() - started, 3)}
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
             )
             return result
         except Exception as exc:
             # RQ retries a transient failure a few times before giving up, and the
             # user is told which of the two happened (SAD §11.1).
+<<<<<<< HEAD
             state = "RETRYING" if getattr(job, "retries_left", 0) > 0 else "FAILURE"
             self._record_task_failure(job, queue, started, str(exc))
+=======
+            state = "RETRYING" if job.retries_left else "FAILURE"
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
             publish_progress(
                 job.id,
                 state,
                 {"duration_s": round(time.monotonic() - started, 3), "error": str(exc)},
             )
+<<<<<<< HEAD
+=======
+            logger.exception("job.failed id=%s", job.id)
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
             raise
 
     def handle_job_success(self, *args: Any, **kwargs: Any) -> Any:
@@ -455,7 +481,10 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     cannot start and double the VRAM footprint (SAD C2). The CPU-only mutation
     family is exempt and may scale out.
     """
+<<<<<<< HEAD
     configure_logging()
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
     conn = get_redis_connection()
 
@@ -501,6 +530,7 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
 # per-family queues is the remaining step of LIT-127's follow-on, and needs the
 # `/upload` contract change that LIT-227/LIT-157 deliberately deferred.
 
+<<<<<<< HEAD
 # --------------------------------------------------------------------------- #
 # Metadata write-through (SRS §3.10 / SAD §9 / SAD §11.1, LIT-257)
 # --------------------------------------------------------------------------- #
@@ -664,6 +694,8 @@ def _write_bias_report(model_id: str, report: Any) -> None:
             logger.warning("metadata.write_failed collection=bias_reports: %s", exc)
 
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "asr.running", {"model": model_id})
@@ -800,11 +832,15 @@ def accent_bias_task(
         model_id=model_id,
         samples_per_cohort=samples_per_cohort,
     )
+<<<<<<< HEAD
     _write_bias_report(model_id, report)
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     publish_progress(_current_job_id(), "accent_bias.completed", {"model": model_id})
     return report.to_json_dict()
 
 
+<<<<<<< HEAD
 def aggregator_task(
     family_job_ids: Sequence[str],
     cache_key: str | None,
@@ -816,6 +852,12 @@ def aggregator_task(
     combined result is assembled it is written through to the durable metadata
     tier *before* the Redis cache write (SAD §6.2 write order), so metadata
     lag can never shadow the cache (LIT-257).
+=======
+def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dict[str, Any]:
+    """Fan-in: combine the family jobs' results once they have all finished.
+
+    A failed sibling never loses the others' results (SAD §11.1).
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     """
     conn = get_redis_connection()
     combined: dict[str, Any] = {"tasks": {}, "cache_key": cache_key, "schema_version": "1.0"}
@@ -827,8 +869,11 @@ def aggregator_task(
         result = job.result or {}
         combined["tasks"][result.get("task", "unknown")] = result
 
+<<<<<<< HEAD
     _write_analysis_metadata(combined, cache_key, audio_ref)
 
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
     if cache_key is not None:
         # TODO(LIT-163): write the combined result to the content-addressed cache.
         logger.info("aggregator.fanin cache_key=%s", cache_key)
@@ -903,7 +948,10 @@ def enqueue_multitask_analysis(
         aggregator_task,
         [j.id for j in family_job_objs],
         cache_key,
+<<<<<<< HEAD
         audio_ref,
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         depends_on=family_job_objs,
         job_timeout=DEFAULT_AGGREGATOR_TIMEOUT,
         result_ttl=DEFAULT_RESULT_TTL,
@@ -1118,10 +1166,13 @@ def run_batch_dataset_warmup_task(
                     "percent": round((i / total) * 100, 1) if total > 0 else 0,
                     "eta_seconds": eta_sec,
                     "eta_formatted": eta_str,
+<<<<<<< HEAD
                     # Carried on every update so a client reattaching mid-run
                     # (GET /inference/warmup/active) knows what is being warmed.
                     "dataset": dataset,
                     "model": model,
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
                 }
                 conn.set(f"job_progress_{job_id}", json.dumps(p_data), ex=86400)
 
@@ -1322,8 +1373,11 @@ def run_batch_dataset_warmup_task(
         "total": total,
         "current_file": "Done" if not cancelled else "Cancelled",
         "status": final_status,
+<<<<<<< HEAD
         "dataset": dataset,
         "model": model,
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
         "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
         "cached_files": warmed_files,
         "failed_subtasks": len(failures),

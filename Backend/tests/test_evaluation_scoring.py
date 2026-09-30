@@ -117,6 +117,7 @@ def test_compute_multi_task_performance_summary():
     assert summary["evaluation_summary"]["status"] == "completed"
     assert summary["evaluation_summary"]["asr_accent_bias_wer"]["overall_mean_wer"] == 0.12
     assert summary["evaluation_summary"]["faithfulness_deletion_audit"]["mean_deletion_score"] == 0.35
+<<<<<<< HEAD
 
 
 class TestWerNormalisation:
@@ -159,3 +160,5 @@ class TestWerNormalisation:
             hypothesis_transform=_WER_TRANSFORM,
         )
         assert calculate_wer(ref, hyp) == pytest.approx(profiler_wer, abs=1e-4)
+=======
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23

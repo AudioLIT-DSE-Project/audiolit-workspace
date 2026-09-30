@@ -22,6 +22,7 @@ All colors MUST be HSL.
     --popover: 0 0% 100%;
     --popover-foreground: 222 25% 18%;
 
+<<<<<<< HEAD
     /* Primary: AudioLIT Teal.
        Darkened from 32% to 26% to meet WCAG 2.1 AA (SRS 3.2.3). At 32% the
        measured contrast was 3.80:1 for white text on primary and 3.37:1 for
@@ -33,6 +34,12 @@ All colors MUST be HSL.
     --primary: 173 80% 26%;
     --primary-foreground: 0 0% 100%;
     --primary-hover: 173 80% 21%;
+=======
+    /* Primary: AudioLIT Teal */
+    --primary: 173 80% 32%;
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 173 80% 27%;
+>>>>>>> f0e1a7a7af42d0b62aaf3a1a15341e4eb1c2fb23
 
     --secondary: 210 20% 93%;
     --secondary-foreground: 222 25% 18%;
