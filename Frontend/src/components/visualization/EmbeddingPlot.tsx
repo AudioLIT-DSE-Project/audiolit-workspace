@@ -497,7 +497,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Add compact annotation
   if (embeddingData) {
     layout.annotations = [{
-      text: `${embeddingData.total_files} files â€¢ ${is3D ? '3D' : '2D'}`,
+      text: `${embeddingData.total_files} files · ${is3D ? '3D' : '2D'}`,
       xref: 'paper',
       yref: 'paper',
       x: 0.02,

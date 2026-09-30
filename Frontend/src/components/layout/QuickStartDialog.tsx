@@ -27,7 +27,7 @@ const TRACKS = [
     steps: [
       <>Set the toolbar's <strong>Model</strong> dropdown to <strong>MelodyMachine (Deepfake)</strong> or <strong>Wav2Vec2 XLSR (Deepfake)</strong>.</>,
       <>Set <strong>Dataset</strong> to <strong>ASVspoof 2021</strong>, then pick a clip from the dataset table below.</>,
-      <>Open the <strong>Saliency</strong> tab — the bona-fide/spoof verdict badge and the Deepfake Forensics timeline appear there.</>,
+      <>Open the <strong>Saliency</strong> tab to view the bona-fide/spoof verdict badge and the Deepfake Forensics timeline.</>,
       <>Click <strong>GRADCAM</strong>, <strong>INTEGRATED GRADIENTS</strong>, <strong>LIME</strong>, or <strong>SHAP</strong> to generate an attribution overlay for the verdict.</>,
     ],
   },
@@ -48,7 +48,7 @@ const TRACKS = [
       <>Set the toolbar's <strong>Model</strong> dropdown to <strong>Whisper Base (ASR)</strong>.</>,
       <>Click <strong>Advanced</strong> (next to the tab bar) to reveal the <strong>Accent Bias</strong> tab, then open it.</>,
       <>Click <strong>Run Accent-Bias Diagnostic (10 samples/cohort)</strong>.</>,
-      <>Read the bar chart — accent cohorts are ranked worst-to-best by mean Word Error Rate over L2-ARCTIC.</>,
+      <>Read the bar chart: accent cohorts are ranked worst-to-best by mean Word Error Rate over L2-ARCTIC.</>,
     ],
   },
   {
@@ -58,7 +58,7 @@ const TRACKS = [
       <>Set the toolbar's <strong>Model</strong> dropdown to <strong>Wav2Vec2 (SER)</strong>.</>,
       <>Click <strong>Advanced</strong>, then open the <strong>Faithfulness</strong> tab.</>,
       <>Choose an attribution method (Grad-CAM, Integrated Gradients, LIME, or SHAP) and click <strong>Run Audit</strong>.</>,
-      <>Read the AUDC and verdict badges — a real, measured degradation curve, not a simulated estimate.</>,
+      <>Read the AUDC and verdict badges: a real, measured degradation curve, not a simulated estimate.</>,
     ],
   },
 ];

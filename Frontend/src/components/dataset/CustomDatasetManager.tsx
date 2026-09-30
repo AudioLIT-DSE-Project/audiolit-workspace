@@ -560,21 +560,21 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                     <ul className="list-disc list-inside space-y-1">
                       <li>
                         Upload a CSV with one column for the audio filename and one for the
-                        ground truth text/label — e.g. <code className="bg-blue-100 px-1 rounded">filename,ground_truth</code>.
+                        ground truth text/label (e.g. <code className="bg-blue-100 px-1 rounded">filename,ground_truth</code>).
                         Column names are flexible: <code className="bg-blue-100 px-1 rounded">file</code>/<code className="bg-blue-100 px-1 rounded">audio_file</code> also
                         work for the filename column, and <code className="bg-blue-100 px-1 rounded">transcript</code>/<code className="bg-blue-100 px-1 rounded">label</code>/<code className="bg-blue-100 px-1 rounded">text</code> also work for the ground-truth column.
                       </li>
                       <li>
-                        Matching is by filename only (extension and case don't matter — <code className="bg-blue-100 px-1 rounded">harvard.wav</code>,{" "}
+                        Matching is by filename only (extension and case don't matter, e.g. <code className="bg-blue-100 px-1 rounded">harvard.wav</code>,{" "}
                         <code className="bg-blue-100 px-1 rounded">Harvard</code>, and <code className="bg-blue-100 px-1 rounded">HARVARD.WAV</code> all match the same file).
                       </li>
                       <li>
-                        <span className="font-medium">Order doesn't matter</span> — upload the CSV before or after the audio
+                        <span className="font-medium">Order doesn't matter</span>: upload the CSV before or after the audio
                         files. Matching runs immediately for files already in the dataset, and automatically for any
                         audio file you add afterwards.
                       </li>
                       <li>
-                        <span className="font-medium">Uploading a new CSV replaces the old one</span> for this dataset —
+                        <span className="font-medium">Uploading a new CSV replaces the old one</span> for this dataset:
                         it does not merge. A file matched by an earlier CSV but missing from the new one loses its
                         ground truth.
                       </li>
@@ -632,7 +632,7 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                     {groundTruthResult.unmatched_csv_rows.length > 0 && (
                       <p>
                         {groundTruthResult.unmatched_csv_rows.length} row(s) in the CSV didn't match any file
-                        (yet — they'll match automatically if you upload that audio file later):{" "}
+                        (they will match automatically if you upload that audio file later):{" "}
                         <span className="font-mono">{groundTruthResult.unmatched_csv_rows.join(", ")}</span>
                       </p>
                     )}
