@@ -61,9 +61,18 @@ export const AttentionVisualization = ({ selectedFile, model, dataset }: Attenti
         head: selectedHead
       };
 
-      // Handle file path resolution following your patterns
-      if (typeof selectedFile === 'string') {
-        // Dataset file
+      const sfAny = selectedFile as any;
+      const isUploadedFile = typeof selectedFile === 'object' && selectedFile?.file_path && (
+        dataset?.startsWith("custom:") ||
+        selectedFile.file_path.includes("uploads/") ||
+        selectedFile.file_path.includes("uploads\\") ||
+        selectedFile.file_path.includes("live_recording") ||
+        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
+      );
+
+      if (isUploadedFile) {
+        requestBody.file_path = selectedFile.file_path;
+      } else if (typeof selectedFile === 'string') {
         if (dataset) {
           requestBody.dataset = dataset;
           requestBody.dataset_file = selectedFile;
@@ -71,13 +80,10 @@ export const AttentionVisualization = ({ selectedFile, model, dataset }: Attenti
           throw new Error("Dataset required for dataset file selection");
         }
       } else if (selectedFile?.file_path) {
-        // Check if we have a dataset - if so, this is a dataset file
-        if (dataset) {
-          // This is a dataset file (either custom or standard dataset)
+        if (dataset && dataset !== 'custom') {
           requestBody.dataset = dataset;
-          requestBody.dataset_file = selectedFile.file_path;
+          requestBody.dataset_file = selectedFile.filename || selectedFile.file_path;
         } else {
-          // Regular uploaded file
           requestBody.file_path = selectedFile.file_path;
         }
       } else {

@@ -48,13 +48,19 @@ interface PerturbationToolsProps {
 }
 
 const getAudioUrl = (selectedFile: UploadedFile, dataset?: string, originalDataset?: string): string => {
-  const isUploadedFile = selectedFile.file_path && (
-    selectedFile.file_path.includes('uploads/') || 
-    selectedFile.file_path.includes('uploads\\') ||
-    selectedFile.message === "Perturbed file" ||
-    selectedFile.message === "File uploaded successfully" ||
-    selectedFile.message === "File uploaded and processed successfully"
-  ) && selectedFile.message !== "Selected from dataset";
+  const sfAny = selectedFile as any;
+  const isUploadedFile = Boolean(
+    selectedFile.file_path && (
+      dataset?.startsWith("custom:") ||
+      selectedFile.file_path.includes('uploads/') || 
+      selectedFile.file_path.includes('uploads\\') ||
+      selectedFile.file_path.includes('live_recording') ||
+      sfAny?.message === "Perturbed file" ||
+      sfAny?.message === "File uploaded successfully" ||
+      sfAny?.message === "File uploaded and processed successfully" ||
+      (sfAny?.message && !sfAny.message.includes("Selected from"))
+    )
+  );
   
   if (isUploadedFile) {
     return `${API_BASE}/upload/file/${selectedFile.file_id}`;
@@ -589,13 +595,19 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       if (selectedPerturbations.pitchShift) perturbations.push({ type: "pitch_shift", params: { pitch_shift_semitones: pitchShift[0] } });
       if (selectedPerturbations.timeStretch) perturbations.push({ type: "time_stretch", params: { stretch_factor: timeStretch[0] / 100.0 } });
 
-      const isUploadedFile = selectedFile.file_path && (
-        selectedFile.file_path.includes('uploads/') || 
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && selectedFile.message !== "Selected from dataset";
+      const sfAny = selectedFile as any;
+      const isUploadedFile = Boolean(
+        selectedFile.file_path && (
+          dataset?.startsWith("custom:") ||
+          selectedFile.file_path.includes('uploads/') || 
+          selectedFile.file_path.includes('uploads\\') ||
+          selectedFile.file_path.includes('live_recording') ||
+          sfAny?.message === "Perturbed file" ||
+          sfAny?.message === "File uploaded successfully" ||
+          sfAny?.message === "File uploaded and processed successfully" ||
+          (sfAny?.message && !sfAny.message.includes("Selected from"))
+        )
+      );
 
       // Enqueue mutation job via RQ
       const response = await fetch(`${API_BASE}/api/inference/mutation`, {
@@ -637,13 +649,19 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
     try {
       const perturbation = buildFrameMutationPayload(activeFrame, frameMutationType, frameNoiseLevel[0]);
 
-      const isUploadedFile = selectedFile.file_path && (
-        selectedFile.file_path.includes('uploads/') ||
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && selectedFile.message !== "Selected from dataset";
+      const sfAny = selectedFile as any;
+      const isUploadedFile = Boolean(
+        selectedFile.file_path && (
+          dataset?.startsWith("custom:") ||
+          selectedFile.file_path.includes('uploads/') || 
+          selectedFile.file_path.includes('uploads\\') ||
+          selectedFile.file_path.includes('live_recording') ||
+          sfAny?.message === "Perturbed file" ||
+          sfAny?.message === "File uploaded successfully" ||
+          sfAny?.message === "File uploaded and processed successfully" ||
+          (sfAny?.message && !sfAny.message.includes("Selected from"))
+        )
+      );
 
       const response = await fetch(`${API_BASE}/api/inference/mutation`, {
         method: "POST",

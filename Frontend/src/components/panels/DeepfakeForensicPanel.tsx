@@ -42,11 +42,24 @@ export const DeepfakeForensicPanel = ({
   const [loading, setLoading] = useState(false);
   const { currentTime, seek } = usePlayback();
 
-  const requestBody = useCallback((cacheOnly: boolean) => (
-    dataset && !dataset.startsWith("custom:")
+  const requestBody = useCallback((cacheOnly: boolean) => {
+    const sfAny = selectedFile as any;
+    const isUploadedFile = Boolean(
+      selectedFile?.file_path && (
+        dataset?.startsWith("custom:") ||
+        selectedFile.file_path.includes("uploads/") ||
+        selectedFile.file_path.includes("uploads\\") ||
+        selectedFile.file_path.includes("live_recording") ||
+        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
+      )
+    );
+    if (isUploadedFile) {
+      return { file_path: selectedFile?.file_path, cache_only: cacheOnly };
+    }
+    return dataset && !dataset.startsWith("custom:")
       ? { dataset, dataset_file: selectedFile?.filename, cache_only: cacheOnly }
-      : { file_path: selectedFile?.file_path, cache_only: cacheOnly }
-  ), [dataset, selectedFile?.filename, selectedFile?.file_path]);
+      : { file_path: selectedFile?.file_path, cache_only: cacheOnly };
+  }, [dataset, selectedFile]);
 
   const load = useCallback(async (cacheOnly: boolean) => {
     setLoading(true);

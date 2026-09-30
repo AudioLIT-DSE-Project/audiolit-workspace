@@ -47,13 +47,19 @@ const getRequestRef = (
   originalDataset: string | undefined,
 ) => {
   if (selectedFile) {
-    const isUploadedFile = selectedFile.file_path && (
-      selectedFile.file_path.includes('uploads/') ||
-      selectedFile.file_path.startsWith('uploads/') ||
-      selectedFile.message === "Perturbed file" ||
-      selectedFile.message === "File uploaded successfully" ||
-      selectedFile.message === "File uploaded and processed successfully"
-    ) && !selectedFile.message.includes("Selected from");
+    const sfAny = selectedFile as any;
+    const isUploadedFile = Boolean(
+      selectedFile.file_path && (
+        dataset?.startsWith("custom:") ||
+        selectedFile.file_path.includes('uploads/') ||
+        selectedFile.file_path.includes('uploads\\') ||
+        selectedFile.file_path.includes('live_recording') ||
+        sfAny?.message === "Perturbed file" ||
+        sfAny?.message === "File uploaded successfully" ||
+        sfAny?.message === "File uploaded and processed successfully" ||
+        (sfAny?.message && !sfAny.message.includes("Selected from"))
+      )
+    );
 
     if (isUploadedFile) return { file_path: selectedFile.file_path };
     const datasetToUse = originalDataset && originalDataset !== "custom" ? originalDataset : dataset;
