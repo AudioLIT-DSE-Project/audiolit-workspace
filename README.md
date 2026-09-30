@@ -1,309 +1,187 @@
-# AudioLIT — Interpretability Workbench for Speech & Audio ML
+# AudioLIT
 
-Core monorepo for **AudioLIT** — an interpretability workbench for Automatic Speech
-Recognition (ASR), Speech Emotion Recognition (SER), and Audio Deepfake Detection
-(ADD), extending the **ECHO 1.0** baseline (`AudioLIT-DSE-Project/ECHO`) in place.
+An interpretability workbench for speech models. Upload or record a clip, run
+speech recognition, emotion recognition and deepfake detection on it, and see
+**why** each model answered the way it did — attribution heatmaps over the
+spectrogram, pitch and loudness contours, counterfactual edits, and an audit of
+whether the explanations are honest.
 
-**AudioLIT** is an open-source, multi-task interpretability workbench for Automatic Speech Recognition (**ASR**), Speech Emotion Recognition (**SER**), and Audio Deepfake Detection (**ADD**). It extends the **ECHO 1.0** baseline (`AudioLIT-DSE-Project/ECHO`) into a production-grade explanatory environment equipped with:
-
-- **Asynchronous Task Architecture**: Non-blocking RQ (Redis Queue) background execution for heavy PyTorch XAI workloads.
-- **Explainable AI (XAI)**: Grad-CAM attribution heatmaps, Integrated Gradients, and Layer-Head Attention Pair Extraction.
-- **Dataset Management & Warmup**: Automated dataset pre-caching engine for sub-millisecond XAI visualization.
-- **Model Ingestion Registry**: Hugging Face `.safetensors` model resolution for Whisper and Wav2Vec2 architectures.
-- **Forensic Audio Diagnostics**: Acoustic wave profiling, latent space projection, canvas-driven audio perturbations, and quantitative deletion-based faithfulness auditing.
+Runs entirely on your own machines. No audio leaves your server.
 
 ---
 
-## 📂 Repository Layout
+## What it does
 
-```
-audiolit-workspace/
-├── docs/        # Authoritative project planning documents (SAD, SRS, Errata)
-├── Backend/     # FastAPI backend service, RQ worker fabric, & domain ML engines
-│   ├── app/
-│   │   ├── api/             # FastAPI gateway & HTTP routes (predictions, saliency, datasets)
-│   │   ├── orchestration/   # RQ background workers, Task Orchestrator & warmup runner
-│   │   ├── domain/          # Model loader, XAI engines (Grad-CAM, SHAP), & acoustic profiler
-│   │   ├── infrastructure/  # Redis cache manager, dataset loaders, & settings
-│   │   └── core/            # Redis cache manager & app configuration
-│   └── data/                # Benchmark datasets (Common Voice, RAVDESS, CREMA-D)
-└── Frontend/    # React 18 + Vite web interface with canvas XAI overlays & Plotly projections
-```
+| Capability | What you get |
+|---|---|
+| **Speech recognition (ASR)** | Transcription with Whisper, word-level timings |
+| **Emotion recognition (SER)** | Seven emotion classes with a full probability distribution |
+| **Deepfake detection (ADD)** | Bona-fide vs synthetic, plus a per-second confidence timeline showing *where* in a clip the synthesis is |
+| **Attribution overlays** | Four methods — Grad-CAM, Integrated Gradients, LIME, SHAP — drawn over the spectrogram |
+| **Acoustic profiling** | Pitch (F0) and loudness (RMS) contours on a shared time axis with the attribution |
+| **Counterfactual editing** | Mute, filter, add noise, shift pitch or stretch time on a selected region, and see how the prediction moves |
+| **Latent projection** | PCA, t-SNE and UMAP views of the model's internal space, colourable by label |
+| **Accent-bias profiling** | Word error rate per accent cohort, with the disparity between best and worst |
+| **Faithfulness auditing** | Measures whether an explanation is honest by masking what it highlights and re-running the model |
+| **Live recording** | Record in the browser; it is converted to 16 kHz mono WAV before upload |
+| **Custom models** | Any Hugging Face Whisper or Wav2Vec2 checkpoint, loaded safely and version-pinned |
 
-For authoritative architectural details, refer to [`docs/README.md`](docs/README.md), [`docs/SAD.md`](docs/SAD.md), and [`docs/SRS.md`](docs/SRS.md).
-
----
-
-## 🛠️ System Prerequisites
-
-Before running AudioLIT locally, ensure your system has:
-- **Python**: `3.11` or higher
-- **Node.js**: `18.0` or higher (with `npm`)
-- **Redis Server**: `7.0+` (running via Docker or local installation on port `6379`)
-- **FFmpeg**: Required for audio decoding & resampling
-- **MongoDB**: `6.0+` — **optional** (Step 1b); the durable metadata tier degrades gracefully when absent
+Every explanation is labelled `measured`, `fallback` or `unavailable`, so you can
+always tell a real attribution from a stand-in. That distinction is the point of
+the product — see [DEPLOYMENT.md](DEPLOYMENT.md#reading-the-provenance-label).
 
 ---
 
-## 🌐 Run with Docker (full stack)
+## Requirements
 
-The quickest way to bring up the whole system — web UI, FastAPI gateway, RQ
-workers, Redis and MongoDB — is Docker Compose from the repo root:
+| | Minimum | Recommended |
+|---|---|---|
+| OS | Linux, macOS, or Windows 10/11 | Linux |
+| CPU | 4 cores | 8+ cores |
+| RAM | 8 GB | 16 GB |
+| Disk | 20 GB free | 120 GB if you provision the benchmark corpora |
+| GPU | none — CPU works | NVIDIA with 6+ GB VRAM and the NVIDIA Container Toolkit |
+| Software | **Docker** 20.10+ and **Docker Compose** v2 | same |
+| Network | outbound HTTPS to `huggingface.co` on first run, to download model weights | same |
+
+Docker is the only prerequisite. Python and Node are not needed on the host —
+they are inside the images.
+
+**Without a GPU everything works but model operations are slower.** Expect
+2–4 seconds for a transcription and 20–40 seconds for an attribution on CPU,
+against roughly 1 second and 8 seconds on a mid-range GPU. Cached results return
+in milliseconds either way.
+
+---
+
+## Install
 
 ```bash
-docker compose up --build
+git clone <your-repository-url> audiolit
+cd audiolit
+docker compose up --build -d
 ```
 
-Then open **http://127.0.0.1:8080** and run a transcription or explanation on
-a bundled corpus clip. All five containers start together; the worker counts
-on the same Redis, so jobs enqueue and complete without any manual setup
-(`docker compose ps` should show every service healthy).
+First run downloads about 1–2 GB of model weights and takes several minutes.
+They are cached in a Docker volume, so later starts are fast.
 
-- **First run** downloads the models into a named volume (`model-cache`, i.e.
-  `HF_HOME=/models`) and reads corpora from `Backend/data/` — provision those
-  corpora locally as usual, they are not baked into any image.
-- **`.env`-free by design**: Redis/Mongo URLs and the HF cache path come from
-  the compose environment block; no secrets are baked into an image.
-- **GPU machine?** Add the override (needs the NVIDIA Container Toolkit):
+Open **<http://127.0.0.1:8080>**
 
-  ```bash
-  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
-  ```
+> **Use `127.0.0.1`, not `localhost`.** The session cookie is `SameSite=Lax`, and
+> the browser treats `localhost:8080 → 127.0.0.1:8000` as cross-site, so the
+> cookie is dropped and your session silently resets. Ports do not change the
+> site; host names do. This is the single most common setup problem.
 
-- **Persistence**: `docker compose down && docker compose up` keeps
-  downloaded models and Mongo records (named volumes), so nothing re-downloads.
-- **Data in `uploads/`** is a bind mount shared by the gateway and the workers,
-  so a session's files survive restarts and are visible to both.
-- Non-root container user: on Linux hosts, `./uploads` and `./Backend/data`
-  must be readable (and uploads writable) by UID 1000. Docker Desktop
-  (macOS/Windows) handles this transparently.
+### With a GPU
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+```
+
+Requires the NVIDIA Container Toolkit on the host. Only the worker containers
+get the GPU; the gateway, Redis and MongoDB do not need it.
 
 ---
 
-## 🚀 Step-by-Step Execution Guide
+## Verify
 
-### Step 1: Clone the Repository
+Three checks, in order. If all three pass the deployment is sound.
+
+**1. Every service is healthy.**
+
 ```bash
-git clone https://github.com/AudioLIT-DSE-Project/audiolit-workspace.git
-cd audiolit-workspace
+docker compose ps
 ```
 
----
+All five — `redis`, `mongo`, `api`, `worker`, `web` — should read `healthy` or
+`running`. The `worker` healthcheck deliberately requires **all five worker
+families** to be registered, so a partially crashed fleet reads as unhealthy
+rather than green.
 
-### Step 1b: (Optional) Start the MongoDB Metadata Tier
-
-AudioLIT uses MongoDB as an **optional durable metadata tier** (SRS §3.10 / SAD §9):
-it keeps model registrations, analysis records, and accent-bias reports that must
-survive a cache flush or restart. It is **not** required for local development —
-every write-through degrades silently when the tier is off (SRS §3.3.1), so you
-can skip this step and the rest of the guide still works. See
-[`docs/MONGODB_METADATA_TIER.md`](docs/MONGODB_METADATA_TIER.md) for the full
-operations and degradation guide.
+**2. The API answers and reports its dependencies.**
 
 ```bash
-docker run -d --name lit-mongo --rm -p 27017:27017 mongo:6
+curl -s http://127.0.0.1:8000/health
+curl -s http://127.0.0.1:8000/health/workers
 ```
 
-Then tell the backend about it when you start it (Step 3) by setting `MONGO_URL`:
+`/health` reports whether the queue broker is reachable. `/health/workers`
+lists the registered worker families; you should see `asr`, `ser`, `add`, `xai`
+and `mutation`.
+
+**3. A clip goes in and a prediction with an explanation comes out.**
+
+In the browser: click **Upload / Record**, record a few seconds of speech or
+choose a `.wav`, then run an analysis. You should get a transcript, an emotion
+distribution, a deepfake verdict, and an attribution heatmap labelled
+`measured`.
+
+If the heatmap says `fallback`, that is the system being honest rather than
+broken — read [why](DEPLOYMENT.md#reading-the-provenance-label).
+
+### Run the test suite
+
+The suites ship with the release so you can verify your own deployment:
 
 ```bash
-# Windows (PowerShell):
-$env:MONGO_URL = "mongodb://127.0.0.1:27017"
-# Linux / macOS:
-export MONGO_URL="mongodb://127.0.0.1:27017"
-```
+# Backend
+docker compose exec api python -m pytest -q
 
-> **Use `127.0.0.1`, not `localhost`**, in `MONGO_URL` and any `mongosh`
-> connection string on Windows — `localhost` resolves to `::1` (IPv6) first and
-> every fresh connection waits out an IPv6 connect timeout before falling back
-> (measured ~2 s per connection on this repo). Leave `MONGO_URL` unset to run
-> without the tier.
-
----
-
-### Step 2: Start the Redis Infrastructure Broker
-AudioLIT requires a running Redis instance for background RQ task queues, session tracking, and prediction/XAI result caching.
-
-**Option A: Using Docker (Recommended)** — prefer the full stack from the repo root (`docker compose up --build`, see "Run with Docker" above); this Redis-only file is for local development where you run the gateway and workers by hand:
-```bash
-cd Backend
-docker compose up -d
-```
-
-**Option B: Using Local Redis**
-Ensure Redis is running on port `6379`:
-```bash
-redis-server --port 6379
+# API contract, from an independent client
+npx newman run Backend/apitests/AudioLIT.postman_collection.json \
+  --env-var baseUrl=http://127.0.0.1:8000
 ```
 
 ---
 
-### Step 3: Setup & Launch the Backend FastAPI Service
+## Everyday use
 
-1. Create and activate a Python virtual environment:
-   ```bash
-   cd Backend
-   python -m venv .venv
-   
-   # Windows (PowerShell):
-   .venv\Scripts\Activate.ps1
-   # Linux / macOS:
-   source .venv/bin/activate
-   ```
+| Action | Where |
+|---|---|
+| Upload a file or record live | **Upload / Record** in the toolbar |
+| Pick a model | model selector in the toolbar; paste any Hugging Face id for a custom one |
+| Choose which tasks run | ASR / SER / ADD toggles in the toolbar |
+| Switch attribution method | the method tabs above the overlay |
+| Adjust overlay transparency | the opacity slider on the overlay |
+| Edit a region and re-run | **Perturbation** panel; drag a box on the spectrogram |
+| Browse a corpus | **Dataset** panel |
+| See the model's internal space | **Embedding** panel |
 
-2. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Launch the FastAPI server:
-   ```bash
-   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-   ```
-   The backend API will be available at `http://127.0.0.1:8000`.
-
-   > **Windows: use `127.0.0.1`, not `localhost`, for API calls from scripts
-   > and tools.** `--host 0.0.0.0` binds IPv4 only, while Windows resolves
-   > `localhost` to `::1` (IPv6) first — so every *new* TCP connection waits out
-   > an IPv6 connect timeout before falling back. Measured on this repo:
-   > **2063 ms** per fresh connection via `localhost` against **23 ms** via
-   > `127.0.0.1` (a reused keep-alive connection is 13 ms either way, which is
-   > why it hides so easily). `--host ::` is not a fix on Windows: it binds IPv6
-   > *only*, which breaks IPv4 clients. The browser app is unaffected because it
-   > keeps connections alive and its session cookie is `SameSite=Lax`, which
-   > requires the page and the API to share a host name.
-
-   Interactive OpenAPI docs: `http://127.0.0.1:8000/docs`.
+Uploaded audio is deleted automatically after 24 hours by default. Nothing is
+sent anywhere outside your deployment except the one-time model download from
+Hugging Face.
 
 ---
 
-### Step 4: Start the Background RQ Workers
-
-AudioLIT delegates heavy PyTorch inference and XAI attribution tasks to background workers so the API remains responsive.
-
-#### Understanding Worker Task Queues
-There are 5 specialized task queues:
-- **`asr`**: Speech-to-Text transcription & accent bias profiling
-- **`ser`**: Speech Emotion Recognition
-- **`add`**: Audio Deepfake Detection
-- **`xai`**: Grad-CAM saliency heatmaps, Integrated Gradients, & attention weights
-- **`mutation`**: Audio perturbation & downstream faithfulness auditing
-
-#### Option 1: Run All Worker Queues in One Terminal (Recommended)
-Launch a unified multi-worker process listening across all queues:
-```bash
-# From the Backend/ directory with active .venv:
-python -m app.orchestration.worker all
-```
-*Note: The unified launcher automatically purges stale Redis locks upon startup to prevent execution deadlocks.*
-
-#### Option 2: Run Dedicated Family Workers in Separate Terminals
-For distributed setups or fine-grained resource control:
-```bash
-# Terminal 1: ASR Worker
-python -m app.orchestration.worker asr
-
-# Terminal 2: SER Worker
-python -m app.orchestration.worker ser
-
-# Terminal 3: ADD Worker
-python -m app.orchestration.worker add
-
-# Terminal 4: XAI Worker (Saliency & Attention)
-python -m app.orchestration.worker xai
-
-# Terminal 5: Mutation Worker (Perturbation & Faithfulness)
-python -m app.orchestration.worker mutation
-```
-
-#### Worker Health & Monitoring
-Check worker status and active queue depth via HTTP:
-```bash
-curl http://localhost:8000/health/workers
-```
-
-#### Observability: structured JSON task logs & operational metrics
-Worker events are emitted as structured JSON logs (`LOG_FORMAT=json`, the
-default; set `LOG_FORMAT=text` for plain logs) with fields like
-`ts`, `level`, `logger`, `event` (`task.processing` / `task.success` /
-`task.failure`) plus `job_id`, `family`, `queue`, `model_id`, `duration_s`
-and `worker`. Audio file references, transcripts and session identifiers are
-never logged (SR6).
-
-Operational counters (task runs per family, success/failure totals, inference
-duration sums, cache hits/misses) are aggregated in Redis and exposed at:
+## Stop, start, update
 
 ```bash
-curl http://localhost:8000/metrics
+docker compose stop            # stop, keep data
+docker compose start           # start again
+docker compose down            # stop and remove containers (volumes survive)
+docker compose down -v         # also delete cached models and stored metadata
+docker compose logs -f api     # follow the gateway log
 ```
 
-Example response:
+To update:
 
-```json
-{
-  "tasks": { "ser:success": 41, "ser:failed": 2, "asr:success": 63, "total": 106 },
-  "durations": {
-    "ser": { "count": 43, "sum_ms": 312014, "avg_ms": 7256.1 },
-    "asr": { "count": 63, "sum_ms": 887311, "avg_ms": 14084.3 }
-  },
-  "queues": { "asr": 0, "ser": 1, "add": 0, "xai": 0, "mutation": 0 },
-  "cache": { "hits": 512, "misses": 118, "hit_ratio": 0.81 },
-  "gpu": { "cuda_available": false, "device": "cpu", "families_locked": [] }
-}
+```bash
+git pull
+docker compose up --build -d
 ```
 
 ---
 
-### Step 5: Setup & Launch the Frontend Web UI
+## Further reading
 
-1. Open a new terminal and navigate to `Frontend`:
-   ```bash
-   cd Frontend
-   ```
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** — configuration reference, the datasets,
+  security notes, operations, troubleshooting, and how to read a provenance
+  label.
+- `docker-compose.yml` — every service, port and volume, with the reasoning for
+  each setting in comments.
 
-2. Install frontend dependencies:
-   ```bash
-   npm install
-   ```
+## Licence
 
-3. Start the Vite development server:
-   ```bash
-   npm run dev
-   ```
-   Open your browser and navigate to `http://localhost:8080`.
-   (`vite.config.ts` sets `server.port` to 8080; Vite's own 5173 default
-   does not apply here.)
-
----
-
-## ⚡ Dataset Pre-warming & Cache Performance
-
-To achieve sub-second XAI visualization on CPU environments, AudioLIT features an automated **Dataset Warmup Engine**:
-
-1. Click **"Warmup Dataset"** in the top navigation bar of the Web UI.
-2. Select a dataset (`Common Voice`, `RAVDESS`, or `CREMA-D`) and specify a sample range (e.g. 100 samples).
-3. The background worker pre-populates Redis with predictions, acoustic profiles, and Grad-CAM saliency heatmaps.
-4. Active progress is displayed in real-time with step badges (`Inference`, `Acoustic`, `Saliency`).
-
----
-
-## 🤖 Custom Hugging Face Model Integration
-
-AudioLIT supports loading custom fine-tuned models from Hugging Face Hub:
-
-1. **Architecture Requirements**: Must belong to the `whisper` (ASR) or `wav2vec2` (SER/ADD) model families.
-2. **Security Standard**: Weight files **must** be formatted as `.safetensors`. PyTorch pickle checkpoints (`.bin`/`.pkl`) are rejected for security compliance.
-3. **Usage in UI**: Select **"Custom HF Model"** in the model dropdown and enter any valid Hugging Face repository ID (e.g. `openai/whisper-tiny` or `distil-whisper/distil-small.en`).
-
-To programmatically resolve a model via API:
-```bash
-curl -X POST "http://localhost:8000/models/resolve" \
-     -H "Content-Type: application/json" \
-     -d '{"model_id": "distil-whisper/distil-small.en", "revision": "main"}'
-```
-
----
-
-## 📜 License
-
-MIT — see [LICENSE](LICENSE). Incorporates code from ECHO 1.0 (`AudioLIT-DSE-Project/ECHO`, MIT-licensed, originally by Anas Hussaindeen, Chandupa Ambepitiya, and Dewmike Amarasinghe).
+See [LICENSE](LICENSE). Note that several of the optional benchmark corpora are
+**research-use only**; the application displays a licence notice when you load
+one. Check each corpus's own terms before using it for anything commercial.
