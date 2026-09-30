@@ -106,8 +106,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
   }, [inferenceStatus, model, onRegenerateRow]);
 
   // Custom uploads data and columns
-  const customTableData: AudioData[] = useMemo(() => (
+  const customTableData = useMemo(() => (
     uploadedFiles?.map(file => ({
+      file_id: file.file_id,
       id: file.file_id,
       filename: file.filename,
       prediction: file.prediction || "",
@@ -119,41 +120,125 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     })) || []
   ), [uploadedFiles]);
 
+  const isUploadedRow = useCallback((rowOriginal: any): boolean => {
+    if (!rowOriginal) return false;
+    if ('file_id' in rowOriginal || rowOriginal.is_live || rowOriginal.is_uploaded) return true;
+    
+    const pathVal = getFrom(rowOriginal, ["path", "filepath", "file", "filename", "file_path", "id"], "");
+    const cleanFilename = pathVal.split("/").pop()?.split("\\").pop() || pathVal;
+    
+    if (cleanFilename.startsWith("live_recording_") || pathVal.includes("uploads/")) return true;
+    
+    if (uploadedFiles && uploadedFiles.length > 0) {
+      return uploadedFiles.some(f => 
+        f.file_id === rowOriginal.id || 
+        f.file_id === rowOriginal.file_id || 
+        f.filename === cleanFilename ||
+        f.filename === rowOriginal.filename ||
+        f.file_path === pathVal ||
+        (f.file_path && pathVal.endsWith(f.file_path.split("/").pop() || ""))
+      );
+    }
+    return false;
+  }, [uploadedFiles, getFrom]);
+
+  const renderLiveFilename = useCallback((rowOriginal: any, fallbackRowId: string) => {
+    const data = rowOriginal as any;
+    const fileId = data.file_id || data.id || fallbackRowId;
+    const pathVal = getFrom(data, ["path", "filepath", "file", "filename"], String(fileId));
+    const filename = data.filename || pathVal.split("/").pop()?.split("\\").pop() || pathVal;
+    const file = uploadedFiles?.find(f => f.file_id === fileId || f.filename === filename || f.file_id === fallbackRowId);
+    return (
+      <div className="flex items-center gap-1.5">
+        <Badge variant="outline" className="text-[9px] px-1 py-0 bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30 shrink-0 font-semibold">
+          LIVE
+        </Badge>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 w-6 p-0 shrink-0"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (file && onFilePlay) {
+              onFilePlay(file);
+            } else if (onFilePlay) {
+              onFilePlay({
+                file_id: String(fileId),
+                filename: String(filename),
+                file_path: data.file_path || String(filename),
+                message: "Live recording"
+              });
+            }
+          }}
+        >
+          <Play className="h-3 w-3" />
+        </Button>
+        <span className="font-mono text-xs truncate max-w-[180px]" title={filename}>
+          {filename}
+        </span>
+      </div>
+    );
+  }, [uploadedFiles, getFrom, onFilePlay]);
+
+  const renderLiveActions = useCallback((rowOriginal: any, fallbackRowId: string) => {
+    const data = rowOriginal as any;
+    const fileId = data.file_id || data.id || fallbackRowId;
+    const filename = data.filename || getFrom(data, ["path", "filepath", "file", "filename"], String(fileId));
+    const file = uploadedFiles?.find(f => f.file_id === fileId || f.filename === filename || f.file_id === fallbackRowId) || {
+      file_id: String(fileId),
+      filename: String(filename),
+      file_path: data.file_path || String(filename),
+      message: "Live recording"
+    };
+    return (
+      <div className="flex items-center gap-1">
+        {regenerateCell(String(fileId))}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
+          title="Save live audio to custom dataset"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (onSaveLiveToCustom) {
+              onSaveLiveToCustom(file);
+            }
+          }}
+        >
+          <FolderPlus className="h-3 w-3" />
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+          title="Delete live recording from session"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (onDeleteLiveRecording) {
+              onDeleteLiveRecording(String(fileId));
+            }
+          }}
+        >
+          <Trash2 className="h-3 w-3 text-destructive" />
+        </Button>
+      </div>
+    );
+  }, [uploadedFiles, getFrom, regenerateCell, onSaveLiveToCustom, onDeleteLiveRecording]);
+
   const customColumns: ColumnDef<unknown, unknown>[] = useMemo(() => [
     {
       id: "filename",
       header: "Filename",
       cell: ({ row }) => {
-        // Handle both AudioData (uploaded files) and DatasetRow (dataset files)
-        if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData)
-          const data = row.original as AudioData;
-          const file = uploadedFiles?.find(f => f.file_id === data.id);
-          return (
-            <div className="flex items-center gap-1.5">
-              <Badge variant="outline" className="text-[9px] px-1 py-0 bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30 shrink-0">
-                LIVE
-              </Badge>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                className="h-6 w-6 p-0 shrink-0"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  if (file && onFilePlay) onFilePlay(file);
-                }}
-              >
-                <Play className="h-3 w-3" />
-              </Button>
-              <span className="font-mono text-xs truncate max-w-[180px]" title={data.filename}>
-                {data.filename}
-              </span>
-            </div>
-          );
+        if (isUploadedRow(row.original)) {
+          return renderLiveFilename(row.original, row.id as string);
         } else {
-          // This is a dataset file (DatasetRow)
           const data = row.original as DatasetRow;
           const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
           const filename = path.split("/").pop() || path;
@@ -171,10 +256,8 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           return "";
         }
         
-        // Handle both AudioData and DatasetRow
-        if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData) - use predictionMap like dataset files
-          const data = row.original as AudioData;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
           const pred = predictionMap?.[rowId] || data.prediction || "";
           if (!pred) return "";
           
@@ -185,7 +268,6 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           
           return <Badge variant="outline" className="text-xs">{predictionText}</Badge>;
         } else {
-          // This is a dataset file (DatasetRow)
           const pred = predictionMap?.[rowId] ?? "";
           
           const predictionText = typeof pred === 'string' ? pred : 
@@ -201,9 +283,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "groundTruthLabel",
       header: "Ground Truth",
       cell: ({ row }) => {
-        if ('file_id' in (row.original as any)) {
-          const data = row.original as AudioData;
-          return <span className="text-xs font-mono">{data.groundTruthLabel || "—"}</span>;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
+          return <span className="text-xs font-mono">{data.groundTruthLabel || data.ground_truth || "—"}</span>;
         } else {
           const data = row.original as DatasetRow;
           return <span className="text-xs">{getFrom(data, ["sentence", "transcript", "text", "emotion", "label"], "")}</span>;
@@ -214,9 +296,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "confidence",
       header: "Confidence",
       cell: ({ row }) => {
-        if ('file_id' in (row.original as any)) {
-          const data = row.original as AudioData;
-          if (data.confidence === 0) return null;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
+          if (!data.confidence || data.confidence === 0) return null;
           return <span className="text-xs">{data.confidence}</span>;
         } else {
           return <span className="text-xs text-muted-foreground">N/A</span>;
@@ -227,8 +309,8 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "duration",
       header: "Duration",
       cell: ({ row }) => {
-        if ('file_id' in (row.original as any)) {
-          const data = row.original as AudioData;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
           const duration = typeof data.duration === 'number' ? data.duration : 0;
           return <span className="text-xs">{duration.toFixed(2)}s</span>;
         } else {
@@ -245,51 +327,13 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "actions",
       header: "Actions",
       cell: ({ row }) => {
-        if ('file_id' in (row.original as any)) {
-          const data = row.original as AudioData;
-          const file = uploadedFiles?.find(f => f.file_id === data.id);
-          return (
-            <div className="flex items-center gap-1">
-              {regenerateCell(data.id)}
-              {file && onSaveLiveToCustom && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
-                  title="Save live audio to custom dataset"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    onSaveLiveToCustom(file);
-                  }}
-                >
-                  <FolderPlus className="h-3 w-3" />
-                </Button>
-              )}
-              {file && onDeleteLiveRecording && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
-                  title="Delete live recording from session"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    onDeleteLiveRecording(data.id);
-                  }}
-                >
-                  <Trash2 className="h-3 w-3 text-destructive" />
-                </Button>
-              )}
-            </div>
-          );
+        if (isUploadedRow(row.original)) {
+          return renderLiveActions(row.original, row.id as string);
         }
         return regenerateCell(row.id as string);
       },
     },
-  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell, onDeleteLiveRecording, onSaveLiveToCustom]);
+  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell, isUploadedRow, renderLiveFilename, renderLiveActions]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
     const v = row["filename"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["id"];
@@ -305,6 +349,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         id: "filename",
         header: "Filename",
         cell: ({ row }) => {
+          if (isUploadedRow(row.original)) {
+            return renderLiveFilename(row.original, row.id as string);
+          }
           const data = row.original as DatasetRow;
           const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
           const filename = path.split("/").pop() || path;
@@ -369,11 +416,16 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     baseColumns.push({
       id: "actions",
       header: "Actions",
-      cell: ({ row }) => regenerateCell(row.id as string),
+      cell: ({ row }) => {
+        if (isUploadedRow(row.original)) {
+          return renderLiveActions(row.original, row.id as string);
+        }
+        return regenerateCell(row.id as string);
+      },
     });
 
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell, isUploadedRow, renderLiveFilename, renderLiveActions]);
 
   const datasetColumnsRavdess: ColumnDef<unknown, unknown>[] = useMemo(() => {
     const baseColumns = [
@@ -381,6 +433,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         id: "filename",
         header: "Filename",
         cell: ({ row }) => {
+          if (isUploadedRow(row.original)) {
+            return renderLiveFilename(row.original, row.id as string);
+          }
           const data = row.original as DatasetRow;
           const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
           const filename = path.split("/").pop() || path;
@@ -445,11 +500,16 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     baseColumns.push({
       id: "actions",
       header: "Actions",
-      cell: ({ row }) => regenerateCell(row.id as string),
+      cell: ({ row }) => {
+        if (isUploadedRow(row.original)) {
+          return renderLiveActions(row.original, row.id as string);
+        }
+        return regenerateCell(row.id as string);
+      },
     });
 
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell, isUploadedRow, renderLiveFilename, renderLiveActions]);
 
   // Build table config based on mode
   const data: unknown[] = useMemo(() => {

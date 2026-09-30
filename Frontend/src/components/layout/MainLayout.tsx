@@ -10,6 +10,7 @@ import { DatapointEditorPanel } from "../panels/DatapointEditorPanel";
 import { PredictionPanel, UnifiedTaskResult } from "../panels/PredictionPanel";
 import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
+import { toast } from "sonner";
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
 import { QuickStartDialog } from "./QuickStartDialog";
@@ -578,6 +579,32 @@ export const MainLayout = () => {
     if (selectedFile?.file_id === fileId) {
       setSelectedFile(null);
     }
+    toast.success("Live recording removed from session");
+  };
+
+  const handleSaveLiveToCustom = async (file: UploadedFile) => {
+    try {
+      const datasetName = window.prompt(
+        `Save live recording "${file.filename}" to a custom dataset (enter dataset name):`,
+        "my_recordings"
+      );
+      if (!datasetName || !datasetName.trim()) return;
+
+      const trimmedName = datasetName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+      
+      // Ensure custom dataset exists
+      await fetch(`${API_BASE}/dataset/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ dataset_name: trimmedName }),
+        credentials: "include"
+      }).catch(() => {});
+
+      toast.success(`Saved "${file.filename}" to custom dataset "${trimmedName}"`);
+    } catch (err) {
+      console.error("Failed to save live recording to custom dataset:", err);
+      toast.error("Failed to save live recording to custom dataset");
+    }
   };
 
   const handleFileSelection = (file: UploadedFile) => {
@@ -760,7 +787,7 @@ export const MainLayout = () => {
                 <Panel defaultSize={30} minSize={20}>
                   <AudioDatasetPanel
                     apiData={apiData} uploadedFiles={uploadedFiles} selectedFile={selectedFile} onFileSelect={handleFileSelection}
-                    onUploadSuccess={handleUploadSuccess} onDeleteLiveRecording={handleDeleteLiveRecording} model={model} dataset={effectiveDataset} originalDataset={dataset}
+                    onUploadSuccess={handleUploadSuccess} onDeleteLiveRecording={handleDeleteLiveRecording} onSaveLiveToCustom={handleSaveLiveToCustom} model={model} dataset={effectiveDataset} originalDataset={dataset}
                     batchInferenceStatus={batchInferenceStatus} onBatchInferenceStart={handleBatchInferenceStart}
                     onBatchInferenceComplete={handleBatchInferenceComplete} onAvailableFilesChange={setAvailableFiles}
                     onPredictionUpdate={handlePredictionUpdate} predictionMap={predictionMap}
