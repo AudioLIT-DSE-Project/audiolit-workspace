@@ -118,8 +118,8 @@ class TestWarmupWritesCorrectShapes:
              patch("app.infrastructure.redis.cache_result_sync", side_effect=fake_cache), \
              patch("app.domain.model_loader_service.transcribe_whisper_with_attention",
                    return_value=ASR_WITH_ATTENTION), \
-             patch("app.domain.model_loader_service.predict_emotion_wave2vec_with_attention",
-                   return_value=SER_RESULT), \
+             patch("app.domain.model_loader_service.predict_emotion_wave2vec",
+                   return_value={**SER_RESULT, "attention": [[[0.5]]]}), \
              patch("app.domain.model_loader_service.extract_whisper_embeddings",
                    side_effect=Exception("skip")), \
              patch("app.domain.model_loader_service.extract_audio_frequency_features",
@@ -161,7 +161,16 @@ class TestWarmupWritesCorrectShapes:
         h = ck.path_hash(sample_audio_file)
         for ns, key in ck.ser_keys((h,)):
             assert (ns, key) in writes, f"missing SER key {ns}:{key}"
-            assert writes[(ns, key)]["prediction"] == SER_RESULT
+            assert writes[(ns, key)]["prediction"] == {**SER_RESULT, "attention": None}
+
+    def test_ser_attention_is_never_cached(self, sample_audio_file):
+        """Same shape /inferences/wav2vec2-detailed caches. Full attention was
+        ~84 MB per clip across six keys; it filled Redis, and allkeys-lru then
+        evicted RQ's queue lists and worker locks."""
+        writes = self._run(sample_audio_file, ["ser"])
+        h = ck.path_hash(sample_audio_file)
+        for ns, key in ck.ser_keys((h,)):
+            assert writes[(ns, key)]["prediction"]["attention"] is None
 
     def test_unrequested_tasks_are_not_warmed(self, sample_audio_file):
         writes = self._run(sample_audio_file, ["asr"])

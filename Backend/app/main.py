@@ -11,6 +11,11 @@ from .api.routes import datasets as datasets_routes, saliency as saliency_routes
 from .api.routes import tasks as tasks_routes
 from .api.routes import models as models_routes, acoustic as acoustic_routes, evaluation as evaluation_routes
 from .api.routes import metrics as metrics_routes
+from .infrastructure.logging_config import configure_logging
+
+# One call at startup: every audiolit.* log becomes a single JSON line
+# (LIT-259). Workers call the same function in `run_worker`.
+configure_logging()
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="LIT for Voice – API")
@@ -31,6 +36,19 @@ async def _warn_if_dataset_footprint_over_limit() -> None:
             )
     except Exception:
         logger.warning("Could not measure dataset footprint at startup", exc_info=True)
+
+
+@app.on_event("startup")
+async def _purge_expired_uploads() -> None:
+    """SR4 / constraint C4 - the per-upload sweep only runs when someone
+    uploads, so a server that sat idle past the retention window would still be
+    holding audio on the next boot. This clears it before serving a request."""
+    try:
+        removed = upload_routes.purge_expired_uploads()
+        if removed:
+            logger.info("Purged %d upload(s) past the retention window", removed)
+    except Exception:
+        logger.warning("Could not purge expired uploads at startup", exc_info=True)
 
 # Configure CORS origins - default to common development origins if not set
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")

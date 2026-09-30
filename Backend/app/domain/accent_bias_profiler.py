@@ -170,7 +170,20 @@ def make_whisper_transcriber(model_id: str) -> TranscribeFn:
 
     def _transcribe(audio_path: str) -> str:
         audio, _ = librosa.load(audio_path, sr=16_000)
-        result = asr_pipeline(audio.astype(np.float32), chunk_length_s=30)
+        # Force English decoding. Without this Whisper runs language
+        # identification per utterance, and on heavily accented English it
+        # selects the speaker's L1 and transcribes into that language, then
+        # loops. On L2-ARCTIC that produced Vietnamese and Arabic output with
+        # WER 22.30 and 17.80 (insertions far outnumbering the reference
+        # words), which dragged two cohort means from ~0.17 to >1.3 and made
+        # the accent-bias ranking a measure of language misdetection rather
+        # than of accent. The corpus is read English throughout, so the
+        # language is known and should not be guessed.
+        result = asr_pipeline(
+            audio.astype(np.float32),
+            chunk_length_s=30,
+            generate_kwargs={"language": "en", "task": "transcribe"},
+        )
         return result["text"]
 
     return _transcribe

@@ -402,9 +402,9 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
           <h3 className="font-bold text-sm text-foreground flex items-center gap-1.5">
         Audio Embeddings
         <Tooltip>
-          <TooltipTrigger>
-            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-          </TooltipTrigger>
+          <TooltipTrigger aria-label="Visualize high-dimensional audio features in 2D/3D space">
+                    <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                  </TooltipTrigger>
           <TooltipContent className="font-normal">
             Visualize high-dimensional audio features in 2D/3D space
           </TooltipContent>
@@ -429,7 +429,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                   <TooltipTrigger asChild>
                     <div>
                       <Select value={reductionMethod} onValueChange={handleReductionMethodChange}>
-                        <SelectTrigger className="w-20 h-7 text-xs">
+                        <SelectTrigger className="w-20 h-7 text-xs" aria-label="Projection dimensions">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -445,17 +445,14 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                   </TooltipContent>
                 </Tooltip>
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
+                  <TooltipTrigger asChild><Button
                       size="sm"
                       variant="secondary"
                       onClick={handleFetchEmbeddings}
                       disabled={isLoading || availableFiles.length === 0}
                       className="h-7 w-7 p-0"
-                    >
-                      <RefreshCw className={`h-3 w-3 ${isLoading ? 'animate-spin text-primary' : ''}`} />
-                    </Button>
-                  </TooltipTrigger>
+                     aria-label="Refresh embeddings visualization"><RefreshCw className={`h-3 w-3 ${isLoading ? 'animate-spin text-primary' : ''}`} />
+                    </Button></TooltipTrigger>
                   <TooltipContent>
                     Refresh embeddings visualization
                   </TooltipContent>
@@ -487,7 +484,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               {/* Selection Mode (2D only) */}
               {!is3D && (
               <Select value={selectionMode} onValueChange={(value: 'box' | 'lasso') => setSelectionMode(value)}>
-                <SelectTrigger className="w-20 h-8 text-xs border border-border rounded-md">
+                <SelectTrigger className="w-20 h-8 text-xs border border-border rounded-md" aria-label="Projection method">
                 <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -499,7 +496,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
 
               {/* Colour by (FR11.3) */}
               <Select value={colorBy} onValueChange={(v: ColorBy) => setColorBy(v)}>
-                <SelectTrigger className="w-28 h-8 text-xs border border-border rounded-md">
+                <SelectTrigger className="w-28 h-8 text-xs border border-border rounded-md" aria-label="Colour by">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -521,7 +518,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                 setSelectedPoints2D([]);
               }}
               >
-              <SelectTrigger className="flex-1 h-8 text-xs border border-border rounded-md">
+              <SelectTrigger className="flex-1 h-8 text-xs border border-border rounded-md" aria-label="Embedding source file">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -660,9 +657,9 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                           <div className="text-sm-tight font-medium flex items-center gap-2">
                             Top 5 Most Common Features
                             <Tooltip>
-                              <TooltipTrigger>
-                                <HelpCircle className="h-3 w-3 text-muted-foreground" />
-                              </TooltipTrigger>
+                              <TooltipTrigger aria-label="Features ranked by prevalence and stability across selected audio...">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+                  </TooltipTrigger>
                               <TooltipContent className="max-w-xs">
                                 Features ranked by prevalence and stability across selected audio files
                               </TooltipContent>
@@ -707,9 +704,9 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                           <div className="text-sm-tight font-medium flex items-center gap-2">
                             Feature Categories
                             <Tooltip>
-                              <TooltipTrigger>
-                                <HelpCircle className="h-3 w-3 text-muted-foreground" />
-                              </TooltipTrigger>
+                              <TooltipTrigger aria-label="Audio features grouped by type: spectral (frequency-based),...">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+                  </TooltipTrigger>
                               <TooltipContent className="max-w-xs">
                                 Audio features grouped by type: spectral (frequency-based), temporal (time-based), and harmonic (pitch-based)
                               </TooltipContent>

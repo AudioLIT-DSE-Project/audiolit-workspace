@@ -12,6 +12,14 @@ import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
+import { QuickStartDialog } from "./QuickStartDialog";
+import { readQuickStartDismissed } from "./quickStartStorage";
+import {
+  readActiveWarmupJobId,
+  writeActiveWarmupJobId,
+  clearActiveWarmupJobId,
+  isTerminalWarmupStatus,
+} from "@/lib/warmupJob";
 
 interface UploadedFile {
   file_id: string;
@@ -87,11 +95,75 @@ export const MainLayout = () => {
   const { state, result } = useTaskStatus(activeTaskId);
 
   // Global Warmup Runner State
+  const [isQuickStartOpen, setIsQuickStartOpen] = useState(false);
+  // Auto-open once per browser, gated by localStorage - never runs a second
+  // time in the same session so it doesn't re-fight a user who reopened it
+  // manually via the toolbar and then dismissed it.
+  useEffect(() => {
+    if (!readQuickStartDismissed()) setIsQuickStartOpen(true);
+  }, []);
+
   const [isWarmupModalOpen, setIsWarmupModalOpen] = useState(false);
   const [warmupJobId, setWarmupJobId] = useState<string | null>(null);
   const [warmupProgress, setWarmupProgress] = useState<WarmupProgress | null>(null);
   const [isStartingWarmup, setIsStartingWarmup] = useState(false);
   const [isWarmupMinimized, setIsWarmupMinimized] = useState(false);
+  // Dataset the running job belongs to, which is not necessarily the one
+  // currently selected in the UI when we reattach to a job after a reload.
+  const [warmupDataset, setWarmupDataset] = useState<string | null>(null);
+
+  // Reattach to a warmup that is still running.
+  //
+  // The job id used to live only in this component's state, so a reload, a
+  // navigation, or the browser discarding a backgrounded tab dropped it. The
+  // RQ job kept running (24h job timeout) with no banner and - because cancel
+  // is addressed by job id - no way to stop it. Two recovery paths, in order:
+  // the id we persisted locally, then the server's own list of live jobs,
+  // which also covers a cleared storage, a different browser, or a job another
+  // tab started.
+  useEffect(() => {
+    let cancelled = false;
+
+    const reattach = async () => {
+      const stored = readActiveWarmupJobId();
+      if (stored) {
+        try {
+          const res = await fetch(`${API_BASE}/api/inference/progress/${stored}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (!cancelled && (data.status === "running" || data.status === "cancelling")) {
+              setWarmupJobId(stored);
+              setWarmupProgress(data);
+              if (data.dataset) setWarmupDataset(data.dataset);
+              return;
+            }
+          }
+        } catch {
+          /* fall through to server discovery */
+        }
+        // Stored id is finished, unknown or unreachable - stop carrying it.
+        clearActiveWarmupJobId();
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/inference/warmup/active`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const job = data?.jobs?.[0];
+        if (!cancelled && job?.job_id) {
+          setWarmupJobId(job.job_id);
+          setWarmupProgress(job);
+          if (job.dataset) setWarmupDataset(job.dataset);
+          writeActiveWarmupJobId(job.job_id);
+        }
+      } catch (err) {
+        console.error("Failed to look up active warmups:", err);
+      }
+    };
+
+    reattach();
+    return () => { cancelled = true; };
+  }, []);
 
   // Poll for Warmup Progress
   useEffect(() => {
@@ -103,8 +175,17 @@ export const MainLayout = () => {
         if (response.ok) {
           const data = await response.json();
           setWarmupProgress(data);
-          if (data.status === 'completed' || data.status === 'cancelled' || data.status === 'failed') {
+          if (data.dataset) setWarmupDataset(data.dataset);
+          if (isTerminalWarmupStatus(data.status)) {
             clearInterval(interval);
+            // Terminal: stop advertising this id so the next mount does not
+            // try to reattach to a finished run.
+            clearActiveWarmupJobId();
+          }
+          if (data.status === 'not_found') {
+            // The progress record expired or was flushed; nothing to track.
+            clearInterval(interval);
+            clearActiveWarmupJobId();
           }
         }
       } catch (err) {
@@ -132,6 +213,10 @@ export const MainLayout = () => {
       if (response.ok) {
         const data = await response.json();
         setWarmupJobId(data.job_id);
+        setWarmupDataset(dataset);
+        // Persisted immediately: if the tab is reloaded or discarded a second
+        // later, this is what lets the banner and the cancel button come back.
+        writeActiveWarmupJobId(data.job_id);
       }
     } catch (err) {
       console.error("Failed to start batch warmup:", err);
@@ -143,10 +228,20 @@ export const MainLayout = () => {
   const handleCancelWarmup = async () => {
     if (!warmupJobId) return;
     try {
-      await fetch(`${API_BASE}/api/inference/cancel/${warmupJobId}`, {
+      const response = await fetch(`${API_BASE}/api/inference/cancel/${warmupJobId}`, {
         method: "POST",
       });
-      setWarmupProgress(prev => prev ? { ...prev, status: 'cancelling' } : null);
+      if (!response.ok) throw new Error(`Cancel failed: ${response.status}`);
+      // The backend reports the state the run is actually in: "cancelling"
+      // while a live worker finishes its current step, or "cancelled" at once
+      // when the run was still queued or its worker had died (previously the
+      // UI assumed "cancelling" and the next poll flipped it back to running).
+      const data = await response.json();
+      const status: string = data.status === 'not_found' ? 'cancelled' : data.status;
+      setWarmupProgress(prev => prev ? { ...prev, ...data, status } : data);
+      // The id stays persisted while "cancelling", so a reload in that window
+      // can still find the run; it is only dropped once the run is terminal.
+      if (isTerminalWarmupStatus(status)) clearActiveWarmupJobId();
     } catch (err) {
       console.error("Failed to cancel warmup:", err);
     }
@@ -617,7 +712,10 @@ export const MainLayout = () => {
           selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
           onWarmupClick={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
           warmupJobId={warmupJobId}
+          onQuickStartClick={() => setIsQuickStartOpen(true)}
         />
+
+        <QuickStartDialog open={isQuickStartOpen} onOpenChange={setIsQuickStartOpen} />
         
         {/* Global Dataset Warmup Modal (Confirmation & Active Progress) */}
         <WarmupModal
@@ -638,13 +736,25 @@ export const MainLayout = () => {
         <WarmupStatusBanner
           warmupJobId={warmupJobId}
           warmupProgress={warmupProgress}
-          dataset={effectiveDataset || dataset}
+          dataset={warmupDataset || effectiveDataset || dataset}
           isMinimized={isWarmupMinimized || !isWarmupModalOpen}
           onExpand={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
           onCancel={handleCancelWarmup}
-          onDismiss={() => { setWarmupJobId(null); setWarmupProgress(null); }}
+          onDismiss={() => {
+            // Hides the banner. Deliberately does NOT cancel the run, and
+            // deliberately does not forget the id while the run is still
+            // going: a reload re-surfaces it, because a job burning CPU for
+            // hours should not be silently dismissable.
+            setWarmupJobId(null);
+            setWarmupProgress(null);
+            setWarmupDataset(null);
+          }}
         />
-        <div className="flex-1 overflow-hidden bg-background">
+        {/* The workbench panels are the page's main content. Without a
+            main landmark a screen reader user has no way to skip the
+            toolbar and jump straight to the work area, which axe reports
+            as landmark-one-main. */}
+        <main className="flex-1 overflow-hidden bg-background">
           <PanelGroup direction="horizontal" className="h-full">
             <Panel defaultSize={25} minSize={20}>
               <EmbeddingPanel model={model} dataset={dataset} availableFiles={availableFiles} selectedFile={selectedEmbeddingFile} onFileSelect={handleEmbeddingSelection} />
@@ -705,7 +815,7 @@ export const MainLayout = () => {
               />
             </Panel>
           </PanelGroup>
-        </div>
+        </main>
         <StatusBar activeTaskId={activeTaskId} taskState={state} />
       </div>
     </EmbeddingProvider>

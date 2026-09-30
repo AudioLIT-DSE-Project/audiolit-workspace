@@ -1,4 +1,6 @@
 import logging
+from contextlib import contextmanager
+
 import torch
 import transformers
 from transformers import (
@@ -424,30 +426,17 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
             
             return result_dict
     
-    # For regular transcription without attention, use pipeline
-    try:
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_id,
-            torch_dtype=torch_dtype,
-            device=device,
-        )
-    except NotImplementedError as e:
-        if "meta tensor" in str(e):
-            # Fallback for meta tensor issue: load on CPU first then move to CUDA
-            pipe = pipeline(
-                "automatic-speech-recognition",
-                model=model_id,
-                torch_dtype=torch_dtype,
-                device=-1,  # Force CPU first
-            )
-            if torch.cuda.is_available():
-                try:
-                    pipe.model = pipe.model.to("cuda:0")
-                except Exception:
-                    pass  # Stay on CPU if move fails
-        else:
-            raise
+    # For regular transcription without attention, use the cached pipeline.
+    #
+    # This block used to construct the pipeline inline, rebuilding the model on
+    # every call. `_get_whisper_pipeline` already existed with exactly this
+    # construction logic, meta-tensor fallback included, and a `_pipeline_cache`
+    # behind it, but nothing ever called it: the helper was dead code and the
+    # cache stayed empty for the life of the process. Measured on whisper-base,
+    # construction cost 5.22 s against 1.89 s of actual inference, so 73% of
+    # every transcription was rebuilding a model it already had. Those are the
+    # repeated "Loading weights" entries in the API log.
+    pipe = _get_whisper_pipeline(model_id, device, torch_dtype)
     audio, sample_rate = librosa.load(audio_file, sr=16000)
     audio = audio.astype(np.float32)
 
@@ -671,7 +660,75 @@ def ensure_emo_model_loaded(model_id: str | None = None, revision: str | None = 
     return custom_extractor, custom_model, emo_device
 
 
+#: SER attention leaves the model pooled to at most this many frames per axis.
+#: wav2vec2 emits ~50 frames/s, so raw attention is [heads, T, T] per layer and
+#: grows quadratically with clip length: a 14 s clip is ~740 MB of tensors
+#: across 24 layers, and converting that to Python lists (which the fallback
+#: branches below did, unbounded) took the warmup worker past 5 GB until the
+#: kernel OOM-killed it mid-run. Pooling (not truncating) keeps the whole clip.
+SER_ATTENTION_MAX_FRAMES = 100
+
+
+def _pool_attention(attn, max_frames: int = SER_ATTENTION_MAX_FRAMES):
+    """Average-pool ``[batch, heads, T, T]`` attention to at most ``max_frames``
+    per axis, re-normalising rows so each still sums to 1."""
+    if not torch.is_tensor(attn) or attn.dim() != 4:
+        return attn
+    if attn.shape[-1] <= max_frames and attn.shape[-2] <= max_frames:
+        return attn
+    size = (min(attn.shape[-2], max_frames), min(attn.shape[-1], max_frames))
+    pooled = torch.nn.functional.adaptive_avg_pool2d(attn, size)
+    return pooled / pooled.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+
+
+@contextmanager
+def _pooled_attention(model, max_frames: int = SER_ATTENTION_MAX_FRAMES):
+    """Pool each layer's attention the moment its attention module returns it.
+
+    With ``output_attentions`` every layer's weights are collected into one
+    tuple, so peak memory is all layers at full size at once. transformers 5
+    does that collecting with its own persistent forward hooks on each
+    attention module (installed on first use), so pooling has to happen *at*
+    that module and *before* its hook: ours are prepended, and PyTorch chains
+    forward hooks, so the capture hook receives the pooled tensor. Every
+    extraction path in predict_emotion_wave2vec runs these same layers, so all
+    of them get bounded tensors. The encoder layer is hooked too, for
+    transformers versions that collect from the layer's return value instead.
+    """
+    handles = []
+
+    def hook(_module, _inputs, output):
+        if isinstance(output, tuple) and len(output) > 1 and torch.is_tensor(output[1]):
+            return (output[0], _pool_attention(output[1], max_frames), *output[2:])
+        return None  # leave the output untouched
+
+    # Anything that is not a torch module (a stand-in in tests, an exotic
+    # custom checkpoint wrapper) simply gets no pooling.
+    named_modules = model.named_modules() if isinstance(model, torch.nn.Module) else ()
+    for name, module in named_modules:
+        if name.endswith("encoder.layers"):
+            for layer in module:
+                targets = [layer]
+                if isinstance(getattr(layer, "attention", None), torch.nn.Module):
+                    targets.append(layer.attention)
+                for target in targets:
+                    handles.append(target.register_forward_hook(hook, prepend=True))
+    try:
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
 def predict_emotion_wave2vec(audio_path, return_attention=False, model_id=None):
+    if return_attention:
+        _, emo_model, _ = ensure_emo_model_loaded(model_id)
+        with _pooled_attention(emo_model):
+            return _predict_emotion_wave2vec(audio_path, True, model_id)
+    return _predict_emotion_wave2vec(audio_path, False, model_id)
+
+
+def _predict_emotion_wave2vec(audio_path, return_attention=False, model_id=None):
     # Bind the loader's return value to local names. The body below refers to
     # `feature_extractor`/`emo_model`/`emo_device` as free names, so binding
     # them here redirects the whole function at the selected checkpoint instead
@@ -788,8 +845,10 @@ def predict_emotion_wave2vec(audio_path, return_attention=False, model_id=None):
                 import traceback
                 logger.warning(f"Method 0 traceback: {traceback.format_exc()}")
             
-            # Method 1: Check if outputs has attentions directly
-            if hasattr(outputs, "attentions") and outputs.attentions is not None:
+            # Method 1: Check if outputs has attentions directly. Only when
+            # Method 0 found nothing - it previously ran unconditionally and
+            # overwrote Method 0's result with a second, full-size copy.
+            if not found_attention and hasattr(outputs, "attentions") and outputs.attentions is not None:
                 logger.info(f"Method 1 - Found attentions in outputs: {len(outputs.attentions)} layers")
                 try:
                     attention_data = []
@@ -815,7 +874,7 @@ def predict_emotion_wave2vec(audio_path, return_attention=False, model_id=None):
                     logger.error(traceback.format_exc())
         
             # Method 2: Try to get attention from the wav2vec2 encoder within the fine-tuned classification model
-            elif hasattr(emo_model, 'wav2vec2'):
+            elif not found_attention and hasattr(emo_model, 'wav2vec2'):
                 logger.info("Method 2 - Accessing wav2vec2 encoder from fine-tuned model...")
                 try:
                     # Access the wav2vec2 encoder directly from the classification model

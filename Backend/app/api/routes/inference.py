@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ...orchestration.task_orchestrator import (
@@ -48,6 +48,24 @@ class JobResponse(BaseModel):
     family_jobs: dict[str, str]
     cache_key: str | None = None
 
+# These handlers stay `async def`, and that was measured rather than assumed.
+#
+# The enqueue functions they call are synchronous and do several Redis round
+# trips, so moving them to FastAPI's threadpool (by declaring the handler `def`)
+# looks like the textbook fix. It is not, for this workload. Measured at 10
+# concurrent users against a live Redis, enqueue-only:
+#
+#     async def (this code)   median 44 ms   p95 70-75 ms
+#     def + threadpool        median 70 ms   p95 120 ms
+#
+# The threadpool version is about 1.7x worse, repeatably. A real Redis round
+# trip on loopback is a fraction of a millisecond, so per-request thread
+# dispatch costs more than the blocking it avoids. Threadpooling only pays when
+# the blocking call is long; an earlier synthetic test using a 200 ms stub
+# "proved" the opposite precisely because 200 ms is nothing like the real cost.
+#
+# So do not convert these to `def` on general principle. If the p95 needs to
+# come down further, the round trips themselves are the thing to attack.
 @router.post("/inference/multitask", response_model=JobResponse)
 async def post_multitask(req: MultiTaskRequest) -> JobResponse:
     result = enqueue_multitask_analysis(
@@ -85,12 +103,20 @@ async def post_batch_warmup(req: BatchWarmupRequest):
     import json
     from app.orchestration.task_orchestrator import get_queue, WorkerFamily, run_batch_dataset_warmup_task, get_redis_connection
 
+    import time
     job_id = f"warmup_{uuid.uuid4().hex[:12]}"
     try:
         conn = get_redis_connection()
         if conn:
             conn.set(f"job_progress_{job_id}", json.dumps({
-                "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0
+                "completed": 0, "total": 100, "current_file": "Initializing...", "status": "running", "percent": 0.0,
+                # The dataset is recorded on the job itself so a client that has
+                # lost its job id (page reload, tab discard) can rediscover the
+                # run and rebuild the progress banner without guessing which
+                # dataset it belongs to. See GET /inference/warmup/active.
+                "dataset": req.dataset,
+                "model": req.model,
+                "updated_at": time.time(),
             }), ex=86400)
     except Exception as e:
         logger.warning(f"Could not initialize Redis progress for job {job_id}: {e}")
@@ -105,6 +131,9 @@ async def post_batch_warmup(req: BatchWarmupRequest):
             req.tasks,
             req.cooldown_ms,
             job_timeout=86400,
+            # The RQ job shares the warmup id so warmup_liveness() can tell a
+            # run that is executing from one whose worker died under it.
+            job_id=job_id,
         )
     except Exception as e:
         logger.warning(f"Fallback to background thread for batch warmup: {e}")
@@ -123,10 +152,70 @@ async def post_batch_warmup(req: BatchWarmupRequest):
     return {"job_id": job_id, "status": "running", "message": "Batch warmup started"}
 
 
+@router.get("/inference/warmup/active")
+async def list_active_warmups():
+    """Warmup runs that are still in flight, so a client can reattach to one.
+
+    The job id previously existed only in React state. A reload, a navigation,
+    or the browser discarding a backgrounded tab dropped it, and because
+    cancellation is addressed by job id, the run then became both invisible and
+    uncancellable while continuing to consume CPU for up to its 24-hour job
+    timeout. This endpoint lets a client that has lost the id find the run
+    again instead of stranding it.
+
+    Returns only non-terminal runs, newest progress first. `active_job_id` is a
+    convenience for the common single-run case.
+    """
+    import json
+    from app.orchestration.task_orchestrator import (
+        get_redis_connection,
+        reconcile_warmup_progress,
+    )
+
+    try:
+        conn = get_redis_connection()
+        if not conn:
+            return {"active_job_id": None, "jobs": [], "status": "no_broker"}
+
+        jobs = []
+        # Bounded: scan_iter streams rather than materialising the keyspace, and
+        # progress keys carry a 24h TTL so this set stays small.
+        for key in conn.scan_iter(match="job_progress_*", count=100):
+            key_s = key.decode("utf-8") if isinstance(key, bytes) else key
+            raw = conn.get(key_s)
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+            except (ValueError, TypeError):
+                continue  # a malformed record must not hide the healthy ones
+            job_id = key_s[len("job_progress_"):]
+            # Drops runs whose worker is gone (marking them terminal), which
+            # previously sat here as "running" and were reattached forever.
+            data = reconcile_warmup_progress(conn, job_id, data)
+            if data.get("status") not in ("running", "cancelling"):
+                continue
+            data["job_id"] = job_id
+            jobs.append(data)
+
+        jobs.sort(key=lambda j: j.get("percent") or 0, reverse=True)
+        return {
+            "active_job_id": jobs[0]["job_id"] if jobs else None,
+            "jobs": jobs,
+            "status": "ok",
+        }
+    except Exception as e:
+        logger.warning(f"Could not list active warmups: {e}")
+        return {"active_job_id": None, "jobs": [], "status": "error", "error": str(e)}
+
+
 @router.get("/inference/progress/{job_id}")
 async def get_job_progress(job_id: str):
     import json
-    from app.orchestration.task_orchestrator import get_redis_connection
+    from app.orchestration.task_orchestrator import (
+        get_redis_connection,
+        reconcile_warmup_progress,
+    )
 
     try:
         conn = get_redis_connection()
@@ -138,24 +227,34 @@ async def get_job_progress(job_id: str):
             return {"job_id": job_id, "status": "not_found", "completed": 0, "total": 0, "percent": 0.0}
 
         data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-        return data
+        return reconcile_warmup_progress(conn, job_id, data)
     except Exception as e:
         return {"job_id": job_id, "status": "error", "error": str(e), "completed": 0, "total": 0, "percent": 0.0}
 
 
 @router.post("/inference/cancel/{job_id}")
 async def cancel_batch_job(job_id: str):
-    from app.orchestration.task_orchestrator import get_redis_connection
+    """Cancel a warmup run and report the state it is actually in.
+
+    This used to set a flag and unconditionally answer "cancelled", even when
+    no worker was left to read the flag - so a run orphaned by a worker
+    restart stayed "running" forever while the API claimed it had stopped.
+    Now the response is ``cancelling`` (a live worker will stop at its next
+    checkpoint) or ``cancelled`` (it was queued or orphaned, and is stopped
+    now).
+    """
+    from app.orchestration.task_orchestrator import cancel_warmup, get_redis_connection
 
     try:
         conn = get_redis_connection()
-        if conn:
-            conn.set(f"cancel_job_{job_id}", "1", ex=3600)
-            logger.info(f"Cancellation signal sent for job {job_id}")
+        result = cancel_warmup(conn, job_id)
+        logger.info("Cancellation for warmup %s -> %s", job_id, result.get("status"))
     except Exception as e:
-        logger.warning(f"Could not send cancellation signal to Redis: {e}")
+        logger.warning(f"Could not cancel warmup {job_id}: {e}")
+        raise HTTPException(status_code=503, detail=f"Could not reach the task broker: {e}")
 
-    return {"job_id": job_id, "status": "cancelled", "message": "Cancellation requested. Completed samples remain saved in cache."}
+    result["message"] = "Completed samples remain saved in cache."
+    return result
 
 
 @router.post("/cache/clear")
