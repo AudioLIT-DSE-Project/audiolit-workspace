@@ -9,6 +9,7 @@ import {
 } from "recharts";
 import { API_BASE } from "@/lib/api";
 import { usePlayback } from "@/contexts/PlaybackContext";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface TimelineWindow {
   start_s: number;
@@ -42,11 +43,16 @@ export const DeepfakeForensicPanel = ({
   const [loading, setLoading] = useState(false);
   const { currentTime, seek } = usePlayback();
 
-  const requestBody = useCallback((cacheOnly: boolean) => (
-    dataset && !dataset.startsWith("custom:")
+  const requestBody = useCallback((cacheOnly: boolean) => {
+    const sfAny = selectedFile as any;
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
+    if (isUploadedFile) {
+      return { file_path: selectedFile?.file_path, cache_only: cacheOnly };
+    }
+    return dataset && !dataset.startsWith("custom:")
       ? { dataset, dataset_file: selectedFile?.filename, cache_only: cacheOnly }
-      : { file_path: selectedFile?.file_path, cache_only: cacheOnly }
-  ), [dataset, selectedFile?.filename, selectedFile?.file_path]);
+      : { file_path: selectedFile?.file_path, cache_only: cacheOnly };
+  }, [dataset, selectedFile]);
 
   const load = useCallback(async (cacheOnly: boolean) => {
     setLoading(true);

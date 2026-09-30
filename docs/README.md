@@ -18,6 +18,7 @@ then the SAD and SRS, before making architectural or scope decisions.
 | `SRS.md` | Software Requirements Specification (v1.0) | **Final — authoritative** |
 | `MONGODB_METADATA_TIER.md` | MongoDB metadata tier — operations, configuration, degradation (SRS §3.10 / SAD §9) | Living |
 | `README.md` | This file — conventions and errata | Living |
+| `handbook/` | **The AudioLIT Handbook** — a 17-chapter, from-first-principles account of the theory, the architecture and every module at code level, written so the system can be rebuilt from scratch with no prior ML background. Start at `handbook/README.md`. | Living — explanatory, **not** authoritative over SAD/SRS |
 
 > Export both from Google Docs as Markdown and commit them here as `SAD.md` and
 > `SRS.md`. If a figure is essential (e.g. the SAD migration or layered-view

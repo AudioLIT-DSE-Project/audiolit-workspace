@@ -21,6 +21,7 @@ import { API_BASE } from "@/lib/api";
 import { CustomDatasetManager } from "@/components/dataset/CustomDatasetManager";
 import { HFModelSelector } from "./HFModelSelector";
 import { useModelRegistry } from "@/context/ModelRegistryContext";
+import { AudioUploadRecorderModal } from "@/components/audio/AudioUploadRecorderModal";
 
 export interface SelectedTasks {
   asr: boolean;
@@ -44,6 +45,7 @@ interface ToolbarProps {
   selectedFile?: UploadedFile | null;
   uploadedFiles?: UploadedFile[];
   onFileSelect?: (file: UploadedFile) => void;
+  onUploadSuccess?: (file: UploadedFile) => void;
   model: string;
   setModel: (model: string) => void; // important for lifting state
   dataset: string;
@@ -116,6 +118,7 @@ export const Toolbar = ({
   selectedFile,
   uploadedFiles,
   onFileSelect,
+  onUploadSuccess,
   model,
   setModel,
   dataset,
@@ -133,6 +136,7 @@ export const Toolbar = ({
   // SRS §3.6.6: dark mode with a manual override on top of the system default.
   const { resolvedTheme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   useEffect(() => setMounted(true), []);
   const { resolvedCustomModels } = useModelRegistry();
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
@@ -363,36 +367,6 @@ export const Toolbar = ({
               </Select>
             </div>
 
-            {uploadedFiles && uploadedFiles.length > 0 && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-medium text-foreground">
-                  File:
-                </span>
-                <Select
-                  value={selectedFile?.file_id || ""}
-                  onValueChange={(fileId) => {
-                    const file = uploadedFiles.find(
-                      (f) => f.file_id === fileId,
-                    );
-                    if (file && onFileSelect) {
-                      onFileSelect(file);
-                    }
-                  }}
-                >
-                  <SelectTrigger className="w-48 h-7 border-border text-xs" aria-label="Uploaded file">
-                    <SelectValue placeholder="Select uploaded file" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {uploadedFiles.map((file) => (
-                      <SelectItem key={file.file_id} value={file.file_id}>
-                        {file.filename}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
             <div className="flex items-center gap-1.5">
               <div className="flex items-center gap-1">
                 <span className="text-xs font-medium text-foreground">
@@ -513,17 +487,29 @@ export const Toolbar = ({
                 variant="default"
                 size="sm"
                 className="h-7 text-xs shadow-aws-sm"
+                onClick={() => setIsUploadModalOpen(true)}
               >
                 <Upload className="h-3.5 w-3.5 mr-1.5" />
                 Upload
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              <p>Upload audio files for analysis</p>
+              <p>Upload audio files or record live voice input</p>
             </TooltipContent>
           </Tooltip>
         </div>
       </div>
+
+      <AudioUploadRecorderModal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        onFileUploaded={(file) => {
+          onUploadSuccess?.(file);
+          onFileSelect?.(file);
+          fetchCustomDatasets();
+        }}
+        defaultTasks={selectedTasks}
+      />
     </TooltipProvider>
   );
 };

@@ -56,13 +56,13 @@ export default defineConfig({
     {
       name: "accessibility",
       use: { ...devices["Desktop Chrome"] },
-      testMatch: /accessibility\.spec\.ts/,
+      testMatch: /accessibility\.spec\.ts$/,
     },
 
     {
       name: "dataflow",
       use: { ...devices["Desktop Chrome"] },
-      testMatch: /dataflow\.spec\.ts/,
+      testMatch: /dataflow\.spec\.ts$/,
       timeout: 180_000,
     },
   ],

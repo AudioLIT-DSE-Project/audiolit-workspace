@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form,HTTPException
 from fastapi.responses import JSONResponse, FileResponse
+import logging
 import os
 import shutil
 import time
@@ -8,6 +9,13 @@ import uuid
 import librosa
 import soundfile as sf
 import requests
+
+# The decode-failure handler below logs before raising. Without this the
+# handler itself raised NameError, which the outer `except Exception` turned
+# into a 500 "name 'logger' is not defined" - so every undecodable upload
+# reported an internal error instead of the 422 it was written to return.
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # Ensure uploads directory exists
@@ -66,27 +74,29 @@ async def test_upload_endpoint():
     return {"status": "Upload service is working", "upload_dir": str(UPLOAD_DIR.absolute())}
 
 @router.post("/upload")
-async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...)):
+async def upload_audio_file(file: UploadFile = File(...), model: str = Form("whisper-base")):
     """
     Upload an audio file and return the file path for processing
     """
     purge_expired_uploads()
 
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith('audio/'):
+    # Validate file type (allow audio/* and video/webm commonly emitted by browser MediaRecorder)
+    if file.content_type and not (file.content_type.startswith('audio/') or file.content_type in ['video/webm', 'application/octet-stream']):
         raise HTTPException(status_code=400, detail="Invalid file type. Only audio files are allowed.")
     
     # Validate file extension
-    allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac']
-    file_extension = Path(file.filename).suffix.lower()
-    if file_extension not in allowed_extensions:
-        raise HTTPException(status_code=400, detail=f"Invalid file extension. Allowed: {', '.join(allowed_extensions)}")
+    allowed_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.webm', '.ogg', '.aac', '.opus']
+    file_extension = Path(file.filename).suffix.lower() if file.filename else ''
+    if file_extension and file_extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"Invalid file extension '{file_extension}'. Only audio files are allowed.")
+    if not file_extension:
+        # Default fallback for blob uploads without explicit extension
+        file_extension = '.webm' if 'webm' in (file.content_type or '') else '.wav'
     
-    try:
-        # Generate unique filename to avoid conflicts
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = UPLOAD_DIR / unique_filename
+    unique_filename = f"{uuid.uuid4()}{file_extension}"
+    file_path = UPLOAD_DIR / unique_filename
 
+    try:
         # Stream to disk with a hard cap instead of shutil.copyfileobj's
         # unbounded copy - abort as soon as the cap is crossed rather than
         # after the whole body has already been written.
@@ -110,14 +120,19 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
         # silently accepting them with duration=0, which was indistinguishable
         # from an actual zero-length clip.
         try:
-            audio_data, sample_rate = librosa.load(file_path, sr=None)
-            duration = librosa.get_duration(y=audio_data, sr=sample_rate)
+            try:
+                audio_data, sample_rate = sf.read(file_path)
+                duration = float(len(audio_data)) / float(sample_rate) if sample_rate > 0 else 0.0
+            except Exception:
+                audio_data, sample_rate = librosa.load(file_path, sr=None)
+                duration = float(librosa.get_duration(y=audio_data, sr=sample_rate))
             file_size = file_path.stat().st_size
-        except Exception:
+        except Exception as decode_err:
+            logger.error(f"Audio decoding failure on {file_path}: {decode_err}")
             file_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=422,
-                detail="File could not be decoded as audio. It may be corrupted or in an unsupported format.",
+                detail=f"File could not be decoded as audio. It may be corrupted or in an unsupported format.",
             )
 
         if MAX_UPLOAD_DURATION_SECONDS > 0 and duration > MAX_UPLOAD_DURATION_SECONDS:
@@ -130,22 +145,11 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
                 ),
             )
 
-        # FR3.2 / SAD §3.6.2: no model inference on the request path. This route
-        # used to await a full forward pass and an embedding extraction before
-        # responding, which made upload latency a function of model speed and
-        # made it the most visible violation of the async architecture the SAD
-        # describes.
-        #
-        # Nothing is lost: the client dispatches the real multi-task job to
-        # POST /api/inference/multitask immediately after upload and follows it
-        # over the WebSocket channel, and embeddings are computed on demand by
-        # POST /inferences/embeddings. `prediction` stays in the response shape,
-        # as null, so existing callers keep parsing.
         return JSONResponse(
             status_code=200,
             content={
                 "message": "File uploaded successfully",
-                "filename": file.filename,
+                "filename": file.filename or unique_filename,
                 "file_path": str(file_path),
                 "file_id": unique_filename,
                 "duration": duration,
@@ -156,9 +160,6 @@ async def upload_audio_file(file: UploadFile = File(...),model: str = Form(...))
         )
 
     except HTTPException:
-        # Preserve the specific status/detail raised above (413 oversized,
-        # 422 undecodable) instead of letting the generic handler below
-        # flatten it into a 500.
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")

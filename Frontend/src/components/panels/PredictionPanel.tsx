@@ -27,6 +27,7 @@ import {
 import { API_BASE } from "@/lib/api";
 import { ProvenanceBadge, provenanceOverlayStyle } from "../ui/ProvenanceBadge";
 import { DeepfakeForensicPanel } from "./DeepfakeForensicPanel";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -163,8 +164,10 @@ export const PredictionPanel = ({
     setXaiLoading(true);
     setXaiError(null);
 
-    const isCustomDataset = dataset?.startsWith("custom:");
-    const saliencyBody = isCustomDataset
+    const sfAny = selectedFile as any;
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
+
+    const saliencyBody = isUploadedFile
       ? { file_path: selectedFile?.file_path, model, method: activeXAIMethod }
       : { dataset, dataset_file: targetFile, model, method: activeXAIMethod };
 
@@ -239,11 +242,12 @@ export const PredictionPanel = ({
       return;
     }
 
-    const isCustomDataset = dataset?.startsWith("custom:");
-    const body =
-      isCustomDataset || !dataset
-        ? { file_path: selectedFile?.file_path }
-        : { dataset, dataset_file: targetFile };
+    const sfAny = selectedFile as any;
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
+
+    const body = isUploadedFile
+      ? { file_path: selectedFile?.file_path }
+      : { dataset, dataset_file: targetFile };
 
     fetch(`${API_BASE}/acoustic/profile`, {
       method: "POST",

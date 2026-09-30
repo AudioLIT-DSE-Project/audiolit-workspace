@@ -37,6 +37,19 @@ jobs:
         run: |
           cd Frontend
           npm audit --omit=dev --audit-level=high
+      # A real typecheck. `vite build` uses esbuild, which strips types without
+      # checking them, and Jest only compiles the files a test imports - so a
+      # type error in a component no test touches reaches production with every
+      # gate green. One did: `setUploadedFiles` survived a refactor that deleted
+      # it, and would have thrown at runtime on the custom-dataset upload path.
+      #
+      # It must be pointed at the app project. The root tsconfig.json has
+      # `"files": []` and only project references, so a bare `tsc --noEmit`
+      # checks ZERO source files and always passes - a green no-op.
+      - name: Typecheck
+        run: |
+          cd Frontend
+          npm run typecheck
       - name: Run ESLint
         run: |
           cd Frontend
