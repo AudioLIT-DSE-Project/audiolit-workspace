@@ -95,7 +95,10 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
 
       const isUploadedFile = typeof selectedFile === 'object' && selectedFile.file_path && (
         selectedFile.file_path.includes('uploads/') || 
+        selectedFile.file_path.includes('uploads\\') ||
         selectedFile.file_path.startsWith('uploads/') ||
+        selectedFile.file_path.includes('live_recording') ||
+        'file_id' in selectedFile ||
         selectedFile.message === "Perturbed file" ||
         selectedFile.message === "File uploaded successfully" ||
         selectedFile.message === "File uploaded and processed successfully"

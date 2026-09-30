@@ -583,18 +583,18 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
   const getColumnWidthClass = (columnId: string) => {
     switch (columnId) {
       case "filename":
-        return "w-[24%] min-w-[140px]";
+        return "w-[22%] min-w-[130px]";
       case "prediction":
-        return "w-[34%] min-w-[200px]";
+        return "w-[30%] min-w-[180px]";
       case "groundTruthLabel":
       case "ground_truth":
-        return "w-[26%] min-w-[160px]";
+        return "w-[22%] min-w-[140px]";
       case "confidence":
-        return "w-[6%] min-w-[55px] text-center";
+        return "w-[10%] min-w-[85px] text-center whitespace-nowrap px-1";
       case "duration":
-        return "w-[6%] min-w-[55px] text-right";
+        return "w-[8%] min-w-[70px] text-right whitespace-nowrap px-1";
       case "actions":
-        return "w-[95px] min-w-[95px] text-right shrink-0";
+        return "w-[85px] min-w-[85px] text-right shrink-0";
       default:
         return "";
     }

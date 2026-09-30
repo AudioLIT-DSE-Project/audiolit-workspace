@@ -649,11 +649,20 @@ export const MainLayout = () => {
 
     const abortController = new AbortController();
     const idleTimer = setTimeout(() => {
-      const isCustomDataset = dataset?.startsWith('custom:');
+      const sfAny = selectedFile as any;
+      const isUploadedFile = Boolean(
+        selectedFile && typeof selectedFile === 'object' && selectedFile.file_path && (
+          dataset?.startsWith("custom:") ||
+          selectedFile.file_path.includes("uploads/") ||
+          selectedFile.file_path.includes("uploads\\") ||
+          selectedFile.file_path.includes("live_recording") ||
+          (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
+        )
+      );
       const filename = selectedFile?.filename || selectedEmbeddingFile;
-      if (!filename) return;
+      if (!filename && !selectedFile?.file_path) return;
 
-      const requestBody = isCustomDataset
+      const requestBody = isUploadedFile
         ? { file_path: selectedFile?.file_path }
         : { dataset: dataset, dataset_file: filename };
 
@@ -667,12 +676,10 @@ export const MainLayout = () => {
       }).catch(() => {});
 
       // Prefetch Saliency Map in background silently
-      const saliencyBody = {
-        model: model,
-        dataset: dataset,
-        dataset_file: filename,
-        method: "gradcam",
-      };
+      const saliencyBody = isUploadedFile
+        ? { model: model, file_path: selectedFile?.file_path, method: "gradcam" }
+        : { model: model, dataset: dataset, dataset_file: filename, method: "gradcam" };
+
       fetch(`${API_BASE}/saliency/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

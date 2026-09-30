@@ -163,8 +163,18 @@ export const PredictionPanel = ({
     setXaiLoading(true);
     setXaiError(null);
 
-    const isCustomDataset = dataset?.startsWith("custom:");
-    const saliencyBody = isCustomDataset
+    const sfAny = selectedFile as any;
+    const isUploadedFile = Boolean(
+      selectedFile && typeof selectedFile === 'object' && selectedFile.file_path && (
+        dataset?.startsWith("custom:") ||
+        selectedFile.file_path.includes("uploads/") ||
+        selectedFile.file_path.includes("uploads\\") ||
+        selectedFile.file_path.includes("live_recording") ||
+        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
+      )
+    );
+
+    const saliencyBody = isUploadedFile
       ? { file_path: selectedFile?.file_path, model, method: activeXAIMethod }
       : { dataset, dataset_file: targetFile, model, method: activeXAIMethod };
 
@@ -239,11 +249,20 @@ export const PredictionPanel = ({
       return;
     }
 
-    const isCustomDataset = dataset?.startsWith("custom:");
-    const body =
-      isCustomDataset || !dataset
-        ? { file_path: selectedFile?.file_path }
-        : { dataset, dataset_file: targetFile };
+    const sfAny = selectedFile as any;
+    const isUploadedFile = Boolean(
+      selectedFile && typeof selectedFile === 'object' && selectedFile.file_path && (
+        dataset?.startsWith("custom:") ||
+        selectedFile.file_path.includes("uploads/") ||
+        selectedFile.file_path.includes("uploads\\") ||
+        selectedFile.file_path.includes("live_recording") ||
+        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
+      )
+    );
+
+    const body = isUploadedFile
+      ? { file_path: selectedFile?.file_path }
+      : { dataset, dataset_file: targetFile };
 
     fetch(`${API_BASE}/acoustic/profile`, {
       method: "POST",
