@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence
@@ -39,6 +40,8 @@ from ..infrastructure.rq_connection import (
     get_redis_connection,
     get_worker_redis_connection,
 )
+from ..infrastructure.logging_config import configure_logging
+from ..infrastructure import metrics as metrics_module
 
 logger = logging.getLogger("audiolit.orchestration")
 
@@ -91,6 +94,16 @@ QUEUE_CONFIGS: dict[WorkerFamily, QueueConfig] = {
 # so a job published by one was invisible to a subscriber on the other.
 PROGRESS_CHANNEL_PREFIX = "audiolit:progress"
 WORKER_LOCK_PREFIX = "audiolit:worker-lock"
+#: The per-family GPU lock (SAD C2) lives only as long as its holder keeps
+#: renewing it. It used to be taken for 24h and never renewed, so a worker that
+#: was OOM-killed (or SIGKILLed by `docker stop`) held its family's lock for a
+#: day: every replacement exited with "already has a worker running", and jobs
+#: for that family sat queued forever - including dataset warmups.
+WORKER_LOCK_TTL = 60
+WORKER_LOCK_RENEW_INTERVAL = 20
+#: A starting worker waits this long for a dead predecessor's lock to lapse
+#: instead of giving up at once.
+WORKER_LOCK_ACQUIRE_WAIT = 150
 
 DEFAULT_JOB_TIMEOUT: int = 600
 DEFAULT_AGGREGATOR_TIMEOUT: int = 120
@@ -204,6 +217,33 @@ def _current_job_id() -> str:
     return job.id if job is not None else "unknown"
 
 
+# LIT-259: where each task function keeps its ``model_id`` argument, for the
+# structured task-event logs. The slot is the *only* argument ever read - never
+# the ``audio_ref`` position (SR6: no audio identities, filenames, session ids
+# or transcripts in logs). Unknown functions simply log ``model_id: null``.
+_TASK_MODEL_ID_ARG_INDEX: dict[str, int | None] = {
+    "asr_task": 1,
+    "ser_task": 1,
+    "add_task": 1,
+    "xai_task": 1,
+    "accent_bias_task": 0,
+    "mutation_task": None,
+    "aggregator_task": None,
+}
+
+
+def _task_model_id(job: Job) -> str | None:
+    """Best-effort ``model_id`` for the log extra, from the reserved arg slot."""
+    if job is None or not job.func_name or not job.args:
+        return None
+    leaf = job.func_name.split(".")[-1]
+    index = _TASK_MODEL_ID_ARG_INDEX.get(leaf)
+    if index is None or len(job.args) <= index:
+        return None
+    value = job.args[index]
+    return str(value) if value is not None else None
+
+
 # --------------------------------------------------------------------------- #
 # Worker
 # --------------------------------------------------------------------------- #
@@ -285,27 +325,91 @@ class AudioLITWorker(SimpleWorker):
         finally:
             _WORKER_CTX = None
 
+    def _task_event_extra(
+        self,
+        job: Job,
+        queue: Queue,
+        duration_s: float | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """The structured-event fields. Only ever reads the job's reserved
+        model-id slot - never the audio_ref position (SR6: no audio identities,
+        filenames, session ids or transcripts in logs)."""
+        extra: dict[str, Any] = {
+            "job_id": job.id,
+            "family": self.family.value,
+            "queue": queue.name,
+            "worker": os.getpid(),
+            "model_id": _task_model_id(job),
+        }
+        if duration_s is not None:
+            extra["duration_s"] = round(duration_s, 3)
+        if error is not None:
+            extra["error"] = error
+        return extra
+
+    def _record_task_failure(self, job: Job, queue: Queue, started: float, error: str) -> None:
+        """Emit the ``task.failure`` event and bump the ``<family>:<state>``
+        counter. Best-effort on the Redis side. Call from inside an ``except``
+        so ``exc_info=True`` resolves to the live traceback."""
+        state = "retrying" if (getattr(job, "retries_left", 0) or 0) > 0 else "failed"
+        duration_s = time.monotonic() - (started or time.monotonic())
+        logger.error(
+            "task.failure",
+            extra=self._task_event_extra(job, queue, duration_s, error),
+            exc_info=True,
+        )
+        try:
+            metrics_module.record_task(
+                get_redis_connection(), self.family.value, state, duration_s=duration_s
+            )
+        except Exception:
+            logger.debug("task.failure.metric_record_failed", exc_info=True)
+
     def perform_job(self, job: Job, queue: Queue, *args: Any, **kwargs: Any) -> Any:
         publish_progress(job.id, "PROCESSING", {"family": self.family.value})
         started = time.monotonic()
         try:
             assert self._ctx is not None
             self._ctx.load_libraries()
+            try:
+                metrics_module.record_task(
+                    get_redis_connection(), self.family.value, "processing"
+                )
+            except Exception:
+                logger.debug("task.processing.metric_record_failed", exc_info=True)
+            logger.info("task.processing", extra=self._task_event_extra(job, queue))
             result = super().perform_job(job, queue, *args, **kwargs)
+            # RQ's perform_job swallows a job-func failure: it marks the job
+            # FAILED in its own except and returns False. Record that failure
+            # here (job.exc_info holds the traceback RQ captured) and never log
+            # a task.success for it - only a True return is a success.
+            if result is False:
+                error = getattr(job, "exc_info", None) or "job failed (no traceback captured)"
+                self._record_task_failure(job, queue, started, error)
+                return result
+            duration_s = time.monotonic() - started
+            try:
+                metrics_module.record_task(
+                    get_redis_connection(), self.family.value, "success", duration_s=duration_s
+                )
+            except Exception:
+                logger.debug("task.success.metric_record_failed", exc_info=True)
+            logger.info("task.success", extra=self._task_event_extra(job, queue, duration_s))
             publish_progress(
-                job.id, "SUCCESS", {"duration_s": round(time.monotonic() - started, 3)}
+                job.id, "SUCCESS", {"duration_s": round(duration_s, 3)}
             )
             return result
         except Exception as exc:
             # RQ retries a transient failure a few times before giving up, and the
             # user is told which of the two happened (SAD §11.1).
-            state = "RETRYING" if job.retries_left else "FAILURE"
+            state = "RETRYING" if getattr(job, "retries_left", 0) > 0 else "FAILURE"
+            self._record_task_failure(job, queue, started, str(exc))
             publish_progress(
                 job.id,
                 state,
                 {"duration_s": round(time.monotonic() - started, 3), "error": str(exc)},
             )
-            logger.exception("job.failed id=%s", job.id)
             raise
 
     def handle_job_success(self, *args: Any, **kwargs: Any) -> Any:
@@ -354,6 +458,100 @@ def make_worker(
     )
 
 
+class _FamilyLock:
+    """Token lock with an expiry, renewable from any thread.
+
+    Plain ``SET NX PX`` plus ``WATCH``/``MULTI`` compare-and-set rather than
+    redis-py's ``Lock``, whose renew/release run Lua scripts (unsupported by
+    the fakeredis the suite and CI run on) and whose token is thread-local by
+    default (so a renewal thread could never renew it).
+    """
+
+    def __init__(self, conn: Redis, key: str, ttl: float):
+        import uuid
+
+        self._conn = conn
+        self.key = key
+        self.ttl = ttl
+        self._token = uuid.uuid4().hex.encode()
+
+    def acquire(self) -> bool:
+        return bool(self._conn.set(self.key, self._token, nx=True, px=int(self.ttl * 1000)))
+
+    def owned(self) -> bool:
+        return self._conn.get(self.key) == self._token
+
+    def _if_owned(self, action: Callable[[Any], None]) -> bool:
+        from redis.exceptions import WatchError
+
+        with self._conn.pipeline() as pipe:
+            try:
+                pipe.watch(self.key)
+                if pipe.get(self.key) != self._token:
+                    return False
+                pipe.multi()
+                action(pipe)
+                pipe.execute()
+                return True
+            except WatchError:
+                return False
+
+    def reacquire(self) -> None:
+        if not self._if_owned(lambda pipe: pipe.pexpire(self.key, int(self.ttl * 1000))):
+            raise RuntimeError(f"lock {self.key} is no longer owned")
+
+    def release(self) -> None:
+        self._if_owned(lambda pipe: pipe.delete(self.key))
+
+
+def _acquire_family_lock(
+    conn: Redis, fam: WorkerFamily, *, wait: Optional[float] = None, poll: float = 5.0
+):
+    """Take ``fam``'s GPU lock, waiting up to ``wait`` seconds for a holder's
+    TTL to lapse (a crashed predecessor stops renewing, so its lock frees
+    within WORKER_LOCK_TTL)."""
+    lock = _FamilyLock(conn, f"{WORKER_LOCK_PREFIX}:{fam.value}", WORKER_LOCK_TTL)
+    deadline = time.monotonic() + (WORKER_LOCK_ACQUIRE_WAIT if wait is None else wait)
+    while not lock.acquire():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"GPU family {fam.value} already has a worker running (SAD C2)")
+        logger.info("worker.lock.waiting family=%s", fam.value)
+        time.sleep(min(poll, max(deadline - time.monotonic(), 0)))
+    return lock
+
+
+class _FamilyLockRenewer:
+    """Keeps a family lock alive from a daemon thread for exactly as long as
+    the worker process lives."""
+
+    def __init__(self, lock, fam: WorkerFamily, interval: float = WORKER_LOCK_RENEW_INTERVAL):
+        import threading
+
+        self._lock = lock
+        self._fam = fam
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name=f"worker-lock-{fam.value}", daemon=True
+        )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._lock.reacquire()
+            except Exception as e:
+                # Lost the lock (e.g. the process stalled past its TTL and
+                # another worker took over). Keep running rather than kill an
+                # in-flight job; the other worker holds the lock now.
+                logger.error("worker.lock.renew_failed family=%s error=%s", self._fam.value, e)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
 def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     """Entrypoint for one family's worker process.
 
@@ -361,6 +559,7 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
     cannot start and double the VRAM footprint (SAD C2). The CPU-only mutation
     family is exempt and may scale out.
     """
+    configure_logging()
     fam = WorkerFamily(family) if not isinstance(family, WorkerFamily) else family
     conn = get_redis_connection()
 
@@ -376,17 +575,18 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
         logger.warning("Could not set CPU thread cap: %s", e)
 
     lock = None
+    renewer = None
     if get_queue_config(fam).gpu_bound:
-        lock = conn.lock(
-            f"{WORKER_LOCK_PREFIX}:{fam.value}", timeout=60 * 60 * 24, blocking=False
-        )
-        if not lock.acquire(blocking=False):
-            raise RuntimeError(f"GPU family {fam.value} already has a worker running (SAD C2)")
+        lock = _acquire_family_lock(conn, fam)
+        renewer = _FamilyLockRenewer(lock, fam)
+        renewer.start()
 
     worker = make_worker(fam, connection=conn)
     try:
         worker.work(burst=burst, with_scheduler=True)
     finally:
+        if renewer is not None:
+            renewer.stop()
         if lock is not None:
             try:
                 lock.release()
@@ -405,6 +605,169 @@ def run_worker(family: WorkerFamily | str, *, burst: bool = False) -> None:
 # live in `multitask_orchestrator_service.py` (LIT-150); wiring them onto these
 # per-family queues is the remaining step of LIT-127's follow-on, and needs the
 # `/upload` contract change that LIT-227/LIT-157 deliberately deferred.
+
+# --------------------------------------------------------------------------- #
+# Metadata write-through (SRS §3.10 / SAD §9 / SAD §11.1, LIT-257)
+# --------------------------------------------------------------------------- #
+# The fan-in aggregator and the bias-diagnostic task each write their results
+# through to the durable MongoDB tier *before* the Redis cache write so that
+# model registrations, analysis records, and bias reports survive a cache flush
+# or restart (SAD §6.2 write-order). Every write is try/except logged and
+# swallowed: metadata degradation is observable but never fatal.
+
+
+#: Arrays at or above this length are treated as tensors/heatmaps and dropped
+#: before a result reaches the durable tier (C4/SR4: no tensor payloads).
+_MAX_PERSISTED_LIST_LEN: int = 16
+
+_DROP = object()
+
+
+def _strip_array_fields(value: Any) -> Any:
+    """Recursively drop array-shaped payloads from a result before writing it
+    to the durable tier.
+
+    Saliency/attention heatmaps and embedding vectors live in Redis under
+    ``redis_tensor_key``; MongoDB records a reference, never the tensor
+    (SRS §3.10, C4/SR4). Lists beyond ``_MAX_PERSISTED_LIST_LEN`` or anything
+    NumPy/tensor-shaped are dropped; short plain lists survive.
+    """
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            cleaned = _strip_array_fields(v)
+            if cleaned is not _DROP:
+                out[k] = cleaned
+        return out
+    if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_PERSISTED_LIST_LEN:
+            return _DROP
+        cleaned = [_strip_array_fields(v) for v in value]
+        return [c for c in cleaned if c is not _DROP]
+    if type(value).__name__ in ("ndarray", "Tensor") and hasattr(value, "shape"):
+        return _DROP
+    return value
+
+
+def _sample_id(audio_ref: str) -> str:
+    """Deterministic id for an audio sample derived from its path reference."""
+    return hashlib.sha256(audio_ref.encode("utf-8")).hexdigest()
+
+
+def _audio_sample_details(audio_ref: str) -> dict[str, Any] | None:
+    """Duration/sample-rate metadata for a sample path, or None if unreadable.
+
+    Uses ``soundfile.info`` only -- the file's header -- never reads audio
+    samples into memory (constraint C4/SR4: metadata tier touches no bytes).
+    """
+    try:
+        import soundfile as sf
+        import os as _os
+
+        info = sf.info(audio_ref)
+        return {
+            "filename": _os.path.basename(audio_ref),
+            "duration": info.duration,
+            "sample_rate": info.samplerate,
+            "uploaded_at": datetime.now(timezone.utc),
+        }
+    except Exception as exc:
+        logger.warning("metadata.sample.info_failed ref=%s: %s", audio_ref, exc)
+        return None
+
+
+def _write_analysis_metadata(
+    combined: Mapping[str, Any],
+    cache_key: str | None,
+    audio_ref: str | None,
+) -> None:
+    """Fan-in write-through to the durable MongoDB metadata tier (LIT-257).
+
+    Records the sample once and one ``analysis_results`` document per task,
+    then carries on regardless. ``get_metadata_store()`` returning ``None``
+    means the tier is configured off and this is a silent no-op; any
+    individual failure is logged as ``metadata.write_failed`` and swallowed,
+    so metadata can never fail an analysis (SRS §3.3.1 / SAD §11.1).
+
+    Write order follows SAD §6.2: MongoDB *before* the Redis cache write in
+    ``aggregator_task``.
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    sample_id: str | None = None
+    if audio_ref:
+        sample_id = _sample_id(audio_ref)
+        details = _audio_sample_details(audio_ref)
+        if details is not None:
+            try:
+                store.upsert_audio_sample(
+                    {"sample_id": sample_id, "file_path_reference": audio_ref, **details}
+                )
+            except Exception as exc:
+                logger.warning("metadata.write_failed collection=audio_samples: %s", exc)
+
+    for key, result in combined.get("tasks", {}).items():
+        if not isinstance(result, Mapping) or not result.get("task"):
+            # A failed sibling reached the fan-in as {"status": "failed"} keyed
+            # by job id - there is nothing reproducible to record for it.
+            continue
+        task_name = result.get("task", key)
+        analysis_id = f"{cache_key or _sample_id(audio_ref or '')}:{task_name}"
+        try:
+            store.insert_analysis(
+                {
+                    "analysis_id": analysis_id,
+                    "sample_id": sample_id,
+                    "model_id": result.get("model_id"),
+                    "task": task_name,
+                    "prediction": _strip_array_fields(dict(result)),
+                    "redis_tensor_key": cache_key,
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=analysis_results: %s", exc)
+
+
+def _write_bias_report(model_id: str, report: Any) -> None:
+    """Write-through one ``bias_reports`` document per cohort (retained
+    permanently, SAD §9; LIT-257).
+
+    Never raises: a failed write is logged and skipped, so metadata lag never
+    shadows an accent-bias diagnostic (SRS §3.3.1 / SAD §11.1).
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    corpus = getattr(report, "corpus", "l2-arctic")
+    for cohort in getattr(report, "cohorts", []) or []:
+        try:
+            store.insert_bias_report(
+                {
+                    "report_id": f"{model_id}:{corpus}:{getattr(cohort, 'accent', '')}",
+                    "model_id": model_id,
+                    "cohort": getattr(cohort, "accent", ""),
+                    "WER": getattr(cohort, "mean_wer", None),
+                    "disparity_metrics": {
+                        "sample_count": getattr(cohort, "sample_count", 0),
+                        "scored_count": getattr(cohort, "scored_count", 0),
+                        "median_wer": getattr(cohort, "median_wer", None),
+                        "stdev_wer": getattr(cohort, "stdev_wer", None),
+                        "min_wer": getattr(cohort, "min_wer", None),
+                        "max_wer": getattr(cohort, "max_wer", None),
+                        "corpus": corpus,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=bias_reports: %s", exc)
+
 
 def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[str, Any]:
     ctx = get_worker_context()
@@ -542,14 +905,22 @@ def accent_bias_task(
         model_id=model_id,
         samples_per_cohort=samples_per_cohort,
     )
+    _write_bias_report(model_id, report)
     publish_progress(_current_job_id(), "accent_bias.completed", {"model": model_id})
     return report.to_json_dict()
 
 
-def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dict[str, Any]:
+def aggregator_task(
+    family_job_ids: Sequence[str],
+    cache_key: str | None,
+    audio_ref: str | None = None,
+) -> dict[str, Any]:
     """Fan-in: combine the family jobs' results once they have all finished.
 
-    A failed sibling never loses the others' results (SAD §11.1).
+    A failed sibling never loses the others' results (SAD §11.1). Once the
+    combined result is assembled it is written through to the durable metadata
+    tier *before* the Redis cache write (SAD §6.2 write order), so metadata
+    lag can never shadow the cache (LIT-257).
     """
     conn = get_redis_connection()
     combined: dict[str, Any] = {"tasks": {}, "cache_key": cache_key, "schema_version": "1.0"}
@@ -560,6 +931,8 @@ def aggregator_task(family_job_ids: Sequence[str], cache_key: str | None) -> dic
             continue
         result = job.result or {}
         combined["tasks"][result.get("task", "unknown")] = result
+
+    _write_analysis_metadata(combined, cache_key, audio_ref)
 
     if cache_key is not None:
         # TODO(LIT-163): write the combined result to the content-addressed cache.
@@ -618,23 +991,41 @@ def enqueue_multitask_analysis(
     family_job_objs: list[Job] = []
     family_jobs: dict[str, str] = {}
 
-    for fam in families:
-        job = get_queue(fam).enqueue(
-            _TASK_FUNCS[fam],
-            audio_ref,
-            model_ids.get(fam, "default"),
-            dict(params.get(fam, {})),
-            job_timeout=DEFAULT_JOB_TIMEOUT,
-            result_ttl=DEFAULT_RESULT_TTL,
-            failure_ttl=DEFAULT_FAILURE_TTL,
-        )
-        family_jobs[fam.value] = job.id
-        family_job_objs.append(job)
+    # The family enqueues go in one Redis pipeline rather than one round trip
+    # each. They are independent of each other - only the aggregator below
+    # depends on them - so there is no ordering requirement between them, and
+    # batching them is the difference between three sequential command batches
+    # and one.
+    #
+    # Measured against a live Redis at 10 concurrent users: 22.6 ms median
+    # sequential against 12.2 ms pipelined, a 46% reduction, with the aggregator
+    # still correctly DEFERRED on all three dependencies. This matters because a
+    # loopback Redis round trip is not free: it measured 1.67 ms on Docker
+    # Desktop for Windows, so the round-trip count, not the work per command, is
+    # what the SRS 3.4.1 enqueue budget is spent on.
+    with get_redis_connection().pipeline() as pipe:
+        for fam in families:
+            job = get_queue(fam).enqueue(
+                _TASK_FUNCS[fam],
+                audio_ref,
+                model_ids.get(fam, "default"),
+                dict(params.get(fam, {})),
+                job_timeout=DEFAULT_JOB_TIMEOUT,
+                result_ttl=DEFAULT_RESULT_TTL,
+                failure_ttl=DEFAULT_FAILURE_TTL,
+                pipeline=pipe,
+            )
+            family_jobs[fam.value] = job.id
+            family_job_objs.append(job)
+        # The aggregator's depends_on needs these jobs to exist in Redis, so the
+        # pipeline must commit before it is enqueued.
+        pipe.execute()
 
     aggregator = get_queue(WorkerFamily.XAI).enqueue(
         aggregator_task,
         [j.id for j in family_job_objs],
         cache_key,
+        audio_ref,
         depends_on=family_job_objs,
         job_timeout=DEFAULT_AGGREGATOR_TIMEOUT,
         result_ttl=DEFAULT_RESULT_TTL,
@@ -760,7 +1151,210 @@ def health_check() -> dict[str, Any]:
         return {"ok": False, "broker": "redis", "error": str(exc)}
 
 
+#: Progress statuses that mean "a worker is (supposedly) still on this run".
+WARMUP_ACTIVE_STATUSES = ("running", "cancelling")
+#: A run with no RQ job to consult (legacy record, in-process thread fallback)
+#: is presumed dead once its progress record has gone this long unwritten.
+#: The runner rewrites the record at every subtask, so a live run never idles
+#: this long.
+WARMUP_STALE_SECONDS = 15 * 60
+WARMUP_PROGRESS_TTL = 86400
+#: The runner refreshes a heartbeat key from a background thread at this
+#: interval, with a TTL a few beats longer. The key outlives a slow model step
+#: (the thread beats regardless of what the job is doing) but expires within
+#: WARMUP_HEARTBEAT_TTL of the process dying.
+WARMUP_HEARTBEAT_INTERVAL = 10
+WARMUP_HEARTBEAT_TTL = 45
+
+
+def warmup_progress_key(job_id: str) -> str:
+    return f"job_progress_{job_id}"
+
+
+def warmup_cancel_key(job_id: str) -> str:
+    return f"cancel_job_{job_id}"
+
+
+def warmup_heartbeat_key(job_id: str) -> str:
+    return f"warmup_heartbeat_{job_id}"
+
+
+class _WarmupHeartbeat:
+    """Background thread that keeps ``warmup_heartbeat_key`` alive while the
+    runner's process is alive - and only while it is."""
+
+    def __init__(self, conn: Optional[Redis], job_id: str):
+        import threading
+
+        self._conn = conn
+        self._key = warmup_heartbeat_key(job_id)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"warmup-heartbeat-{job_id}", daemon=True)
+
+    def _beat(self) -> None:
+        try:
+            self._conn.set(self._key, str(time.time()), ex=WARMUP_HEARTBEAT_TTL)
+        except Exception as e:  # a missed beat must never fail the warmup
+            logger.warning("Warmup heartbeat write failed: %s", e)
+
+    def _run(self) -> None:
+        while not self._stop.wait(WARMUP_HEARTBEAT_INTERVAL):
+            self._beat()
+
+    def __enter__(self) -> "_WarmupHeartbeat":
+        if self._conn is not None:
+            self._beat()
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._conn is not None:
+            try:
+                self._conn.delete(self._key)
+            except Exception:
+                pass
+
+
+def warmup_liveness(conn: Redis, job_id: str, data: Mapping[str, Any]) -> str:
+    """Whether anything is still executing warmup ``job_id``.
+
+    Returns ``"queued"`` (enqueued, no worker has picked it up yet),
+    ``"alive"`` (the runner's process is heartbeating) or ``"dead"``.
+
+    The progress record alone cannot answer this: it is written by the
+    runner, so when the worker process dies (container recreated, OOM kill)
+    the record stays ``running`` for its full 24h TTL. Cancellation is only
+    a flag the runner polls, so such a run was also uncancellable - the flag
+    was set but nothing was left to read it, and the UI reattached to the
+    ghost on every reload.
+
+    RQ's own bookkeeping cannot answer it either: a SimpleWorker's registry
+    entry is kept for the job's timeout (24h here) and still names the job
+    after its process was OOM-killed. Hence the runner's own heartbeat key.
+    """
+    if conn.exists(warmup_heartbeat_key(job_id)):
+        return "alive"
+
+    try:
+        job: Optional[Job] = Job.fetch(job_id, connection=conn)
+    except Exception:
+        job = None
+
+    if job is not None:
+        status = job.get_status(refresh=False)
+        if status in (JobStatus.DEFERRED, JobStatus.SCHEDULED):
+            return "queued"
+        if status == JobStatus.QUEUED:
+            # "queued" only counts if the id is really in its queue: under the
+            # old allkeys-lru policy Redis evicted RQ's queue lists, leaving
+            # jobs that claim QUEUED while no worker can ever pick them up.
+            if job_id in Queue(job.origin, connection=conn).get_job_ids():
+                return "queued"
+            return "dead"
+        if status == JobStatus.STARTED and job.started_at is not None:
+            started_at = job.started_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            # Grace for the instant between RQ marking the job started and
+            # the runner's first beat.
+            if (datetime.now(timezone.utc) - started_at).total_seconds() < WARMUP_HEARTBEAT_TTL:
+                return "alive"
+        # Started with no heartbeat, or finished/failed/stopped/canceled while
+        # the record still says running: the runner is gone.
+        return "dead"
+
+    # No RQ job to consult (in-process thread fallback, or a record from
+    # before the heartbeat existed): fall back to the record's own timestamp.
+    # Records written before `updated_at` existed are aged from their TTL.
+    updated_at = data.get("updated_at")
+    if isinstance(updated_at, (int, float)):
+        age = time.time() - updated_at
+    else:
+        ttl = conn.ttl(warmup_progress_key(job_id))
+        age = WARMUP_PROGRESS_TTL - ttl if ttl and ttl > 0 else WARMUP_STALE_SECONDS
+    return "alive" if age < WARMUP_STALE_SECONDS else "dead"
+
+
+def _finalize_warmup(conn: Redis, job_id: str, data: dict[str, Any], status: str) -> dict[str, Any]:
+    """Rewrite a non-terminal progress record as terminal ``status``."""
+    final = {
+        **data,
+        "status": status,
+        "current_file": "Cancelled" if status == "cancelled" else "Interrupted",
+        "active_subtask": None,
+        "eta_seconds": 0,
+        "eta_formatted": None,
+        "updated_at": time.time(),
+    }
+    conn.set(warmup_progress_key(job_id), json.dumps(final), ex=WARMUP_PROGRESS_TTL)
+    return final
+
+
+def reconcile_warmup_progress(conn: Redis, job_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Return ``data``, made terminal first if its run is no longer executing.
+
+    A dead run becomes ``cancelled`` if cancellation had been requested, and
+    ``interrupted`` otherwise - distinct from ``cancelled`` so the UI does not
+    claim the user stopped a run that crashed.
+    """
+    if data.get("status") not in WARMUP_ACTIVE_STATUSES:
+        return data
+    if warmup_liveness(conn, job_id, data) != "dead":
+        return data
+    status = "cancelled" if conn.get(warmup_cancel_key(job_id)) else "interrupted"
+    logger.warning("Warmup %s has no live worker; marking it %s", job_id, status)
+    return _finalize_warmup(conn, job_id, data, status)
+
+
+def cancel_warmup(conn: Redis, job_id: str) -> dict[str, Any]:
+    """Request cancellation of warmup ``job_id`` and report the resulting state.
+
+    A running job is flagged and moves to ``cancelling`` until the runner
+    reaches its next checkpoint. A job that is still queued, or whose worker
+    is gone, has nothing to observe the flag, so it is made ``cancelled``
+    immediately instead of waiting forever.
+    """
+    conn.set(warmup_cancel_key(job_id), "1", ex=3600)
+    raw = conn.get(warmup_progress_key(job_id))
+    if not raw:
+        return {"job_id": job_id, "status": "not_found"}
+    data = json.loads(raw)
+    if data.get("status") not in WARMUP_ACTIVE_STATUSES:
+        return {"job_id": job_id, **data}
+
+    liveness = warmup_liveness(conn, job_id, data)
+    if liveness == "alive":
+        data = {**data, "status": "cancelling", "updated_at": time.time()}
+        conn.set(warmup_progress_key(job_id), json.dumps(data), ex=WARMUP_PROGRESS_TTL)
+        return {"job_id": job_id, **data}
+
+    if liveness == "queued":
+        try:
+            Job.fetch(job_id, connection=conn).cancel()
+        except Exception as e:
+            logger.warning("Could not cancel queued warmup %s in RQ: %s", job_id, e)
+    return {"job_id": job_id, **_finalize_warmup(conn, job_id, data, "cancelled")}
+
+
 def run_batch_dataset_warmup_task(
+    job_id: str,
+    dataset: str,
+    model: str = "whisper-base",
+    tasks: list[str] | None = None,
+    cooldown_ms: int = 100,
+) -> dict[str, Any]:
+    """Run a dataset warmup while heartbeating, so warmup_liveness() can tell
+    this run apart from one whose process was killed under it."""
+    try:
+        conn = get_redis_connection()
+    except Exception:
+        conn = None
+    with _WarmupHeartbeat(conn, job_id):
+        return _run_batch_dataset_warmup(job_id, dataset, model, tasks, cooldown_ms)
+
+
+def _run_batch_dataset_warmup(
     job_id: str,
     dataset: str,
     model: str = "whisper-base",
@@ -845,10 +1439,21 @@ def run_batch_dataset_warmup_task(
                     "total": total,
                     "current_file": filename,
                     "active_subtask": subtask_label,
-                    "status": "running",
+                    # Once cancel is requested, keep reporting it: writing
+                    # "running" here overwrote the route's "cancelling", so
+                    # the Cancel button looked like it did nothing until the
+                    # next checkpoint.
+                    "status": "cancelling" if is_job_cancelled() else "running",
+                    # Heartbeat for warmup_liveness() when there is no RQ job
+                    # to consult (in-process thread fallback).
+                    "updated_at": time.time(),
                     "percent": round((i / total) * 100, 1) if total > 0 else 0,
                     "eta_seconds": eta_sec,
                     "eta_formatted": eta_str,
+                    # Carried on every update so a client reattaching mid-run
+                    # (GET /inference/warmup/active) knows what is being warmed.
+                    "dataset": dataset,
+                    "model": model,
                 }
                 conn.set(f"job_progress_{job_id}", json.dumps(p_data), ex=86400)
 
@@ -928,15 +1533,22 @@ def run_batch_dataset_warmup_task(
                     try:
                         update_subtask("Speech Emotion Recognition")
                         from app.domain.model_loader_service import (
-                            predict_emotion_wave2vec_with_attention,
+                            predict_emotion_wave2vec,
                         )
                         # A wav2vec2 selection means the user picked a SER
                         # checkpoint; anything else warms the default.
                         ser_model = model if is_wav2vec else None
-                        ser = predict_emotion_wave2vec_with_attention(
-                            str(resolved_path), model_id=ser_model
-                        )
+                        # No attention pass, and attention is never cached -
+                        # the same shape /inferences/wav2vec2-detailed caches
+                        # (it recomputes if a caller ever asks for attention;
+                        # the UI never does). Warmup used to cache the full
+                        # attention: ~84 MB of JSON per clip, under six keys,
+                        # so a 2 GB Redis held a couple of dozen clips and
+                        # the (then) allkeys-lru policy evicted RQ's own queue lists and worker
+                        # locks to make room - jobs vanished from the queue.
+                        ser = predict_emotion_wave2vec(str(resolved_path), False, ser_model)
                         if ser is not None:
+                            ser = {**ser, "attention": None}
                             write(ck.ser_keys(hashes, ser_model), {"prediction": ser})
                             warmed.add("ser")
                     except Exception as err:
@@ -1049,9 +1661,12 @@ def run_batch_dataset_warmup_task(
         "total": total,
         "current_file": "Done" if not cancelled else "Cancelled",
         "status": final_status,
+        "dataset": dataset,
+        "model": model,
         "percent": round((completed / total) * 100, 1) if total > 0 else 100.0,
         "cached_files": warmed_files,
         "failed_subtasks": len(failures),
+        "updated_at": time.time(),
     }
     if failures:
         logger.warning(

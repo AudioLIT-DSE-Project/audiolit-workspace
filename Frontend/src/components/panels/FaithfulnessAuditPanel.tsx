@@ -120,7 +120,9 @@ export const FaithfulnessAuditPanel: React.FC<FaithfulnessAuditPanelProps> = ({
             <CardTitle className="text-xs flex items-center gap-1.5">
               Faithfulness Audit (Deletion Score)
               <Tooltip>
-                <TooltipTrigger><HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" /></TooltipTrigger>
+                <TooltipTrigger aria-label="Masks the highest-saliency regions of the audio at increasing...">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
+                  </TooltipTrigger>
                 <TooltipContent className="space-y-1">
                   <p className="text-xs">Masks the highest-saliency regions of the audio at increasing thresholds,</p>
                   <p className="text-xs">re-runs the model on each masked clip, and measures the confidence drop -</p>

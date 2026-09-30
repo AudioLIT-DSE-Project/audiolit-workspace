@@ -15,7 +15,7 @@ import {
   TooltipTrigger,
   TooltipProvider,
 } from "@/components/ui/tooltip";
-import { Upload, HelpCircle, Sun, Moon, Flame } from "lucide-react";
+import { Upload, HelpCircle, Sun, Moon, Flame, Rocket } from "lucide-react";
 import { useTheme } from "next-themes";
 import { API_BASE } from "@/lib/api";
 import { CustomDatasetManager } from "@/components/dataset/CustomDatasetManager";
@@ -53,6 +53,7 @@ interface ToolbarProps {
   setSelectedTasks: (tasks: SelectedTasks) => void;
   onWarmupClick?: () => void;
   warmupJobId?: string | null;
+  onQuickStartClick?: () => void;
 }
 
 interface CustomDataset {
@@ -123,6 +124,7 @@ export const Toolbar = ({
   selectedTasks,
   setSelectedTasks,
   onWarmupClick,
+  onQuickStartClick,
 }: ToolbarProps) => {
   const handleTaskToggle = (task: keyof SelectedTasks) => {
     setSelectedTasks({ ...selectedTasks, [task]: !selectedTasks[task] });
@@ -262,7 +264,7 @@ export const Toolbar = ({
                 </Tooltip>
               </div>
               <Select value={model} onValueChange={onModelChange}>
-                <SelectTrigger className="w-40 h-7 border-border text-xs">
+                <SelectTrigger className="w-40 h-7 border-border text-xs" aria-label="Model">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -315,7 +317,7 @@ export const Toolbar = ({
                 </Tooltip>
               </div>
               <Select value={dataset} onValueChange={onDatasetChange}>
-                <SelectTrigger className="w-44 h-7 border-border text-xs">
+                <SelectTrigger className="w-44 h-7 border-border text-xs" aria-label="Dataset">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -377,7 +379,7 @@ export const Toolbar = ({
                     }
                   }}
                 >
-                  <SelectTrigger className="w-48 h-7 border-border text-xs">
+                  <SelectTrigger className="w-48 h-7 border-border text-xs" aria-label="Uploaded file">
                     <SelectValue placeholder="Select uploaded file" />
                   </SelectTrigger>
                   <SelectContent>
@@ -435,6 +437,20 @@ export const Toolbar = ({
         {/* Right side: Action buttons */}
         <div className="flex items-center gap-2.5 flex-shrink-0">
           <Tooltip>
+            <TooltipTrigger asChild><Button
+                variant="outline"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={onQuickStartClick}
+                data-testid="quickstart-reopen-button"
+               aria-label="Quick start"><Rocket className="h-3.5 w-3.5" />
+              </Button></TooltipTrigger>
+            <TooltipContent>
+              <p>Quick start</p>
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="outline"
@@ -443,11 +459,18 @@ export const Toolbar = ({
                 onClick={() =>
                   setTheme(resolvedTheme === "dark" ? "light" : "dark")
                 }
+                /* The name states the action, not the current state, so it
+                   does not contradict itself between render and click. */
+                aria-label={
+                  mounted && resolvedTheme === "dark"
+                    ? "Switch to light theme"
+                    : "Switch to dark theme"
+                }
               >
                 {mounted && resolvedTheme === "dark" ? (
-                  <Sun className="h-3.5 w-3.5" />
+                  <Sun className="h-3.5 w-3.5" aria-hidden="true" />
                 ) : (
-                  <Moon className="h-3.5 w-3.5" />
+                  <Moon className="h-3.5 w-3.5" aria-hidden="true" />
                 )}
               </Button>
             </TooltipTrigger>
@@ -468,7 +491,11 @@ export const Toolbar = ({
               <Button
                 variant="outline"
                 size="sm"
-                className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30 font-medium"
+                /* amber-700, not amber-600: on the amber-500/10 tint the 600
+                   shade measured 2.95:1, under the WCAG AA 4.5:1 minimum for
+                   this 11px text. 700 measures 4.65:1. The dark-mode shade is
+                   unchanged because it sits on a dark surface. */
+                className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30 font-medium"
                 onClick={onWarmupClick}
               >
                 <Flame className="h-3.5 w-3.5 mr-1 text-amber-500 fill-amber-500/20" />

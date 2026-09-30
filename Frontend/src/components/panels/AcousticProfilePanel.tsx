@@ -118,7 +118,9 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
             <CardTitle className="text-xs flex items-center gap-1.5">
               Pitch Contour (pYIN F0)
               <Tooltip>
-                <TooltipTrigger><HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" /></TooltipTrigger>
+                <TooltipTrigger aria-label="Fundamental frequency over time.">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
+                  </TooltipTrigger>
                 <TooltipContent>Fundamental frequency over time. Gaps mean unvoiced/silent frames.</TooltipContent>
               </Tooltip>
             </CardTitle>
@@ -152,7 +154,9 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
             <CardTitle className="text-xs flex items-center gap-1.5">
               RMS Energy Envelope
               <Tooltip>
-                <TooltipTrigger><HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" /></TooltipTrigger>
+                <TooltipTrigger aria-label="Localized loudness/intensity over time.">
+                    <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" aria-hidden="true" />
+                  </TooltipTrigger>
                 <TooltipContent>Localized loudness/intensity over time.</TooltipContent>
               </Tooltip>
             </CardTitle>

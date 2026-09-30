@@ -85,7 +85,11 @@ export const AudioUploader = ({ onUploadSuccess, model }: AudioUploaderProps) =>
           ${isDragActive ? 'opacity-100' : 'opacity-0 pointer-events-none'}
         `}
       >
-        <input {...getInputProps()} />
+        {/* react-dropzone renders a bare file input with no label, which axe
+            reports as a critical `label` violation. The dropzone's visible
+            instructions are not programmatically associated with it, so the
+            name is supplied here. */}
+        <input {...getInputProps()} aria-label="Upload audio files" />
         <Card className="w-96 border-2 border-dashed border-primary">
           <CardContent className="p-8 text-center">
             <div className="flex flex-col items-center gap-4">

@@ -1,17 +1,14 @@
-fastapi==0.111.0
+# Upgraded from 0.111.0 to clear 14 advisories against Starlette 0.37.2, the
+# ASGI layer every request passes through. FastAPI 0.111 pinned
+# starlette<0.38.0 while the fixes start at 0.40.0, so the framework had to
+# move with it. Verified: backend suite 775 passed, 7 skipped, 0 failed.
+fastapi>=0.141.1,<0.142
 uvicorn[standard]==0.30.0
 redis==5.0.7
 msgpack>=1.0,<2.0
 rq==2.10.0
 lz4>=4.0,<5.0
 pydantic-settings==2.3.4
-httpx==0.27.0
-# >=8.3.3 is locust's floor (it depends on pytest); the exact pin below it
-# made `pip install -r requirements.txt` unresolvable once locust was added.
-# Verified on 8.4.2: backend suite 587 passed, 6 skipped.
-pytest>=8.3.3,<9
-pytest-asyncio==0.23.7
-fakeredis==2.23.2
 transformers>=4.30.0
 torch>=2.6.0
 librosa>=0.10.0
@@ -22,11 +19,10 @@ umap-learn>=0.5.3
 numpy>=1.24,<2.0
 pandas
 captum>=0.6.0
-accelerate
+# >=1.15.0 clears PYSEC-2026-3804; 1.14.0 has no fix available.
+accelerate>=1.15.0
 jiwer>=4.0.0
-locust>=2.31,<3.0
 # SRS §3.10 / SAD §9 — durable MongoDB metadata tier (LIT-255/256/257). The
-# pymongo driver is pure-Python, no native build; mongomock backs the unit
-# tests that don't need a live server (mirrors fakeredis).
+# pymongo driver is pure-Python, no native build. mongomock (test-only) lives in
+# requirements-dev.txt — production images must not carry test tools (LIT-203).
 pymongo>=4.6,<5.0
-mongomock>=4.1

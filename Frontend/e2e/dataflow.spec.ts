@@ -54,6 +54,26 @@ test.beforeEach(async () => {
   );
 });
 
+/**
+ * Suppress the first-run quick-start dialog (LIT-261).
+ *
+ * It auto-opens on a fresh profile, and every Playwright context is a fresh
+ * profile, so its modal overlay sat over the workbench and intercepted the
+ * pointer events these tests depend on: every click here failed with
+ * "DialogOverlay intercepts pointer events". The dialog has its own coverage
+ * in quickstart.spec.ts; what this suite asserts is data flow, so the dialog
+ * is dismissed before the page loads rather than clicked away in each test.
+ */
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem("audiolit.quickstart.dismissed", "true");
+    } catch {
+      /* private mode: the dialog will open and the test will say so */
+    }
+  });
+});
+
 /** Click the first dataset row and wait for the workspace to bind to it. */
 async function selectFirstClip(page: Page): Promise<string> {
   await page.goto("/");
