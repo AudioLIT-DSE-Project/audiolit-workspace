@@ -359,14 +359,37 @@ export const AudioDatasetPanel = ({
   // the button would appear to do nothing.
   const handleRegenerateRow = useCallback(async (fileId: string) => {
     if (!model) return;
-    const currentRow = datasetMetadata.find(row => {
-      const id = row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"];
-      return String(id) === fileId;
-    });
-    if (!currentRow) return;
 
-    const pathVal = (currentRow["path"] || currentRow["filepath"] || currentRow["file"] || currentRow["filename"]) as string;
-    const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || fileId) : fileId;
+    let requestBody: any;
+    let filename = fileId;
+
+    // Check if this is an uploaded live recording file first
+    const uploadedFile = uploadedFiles?.find(f => f.file_id === fileId || f.filename === fileId || f.file_path === fileId);
+
+    if (uploadedFile) {
+      filename = uploadedFile.filename;
+      requestBody = {
+        model,
+        file_path: uploadedFile.file_path || `uploads/${uploadedFile.file_id}`,
+        force_refresh: true
+      };
+    } else {
+      const currentRow = datasetMetadata.find(row => {
+        const id = row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"];
+        return String(id) === fileId;
+      });
+      if (!currentRow) return;
+
+      const pathVal = (currentRow["path"] || currentRow["filepath"] || currentRow["file"] || currentRow["filename"]) as string;
+      filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || fileId) : fileId;
+
+      requestBody = {
+        model,
+        dataset,
+        dataset_file: filename,
+        force_refresh: true
+      };
+    }
 
     setInferenceStatus(prev => ({ ...prev, [fileId]: 'loading' }));
 
@@ -375,7 +398,7 @@ export const AudioDatasetPanel = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ model, dataset, dataset_file: filename, force_refresh: true }),
+        body: JSON.stringify(requestBody),
         signal: abortControllerRef.current?.signal,
       });
 
@@ -393,7 +416,7 @@ export const AudioDatasetPanel = ({
       setInferenceStatus(prev => ({ ...prev, [fileId]: 'error' }));
       toast.error(`Failed to regenerate prediction for ${filename}`);
     }
-  }, [model, dataset, datasetMetadata, onPredictionUpdate]);
+  }, [model, dataset, datasetMetadata, uploadedFiles, onPredictionUpdate]);
 
   // Process batch inference queue when active
   useEffect(() => {

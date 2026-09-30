@@ -149,7 +149,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     const filename = data.filename || pathVal.split("/").pop()?.split("\\").pop() || pathVal;
     const file = uploadedFiles?.find(f => f.file_id === fileId || f.filename === filename || f.file_id === fallbackRowId);
     return (
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5 min-w-0">
         <Badge variant="outline" className="text-[9px] px-1 py-0 bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30 shrink-0 font-semibold">
           LIVE
         </Badge>
@@ -175,7 +175,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         >
           <Play className="h-3 w-3" />
         </Button>
-        <span className="font-mono text-xs truncate max-w-[180px]" title={filename}>
+        <span className="font-mono text-xs truncate max-w-[130px] inline-block" title={filename}>
           {filename}
         </span>
       </div>
@@ -275,7 +275,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
-          return <span className="text-xs">{predictionText}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words font-normal" title={predictionText}>{predictionText}</span>;
         }
       },
     },
@@ -288,7 +288,8 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           return <span className="text-xs font-mono">{data.groundTruthLabel || data.ground_truth || "—"}</span>;
         } else {
           const data = row.original as DatasetRow;
-          return <span className="text-xs">{getFrom(data, ["sentence", "transcript", "text", "emotion", "label"], "")}</span>;
+          const gt = getFrom(data, ["sentence", "transcript", "text", "emotion", "label"], "");
+          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={gt}>{gt || "—"}</span>;
         }
       },
     },
@@ -385,7 +386,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
-          return <span className="text-xs">{predictionText || <span className="text-gray-400">-</span>}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words font-normal" title={predictionText}>{predictionText || <span className="text-gray-400">-</span>}</span>;
         },
       },
     ];
@@ -398,7 +399,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
           const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
-          return <span className="text-xs">{groundTruthValue}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={groundTruthValue}>{groundTruthValue || "—"}</span>;
         },
       });
     }
@@ -579,6 +580,26 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     onVisibleRowIdsChange(ids);
   }, [onVisibleRowIdsChange, searchQuery, dataset, model, hasDatasetMetadata]);
 
+  const getColumnWidthClass = (columnId: string) => {
+    switch (columnId) {
+      case "filename":
+        return "w-[24%] min-w-[140px]";
+      case "prediction":
+        return "w-[34%] min-w-[200px]";
+      case "groundTruthLabel":
+      case "ground_truth":
+        return "w-[26%] min-w-[160px]";
+      case "confidence":
+        return "w-[6%] min-w-[55px] text-center";
+      case "duration":
+        return "w-[6%] min-w-[55px] text-right";
+      case "actions":
+        return "w-[95px] min-w-[95px] text-right shrink-0";
+      default:
+        return "";
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       {/* A scrollable region must be reachable by keyboard, or someone who
@@ -591,12 +612,12 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         role="region"
         aria-label="Audio dataset table"
       >
-        <Table>
+        <Table className="w-full table-fixed">
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} className="h-8 text-xs">
+                  <TableHead key={header.id} className={`h-8 text-xs font-semibold ${getColumnWidthClass(header.id)}`}>
                     {header.isPlaceholder
                       ? null
                       : flexRender(
@@ -648,7 +669,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
                   }}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id} className="py-2">
+                    <TableCell key={cell.id} className={`py-2 align-middle ${getColumnWidthClass(cell.column.id)}`}>
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </TableCell>
                   ))}
