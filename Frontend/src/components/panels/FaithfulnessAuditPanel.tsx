@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { HelpCircle, PlayCircle, Loader2 } from "lucide-react";
 import { API_BASE } from "@/lib/api";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -47,13 +48,8 @@ const getRequestRef = (
   originalDataset: string | undefined,
 ) => {
   if (selectedFile) {
-    const isUploadedFile = selectedFile.file_path && (
-      selectedFile.file_path.includes('uploads/') ||
-      selectedFile.file_path.startsWith('uploads/') ||
-      selectedFile.message === "Perturbed file" ||
-      selectedFile.message === "File uploaded successfully" ||
-      selectedFile.message === "File uploaded and processed successfully"
-    ) && !selectedFile.message.includes("Selected from");
+    const sfAny = selectedFile as any;
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
     if (isUploadedFile) return { file_path: selectedFile.file_path };
     const datasetToUse = originalDataset && originalDataset !== "custom" ? originalDataset : dataset;

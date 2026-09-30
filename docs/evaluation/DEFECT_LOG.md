@@ -223,6 +223,21 @@ SR1's magic-number clause is met in a stronger form than written, since the
 route decodes the file with librosa and rejects what will not decode, which a
 header-byte check would not catch.
 
+### D23, an unreachable error branch, 2026-09-30
+
+Found while writing the handbook's upload chapter, by reading the route and then
+sending it something no test had: a `.wav`-named file containing
+`b"not audio at all"`.
+
+| ID | Symptom | Root cause | Fix | Guarding test |
+| -- | ------- | ---------- | --- | ------------- |
+| **D23** | Every undecodable upload returned `500 Failed to upload file: name 'logger' is not defined` instead of the 422 the handler was written to return. The real reason was hidden and the 422 branch was unreachable. | The decode-failure handler calls `logger.error(...)`, and `logger` was never defined in `app/api/routes/upload.py` — no `import logging`, no module-level binding. The `NameError` raised inside the handler propagated to the route's outer `except Exception`, which wrapped it as a 500. | One `import logging` and one `logger = logging.getLogger(__name__)`, with a comment recording why the handler needs it. | `test_upload_limits.py::TestDecodeRejection`, 1 test asserting 422, the message, and that the rejected file is not left on disk. Verified against the pre-fix code, which returned 500. |
+
+The useful part is not the missing import. It is that **the branch had never
+executed.** The upload happy path ran constantly; this error path had run zero
+times, in a route that until recently had no tests at all. An error path is
+code, and code that never runs has never been tested.
+
 ---
 
 ## 6. Verification-method note

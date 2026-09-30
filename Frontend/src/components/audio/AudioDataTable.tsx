@@ -10,7 +10,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, ChevronLeft, ChevronRight, RotateCw } from "lucide-react";
+import { Play, ChevronLeft, ChevronRight, RotateCw, FolderPlus, Trash2 } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
 
 interface UploadedFile {
@@ -21,7 +21,8 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
-  prediction?:string;
+  prediction?: string;
+  ground_truth?: string;
 }
 
 interface AudioData {
@@ -45,6 +46,8 @@ interface AudioDataTableProps {
   datasetMetadata?: Record<string, string | number>[];
   uploadedFiles?: UploadedFile[];
   onFilePlay?: (file: UploadedFile) => void;
+  onDeleteLiveRecording?: (fileId: string) => void;
+  onSaveLiveToCustom?: (file: UploadedFile) => void;
   predictionMap?: Record<string, string>;
   inferenceStatus?: Record<string, 'idle' | 'loading' | 'done' | 'error'>;
   onVisibleRowIdsChange?: (rowIds: string[]) => void;
@@ -62,7 +65,7 @@ const predictionColumnNoun = (model: string): string => {
   return "Emotion";
 };
 
-export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange, onRegenerateRow }: AudioDataTableProps) => {
+export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, onDeleteLiveRecording, onSaveLiveToCustom, predictionMap, inferenceStatus, onVisibleRowIdsChange, onRegenerateRow }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads
   const hasDatasetMetadata = (datasetMetadata?.length || 0) > 0;
   const hasUploadedFiles = uploadedFiles && uploadedFiles.length > 0;
@@ -103,12 +106,13 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
   }, [inferenceStatus, model, onRegenerateRow]);
 
   // Custom uploads data and columns
-  const customTableData: AudioData[] = useMemo(() => (
+  const customTableData = useMemo(() => (
     uploadedFiles?.map(file => ({
+      file_id: file.file_id,
       id: file.file_id,
       filename: file.filename,
       prediction: file.prediction || "",
-      groundTruthLabel: "",
+      groundTruthLabel: file.ground_truth || "",
       confidence: 0,
       duration: typeof file.duration === 'number' ? file.duration : 0,
       file_path: file.file_path,
@@ -116,36 +120,125 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     })) || []
   ), [uploadedFiles]);
 
+  const isUploadedRow = useCallback((rowOriginal: any): boolean => {
+    if (!rowOriginal) return false;
+    if ('file_id' in rowOriginal || rowOriginal.is_live || rowOriginal.is_uploaded) return true;
+    
+    const pathVal = getFrom(rowOriginal, ["path", "filepath", "file", "filename", "file_path", "id"], "");
+    const cleanFilename = pathVal.split("/").pop()?.split("\\").pop() || pathVal;
+    
+    if (cleanFilename.startsWith("live_recording_") || pathVal.includes("uploads/")) return true;
+    
+    if (uploadedFiles && uploadedFiles.length > 0) {
+      return uploadedFiles.some(f => 
+        f.file_id === rowOriginal.id || 
+        f.file_id === rowOriginal.file_id || 
+        f.filename === cleanFilename ||
+        f.filename === rowOriginal.filename ||
+        f.file_path === pathVal ||
+        (f.file_path && pathVal.endsWith(f.file_path.split("/").pop() || ""))
+      );
+    }
+    return false;
+  }, [uploadedFiles, getFrom]);
+
+  const renderLiveFilename = useCallback((rowOriginal: any, fallbackRowId: string) => {
+    const data = rowOriginal as any;
+    const fileId = data.file_id || data.id || fallbackRowId;
+    const pathVal = getFrom(data, ["path", "filepath", "file", "filename"], String(fileId));
+    const filename = data.filename || pathVal.split("/").pop()?.split("\\").pop() || pathVal;
+    const file = uploadedFiles?.find(f => f.file_id === fileId || f.filename === filename || f.file_id === fallbackRowId);
+    return (
+      <div className="flex items-center gap-1.5 min-w-0">
+        <Badge variant="outline" className="text-[9px] px-1 py-0 bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30 shrink-0 font-semibold">
+          LIVE
+        </Badge>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 w-6 p-0 shrink-0"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (file && onFilePlay) {
+              onFilePlay(file);
+            } else if (onFilePlay) {
+              onFilePlay({
+                file_id: String(fileId),
+                filename: String(filename),
+                file_path: data.file_path || String(filename),
+                message: "Live recording"
+              });
+            }
+          }}
+        >
+          <Play className="h-3 w-3" />
+        </Button>
+        <span className="font-mono text-xs truncate max-w-[130px] inline-block" title={filename}>
+          {filename}
+        </span>
+      </div>
+    );
+  }, [uploadedFiles, getFrom, onFilePlay]);
+
+  const renderLiveActions = useCallback((rowOriginal: any, fallbackRowId: string) => {
+    const data = rowOriginal as any;
+    const fileId = data.file_id || data.id || fallbackRowId;
+    const filename = data.filename || getFrom(data, ["path", "filepath", "file", "filename"], String(fileId));
+    const file = uploadedFiles?.find(f => f.file_id === fileId || f.filename === filename || f.file_id === fallbackRowId) || {
+      file_id: String(fileId),
+      filename: String(filename),
+      file_path: data.file_path || String(filename),
+      message: "Live recording"
+    };
+    return (
+      <div className="flex items-center gap-1">
+        {regenerateCell(String(fileId))}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
+          title="Save live audio to custom dataset"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (onSaveLiveToCustom) {
+              onSaveLiveToCustom(file);
+            }
+          }}
+        >
+          <FolderPlus className="h-3 w-3" />
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
+          title="Delete live recording from session"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (onDeleteLiveRecording) {
+              onDeleteLiveRecording(String(fileId));
+            }
+          }}
+        >
+          <Trash2 className="h-3 w-3 text-destructive" />
+        </Button>
+      </div>
+    );
+  }, [uploadedFiles, getFrom, regenerateCell, onSaveLiveToCustom, onDeleteLiveRecording]);
+
   const customColumns: ColumnDef<unknown, unknown>[] = useMemo(() => [
     {
       id: "filename",
       header: "Filename",
       cell: ({ row }) => {
-        // Handle both AudioData (uploaded files) and DatasetRow (dataset files)
-        if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData)
-        const data = row.original as AudioData;
-        const file = uploadedFiles?.find(f => f.file_id === data.id);
-        return (
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="h-6 w-6 p-0"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                if (file && onFilePlay) onFilePlay(file);
-              }}
-            >
-              <Play className="h-3 w-3" />
-            </Button>
-            <span className="font-mono text-xs">{data.filename}</span>
-          </div>
-        );
+        if (isUploadedRow(row.original)) {
+          return renderLiveFilename(row.original, row.id as string);
         } else {
-          // This is a dataset file (DatasetRow)
           const data = row.original as DatasetRow;
           const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
           const filename = path.split("/").pop() || path;
@@ -163,14 +256,11 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           return "";
         }
         
-        // Handle both AudioData and DatasetRow
-        if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData) - use predictionMap like dataset files
-          const data = row.original as AudioData;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
           const pred = predictionMap?.[rowId] || data.prediction || "";
           if (!pred) return "";
           
-          // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
@@ -178,16 +268,14 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           
           return <Badge variant="outline" className="text-xs">{predictionText}</Badge>;
         } else {
-          // This is a dataset file (DatasetRow)
           const pred = predictionMap?.[rowId] ?? "";
           
-          // Handle object predictions (different models return different object structures)
           const predictionText = typeof pred === 'string' ? pred : 
             (typeof pred === 'object' && pred !== null) ? 
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
-          return <span className="text-xs">{predictionText}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words font-normal" title={predictionText}>{predictionText}</span>;
         }
       },
     },
@@ -195,15 +283,13 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "groundTruthLabel",
       header: "Ground Truth",
       cell: ({ row }) => {
-        // Handle both AudioData and DatasetRow
-        if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData)
-        const data = row.original as AudioData;
-        return <span className="text-xs">{data.groundTruthLabel}</span>;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
+          return <span className="text-xs font-mono">{data.groundTruthLabel || data.ground_truth || "—"}</span>;
         } else {
-          // This is a dataset file (DatasetRow)
           const data = row.original as DatasetRow;
-          return <span className="text-xs">{getFrom(data, ["sentence", "transcript", "text", "emotion", "label"], "")}</span>;
+          const gt = getFrom(data, ["sentence", "transcript", "text", "emotion", "label"], "");
+          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={gt}>{gt || "—"}</span>;
         }
       },
     },
@@ -211,14 +297,11 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "confidence",
       header: "Confidence",
       cell: ({ row }) => {
-        // Only show confidence for uploaded files (AudioData)
-        if ('file_id' in (row.original as any)) {
-        const data = row.original as AudioData;
-        // Don't display confidence if it's 0
-        if (data.confidence === 0) return null;
-        return <span className="text-xs">{data.confidence}</span>;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
+          if (!data.confidence || data.confidence === 0) return null;
+          return <span className="text-xs">{data.confidence}</span>;
         } else {
-          // For dataset files, show N/A or empty
           return <span className="text-xs text-muted-foreground">N/A</span>;
         }
       },
@@ -227,14 +310,11 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "duration",
       header: "Duration",
       cell: ({ row }) => {
-        // Handle both AudioData and DatasetRow
-        if ('file_id' in (row.original as any)) {
-          // This is an uploaded file (AudioData)
-        const data = row.original as AudioData;
+        if (isUploadedRow(row.original)) {
+          const data = row.original as any;
           const duration = typeof data.duration === 'number' ? data.duration : 0;
           return <span className="text-xs">{duration.toFixed(2)}s</span>;
         } else {
-          // This is a dataset file (DatasetRow)
           const data = row.original as DatasetRow;
           const d = Number(getFrom(data, ["duration", "length"], "0"));
           if (d > 0) {
@@ -248,13 +328,13 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       id: "actions",
       header: "Actions",
       cell: ({ row }) => {
-        // Regenerate only applies to dataset rows - uploaded files run
-        // through the separate async multitask job, not /inferences/run.
-        if ('file_id' in (row.original as any)) return null;
+        if (isUploadedRow(row.original)) {
+          return renderLiveActions(row.original, row.id as string);
+        }
         return regenerateCell(row.id as string);
       },
     },
-  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell]);
+  ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom, regenerateCell, isUploadedRow, renderLiveFilename, renderLiveActions]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
     const v = row["filename"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["id"];
@@ -270,6 +350,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         id: "filename",
         header: "Filename",
         cell: ({ row }) => {
+          if (isUploadedRow(row.original)) {
+            return renderLiveFilename(row.original, row.id as string);
+          }
           const data = row.original as DatasetRow;
           const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
           const filename = path.split("/").pop() || path;
@@ -303,7 +386,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
               (pred as any).predicted_transcript || (pred as any).predicted_emotion || (pred as any).predicted_label || (pred as any).prediction || (pred as any).text || JSON.stringify(pred) : 
               String(pred);
               
-          return <span className="text-xs">{predictionText || <span className="text-gray-400">-</span>}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words font-normal" title={predictionText}>{predictionText || <span className="text-gray-400">-</span>}</span>;
         },
       },
     ];
@@ -316,7 +399,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         cell: ({ row }) => {
           const data = row.original as DatasetRow;
           const groundTruthValue = getFrom(data, ["sentence", "transcript", "text", "statement", "emotion", "label", "ground_truth", "target"], "");
-          return <span className="text-xs">{groundTruthValue}</span>;
+          return <span className="text-xs leading-snug line-clamp-3 break-words text-slate-600 dark:text-slate-400 font-normal" title={groundTruthValue}>{groundTruthValue || "—"}</span>;
         },
       });
     }
@@ -334,11 +417,16 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     baseColumns.push({
       id: "actions",
       header: "Actions",
-      cell: ({ row }) => regenerateCell(row.id as string),
+      cell: ({ row }) => {
+        if (isUploadedRow(row.original)) {
+          return renderLiveActions(row.original, row.id as string);
+        }
+        return regenerateCell(row.id as string);
+      },
     });
 
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell, isUploadedRow, renderLiveFilename, renderLiveActions]);
 
   const datasetColumnsRavdess: ColumnDef<unknown, unknown>[] = useMemo(() => {
     const baseColumns = [
@@ -346,6 +434,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         id: "filename",
         header: "Filename",
         cell: ({ row }) => {
+          if (isUploadedRow(row.original)) {
+            return renderLiveFilename(row.original, row.id as string);
+          }
           const data = row.original as DatasetRow;
           const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
           const filename = path.split("/").pop() || path;
@@ -410,11 +501,16 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     baseColumns.push({
       id: "actions",
       header: "Actions",
-      cell: ({ row }) => regenerateCell(row.id as string),
+      cell: ({ row }) => {
+        if (isUploadedRow(row.original)) {
+          return renderLiveActions(row.original, row.id as string);
+        }
+        return regenerateCell(row.id as string);
+      },
     });
 
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell]);
+  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth, regenerateCell, isUploadedRow, renderLiveFilename, renderLiveActions]);
 
   // Build table config based on mode
   const data: unknown[] = useMemo(() => {
@@ -484,6 +580,26 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
     onVisibleRowIdsChange(ids);
   }, [onVisibleRowIdsChange, searchQuery, dataset, model, hasDatasetMetadata]);
 
+  const getColumnWidthClass = (columnId: string) => {
+    switch (columnId) {
+      case "filename":
+        return "w-[22%] min-w-[130px]";
+      case "prediction":
+        return "w-[30%] min-w-[180px]";
+      case "groundTruthLabel":
+      case "ground_truth":
+        return "w-[22%] min-w-[140px]";
+      case "confidence":
+        return "w-[10%] min-w-[85px] text-center whitespace-nowrap px-1";
+      case "duration":
+        return "w-[8%] min-w-[70px] text-right whitespace-nowrap px-1";
+      case "actions":
+        return "w-[85px] min-w-[85px] text-right shrink-0";
+      default:
+        return "";
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       {/* A scrollable region must be reachable by keyboard, or someone who
@@ -496,12 +612,12 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         role="region"
         aria-label="Audio dataset table"
       >
-        <Table>
+        <Table className="w-full table-fixed">
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} className="h-8 text-xs">
+                  <TableHead key={header.id} className={`h-8 text-xs font-semibold ${getColumnWidthClass(header.id)}`}>
                     {header.isPlaceholder
                       ? null
                       : flexRender(
@@ -553,7 +669,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
                   }}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id} className="py-2">
+                    <TableCell key={cell.id} className={`py-2 align-middle ${getColumnWidthClass(cell.column.id)}`}>
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </TableCell>
                   ))}

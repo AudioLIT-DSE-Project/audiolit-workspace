@@ -15,7 +15,11 @@ timeline (Phase 2 MVP → Phase 3 refinement/testing → Phase 4 submission).
 2. `docs/SAD.md` — architecture of record
 3. `docs/SRS.md` — committed requirements (FRs, NFRs, scope)
 4. Linear issue **LIT-228** — Tier-C stamping convention doc, FR→issue map
-5. `docs/ISSUE_PLAN.md` — dependency-ordered local index of every committed
+5. `docs/handbook/` — the 18-chapter handbook: the theory, then every module at
+   code level, then the full testing/evaluation record. Explanatory, **not**
+   authoritative over SAD/SRS. Start at `docs/handbook/README.md`; Chapter 18 is
+   the verification record and Chapter 16 the condensed testing lessons.
+6. `docs/ISSUE_PLAN.md` — dependency-ordered local index of every committed
    issue, with status/assignee, so you can see what's unblocked without
    opening 50 Linear tickets
 
@@ -60,6 +64,7 @@ fakeredis has hung pytest intermittently, and twice masked a real CI hang.
 
 ```bash
 npm ci
+npm run typecheck # tsc -p tsconfig.app.json --noEmit  (see the trap below)
 npm run lint      # eslint .
 npm test          # jest (ts-jest + jsdom, tests in src/**/*.test.ts(x))
 npm run build     # vite build
@@ -70,10 +75,22 @@ npm run test:e2e                                 # layout specs, chromium+firefo
 npm run test:e2e:dataflow                        # opt-in; REQUIRES Redis + API + workers live
 ```
 
-**The full local CI equivalent is `npm ci && npm run lint && npm test && npm run
-build` — `npm test` is in `.github/workflows/ci.yml` and is easy to forget.**
-CI on this project has genuinely failed from dependency version drift (PR #7);
-don't assume green.
+**The full local CI equivalent is `npm ci && npm run typecheck && npm run lint &&
+npm test && npm run build`.** All five are in `.github/workflows/ci.yml`;
+`npm test` and `npm run typecheck` are the two people forget. CI on this project
+has genuinely failed from dependency version drift (PR #7); don't assume green.
+
+**`npx tsc --noEmit` is a no-op here and always passes.** The root
+`tsconfig.json` has `"files": []` and only project *references*, so a bare
+invocation typechecks **zero source files** — it is a green lie. Use
+`npm run typecheck` (or `tsc -p tsconfig.app.json --noEmit`), which checks 86.
+This was found the hard way twice in one session: a syntax error survived a
+"clean" `tsc --noEmit` and was caught only by ESLint, and a real type error
+(`setUploadedFiles` referenced after the refactor that deleted it, in
+`AudioDatasetPanel.tsx`) reached `develop` because **nothing in CI typechecked
+at all**. `vite build` uses esbuild, which strips types without checking them,
+and Jest only compiles what a test imports — so a type error in a component no
+test touches ships with every gate green.
 
 ---
 
@@ -180,13 +197,33 @@ orchestrator wrapper itself. `broker` lives in the individual test files, not in
 - **Single monorepo** (`audiolit-workspace`). Some old issue bodies and an
   earlier SAD draft describe a two-repo split (workspace + ds-engine) — that
   topology is superseded, documented in `docs/README.md` errata E1.
-- **Branch model**: `main` is production, never receives a PR directly.
-  `develop` is the integration branch — all feature work branches off it,
-  PRs merge into it. `testing` is a dedicated test-harness/evaluation branch
-  (a superset of `develop`, carrying Playwright `dataflow` E2E, Locust load
-  tests, and diagnostic scripts). One feature branch per Linear issue
-  (`feature/lit-xxx-...`, use the issue's own `gitBranchName` field), one PR
-  per issue referencing its LIT-id.
+- **Branch model**: `develop` is the integration branch — all feature work
+  branches off it, PRs merge into it. `testing` is a dedicated
+  test-harness/evaluation branch (a superset of `develop`, carrying Playwright
+  `dataflow` E2E, Locust load tests, and diagnostic scripts). One feature branch
+  per Linear issue (`feature/lit-xxx-...`, use the issue's own `gitBranchName`
+  field), one PR per issue referencing its LIT-id.
+- **`main` is the client-facing production branch, and it is *built*, not merged
+  from a feature branch.** It carries the production codebase **without any
+  development artefact**: no `docs/`, no `CLAUDE.md`/`GEMINI.md`, no `plans/`,
+  no `scratch/`. It *does* keep `Backend/tests`, `Frontend/e2e`, the component
+  tests, `Backend/apitests`, `Backend/loadtests` and `.github/workflows` — a
+  client who cannot run the suite cannot verify their own deployment, and CI on
+  `main` cannot gate a release without them.
+  - Build a release with **`scripts/prepare-release.sh v1.0.0`**. It creates
+    `release/<version>` off `origin/develop`, promotes `release/README.md` and
+    `release/DEPLOYMENT.md` to the root, strips the development artefacts,
+    self-checks, and commits. It never touches `main` and never pushes.
+  - **`.github/workflows/main-hygiene.yml` enforces this on every push and PR to
+    `main`** — it fails if a forbidden path is present, if the client-facing
+    guides are missing, or if `README.md` does not look like a deployment guide.
+    The script's `STRIP` list and the workflow's `FORBIDDEN` list are **a pair**:
+    add to both together.
+  - The client-facing guides live at `release/README.md` and
+    `release/DEPLOYMENT.md` on `develop`, so `develop`'s own `README.md` can stay
+    a contributor guide. **Edit them there**, never on `main`.
+  - Never commit directly to `main`, and never merge a feature branch into it.
+    The only thing that reaches `main` is a reviewed `release/*` branch.
 - **Do not invent FRs.** There is no FR5, FR13, or FR14 in the reconciled
   SRS — they are vacated identifiers, not requirements. The **submitted SRS
   PDF numbers its FRs differently** (FR1–FR14, no gaps): submitted FR5=SER,
@@ -197,6 +234,16 @@ orchestrator wrapper itself. `broker` lives in the individual test files, not in
   side-by-side comparison is an *unnumbered* SRS §4.4 out-of-scope item;
   "dropped FR5" in `ISSUE_PLAN.md` is shorthand for the vacated identifier,
   not for the submitted FR5 (which is SER and is committed as FR6).
+- **Never re-implement the uploaded-vs-dataset predicate.** Import
+  `isUploadedAudio` from `@/lib/audioSelection`. Every panel has to decide
+  whether the selected clip is an upload/live recording (addressed by
+  `file_path`) or a corpus row (addressed by `dataset` + `dataset_file`), and
+  that predicate was inlined at **15 call sites across 10 files in five variants
+  that did not agree** — see the incident below. An ESLint
+  `no-restricted-syntax` rule now fails the build on a 16th inline copy or on any
+  `path.includes("live_recording")`; `src/tests/audioSelection.test.ts` pins the
+  behaviour. The rule and the test are a pair: the test cannot stop a new copy
+  appearing, and the rule cannot check the logic.
 - **Never promote a §4.4 stretch item to committed scope.** Stretch issues
   are listed in `docs/ISSUE_PLAN.md`'s "Non-committed / stretch" table —
   check there before starting anything that sounds like it might be one.
@@ -306,6 +353,33 @@ today's `task_orchestrator.py`. **A `Path:` field is a claim about the tree, and
 stale stamps are a known failure mode here — `ls` the directory before you write
 to it, and if the stamp points somewhere that no longer exists, fix the stamp
 and flag it rather than recreating the directory.**
+
+**One predicate, fifteen implementations (LIT-266, live recordings).** The live
+voice-recording feature needed every panel to answer "is this selection an
+upload or a corpus row?", because the answer decides the request shape. It was
+written inline each time: **15 call sites across 10 files in five variants.**
+Variant A accepted any `message` that was not one of two exact strings; variant B
+rejected anything containing `"Selected from"`; variant C applied the exclusion
+as a trailing `&&` (different precedence, different answer); variant D
+cross-referenced the uploaded-files list; variant E omitted the live-recording
+check entirely *and* dereferenced `selectedFile.message.includes(...)`
+unconditionally, so an upload with no `message` threw a `TypeError`.
+
+The visible consequence is a run of consecutive commits in the log — "fix:
+properly resolve live audio recording file references", panel after panel —
+because each site had to be found and corrected on its own. Two panels could send
+**different request shapes for the same selected clip**.
+
+It is now one exported function with tests and an ESLint guard. Two details worth
+keeping: `grep` found only 13 of the 15 sites, and **the ESLint rule found the
+last two immediately** — a syntactic rule beats a substring search for this. And
+the backend renames every upload to a UUID, so `live_recording_...` survives only
+in `filename`, never in `file_path`: the path-substring check that 15 sites relied
+on was largely dead and the `uploads/` segment was doing all the work.
+
+This is the same shape as the two progress-channel prefixes and the
+`worker_lock:`/`worker-lock:` hyphen (D09): **a contract asserted in many places
+and checked in none.** Derive it once; never re-type it.
 
 **Two green PRs are not proof the combination works.** PR #10 (LIT-225) added
 `app/core/rq_connection.py` importing `app.core.settings`; PR #13 (LIT-227)

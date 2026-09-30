@@ -62,12 +62,15 @@ interface AudioDatasetPanelProps {
   selectedFile?: UploadedFile | null;
   onFileSelect?: (file: UploadedFile) => void;
   onUploadSuccess?: (uploadResponse: UploadedFile) => void;
+  onDeleteLiveRecording?: (fileId: string) => void;
+  onSaveLiveToCustom?: (file: UploadedFile) => void;
   batchInferenceStatus?: 'idle' | 'running' | 'done';
   onBatchInferenceStart?: () => void;
   onBatchInferenceComplete?: () => void;
   onAvailableFilesChange?: (files: string[]) => void;
   onPredictionUpdate?: (fileId: string, prediction: string) => void;
   predictionMap?: Record<string, string>;
+  onActiveInferenceCountChange?: (count: number) => void;
 }
 
 export const AudioDatasetPanel = ({ 
@@ -75,24 +78,33 @@ export const AudioDatasetPanel = ({
   model,
   dataset,
   originalDataset,
+  uploadedFiles,
   selectedFile, 
   onFileSelect, 
   onUploadSuccess,
+  onDeleteLiveRecording,
+  onSaveLiveToCustom,
   batchInferenceStatus,
   onBatchInferenceStart,
   onBatchInferenceComplete,
   onAvailableFilesChange,
   onPredictionUpdate,
-  predictionMap: externalPredictionMap
+  predictionMap: externalPredictionMap,
+  onActiveInferenceCountChange
 }: AudioDatasetPanelProps) => {
   const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [datasetMetadata, setDatasetMetadata] = useState<Record<string, string | number>[]>([]);
   // Use external predictionMap from parent
   const predictionMap = externalPredictionMap || {};
   const [inferenceStatus, setInferenceStatus] = useState<Record<string, 'idle' | 'loading' | 'done' | 'error'>>({});
+
+  useEffect(() => {
+    if (!onActiveInferenceCountChange) return;
+    const loadingCount = Object.values(inferenceStatus).filter(s => s === 'loading').length;
+    onActiveInferenceCountChange(loadingCount);
+  }, [inferenceStatus, onActiveInferenceCountChange]);
   
   // Batch inference state
   const [currentInferenceIndex, setCurrentInferenceIndex] = useState(0);
@@ -157,14 +169,16 @@ export const AudioDatasetPanel = ({
       return;
     }
     
-    // When showing combined data (uploaded + dataset files), check if it's an uploaded file first
-    if (dataset === "custom") {
-      const uploadedFile = uploadedFiles?.find(f => f.file_id === id);
-      if (uploadedFile) {
-        onFileSelect(uploadedFile);
-        return;
-      }
-      // If not an uploaded file, treat it as a dataset file (fall through to dataset logic)
+    // Always check if the selected row is an uploaded live recording file first, regardless of active dataset mode
+    const uploadedFile = uploadedFiles?.find(f => 
+      f.file_id === id || 
+      f.filename === id || 
+      f.file_path === id ||
+      (f.file_id && id.includes(f.file_id))
+    );
+    if (uploadedFile) {
+      onFileSelect(uploadedFile);
+      return;
     }
 
     const findMatch = () => {
@@ -355,14 +369,37 @@ export const AudioDatasetPanel = ({
   // the button would appear to do nothing.
   const handleRegenerateRow = useCallback(async (fileId: string) => {
     if (!model) return;
-    const currentRow = datasetMetadata.find(row => {
-      const id = row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"];
-      return String(id) === fileId;
-    });
-    if (!currentRow) return;
 
-    const pathVal = (currentRow["path"] || currentRow["filepath"] || currentRow["file"] || currentRow["filename"]) as string;
-    const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || fileId) : fileId;
+    let requestBody: any;
+    let filename = fileId;
+
+    // Check if this is an uploaded live recording file first
+    const uploadedFile = uploadedFiles?.find(f => f.file_id === fileId || f.filename === fileId || f.file_path === fileId);
+
+    if (uploadedFile) {
+      filename = uploadedFile.filename;
+      requestBody = {
+        model,
+        file_path: uploadedFile.file_path || `uploads/${uploadedFile.file_id}`,
+        force_refresh: true
+      };
+    } else {
+      const currentRow = datasetMetadata.find(row => {
+        const id = row["id"] || row["path"] || row["filepath"] || row["file"] || row["filename"];
+        return String(id) === fileId;
+      });
+      if (!currentRow) return;
+
+      const pathVal = (currentRow["path"] || currentRow["filepath"] || currentRow["file"] || currentRow["filename"]) as string;
+      filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || fileId) : fileId;
+
+      requestBody = {
+        model,
+        dataset,
+        dataset_file: filename,
+        force_refresh: true
+      };
+    }
 
     setInferenceStatus(prev => ({ ...prev, [fileId]: 'loading' }));
 
@@ -371,7 +408,7 @@ export const AudioDatasetPanel = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ model, dataset, dataset_file: filename, force_refresh: true }),
+        body: JSON.stringify(requestBody),
         signal: abortControllerRef.current?.signal,
       });
 
@@ -389,7 +426,7 @@ export const AudioDatasetPanel = ({
       setInferenceStatus(prev => ({ ...prev, [fileId]: 'error' }));
       toast.error(`Failed to regenerate prediction for ${filename}`);
     }
-  }, [model, dataset, datasetMetadata, onPredictionUpdate]);
+  }, [model, dataset, datasetMetadata, uploadedFiles, onPredictionUpdate]);
 
   // Process batch inference queue when active
   useEffect(() => {
@@ -607,7 +644,6 @@ export const AudioDatasetPanel = ({
       }
 
       const data = await response.json();
-      setUploadedFiles(prevFiles => [...prevFiles, data]);
       toast.success(`Uploaded: ${file.name}`);
       
       if (onUploadSuccess) {
@@ -772,6 +808,8 @@ export const AudioDatasetPanel = ({
               datasetMetadata={datasetMetadata}
               uploadedFiles={uploadedFiles}
               onFilePlay={handleFilePlay}
+              onDeleteLiveRecording={onDeleteLiveRecording}
+              onSaveLiveToCustom={onSaveLiveToCustom}
               predictionMap={predictionMap}
               inferenceStatus={inferenceStatus}
               onVisibleRowIdsChange={handleVisibleRowIdsChange}

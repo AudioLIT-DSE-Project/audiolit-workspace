@@ -10,6 +10,7 @@ import { PredictionDisplay } from "../predictions/PredictionDisplay";
 import { Play, Pause, RotateCcw, Trash2, Plus, HelpCircle } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -19,6 +20,7 @@ interface UploadedFile {
   size?: number;
   duration?: number;
   sample_rate?: number;
+  ground_truth?: string;
 }
 
 interface Wav2Vec2Prediction {
@@ -121,13 +123,7 @@ export const DatapointEditorPanel = ({
     if (!selectedFile) return undefined;
     
     // Check if this is an uploaded file - more precise detection
-    const isUploadedFile = selectedFile.file_path && (
-      selectedFile.file_path.includes('uploads/') || 
-      selectedFile.file_path.startsWith('uploads/') ||
-      selectedFile.message === "Perturbed file" ||
-      selectedFile.message === "File uploaded successfully" ||
-      selectedFile.message === "File uploaded and processed successfully"
-    ) && selectedFile.message !== "Selected from embeddings" && selectedFile.message !== "Selected from dataset";
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
     
     if (isUploadedFile) {
       // This is an uploaded file, use the upload endpoint

@@ -10,6 +10,7 @@ import { DatapointEditorPanel } from "../panels/DatapointEditorPanel";
 import { PredictionPanel, UnifiedTaskResult } from "../panels/PredictionPanel";
 import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
 import { API_BASE } from '@/lib/api';
+import { toast } from "sonner";
 import { WarmupModal, WarmupProgress } from "../dataset/WarmupModal";
 import { WarmupStatusBanner } from "../dataset/WarmupStatusBanner";
 import { QuickStartDialog } from "./QuickStartDialog";
@@ -20,6 +21,7 @@ import {
   clearActiveWarmupJobId,
   isTerminalWarmupStatus,
 } from "@/lib/warmupJob";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -84,6 +86,7 @@ export const MainLayout = () => {
   const [predictionError, setPredictionError] = useState<string | null>(null);
   const [perturbedPredictions, setPerturbedPredictions] = useState<Wav2Vec2Prediction | WhisperPrediction | null>(null);
   const [isLoadingPerturbed, setIsLoadingPerturbed] = useState(false);
+  const [activeInferenceCount, setActiveInferenceCount] = useState(0);
 
   // Refs to track ongoing requests and prevent duplicates
   const wav2vecRequestRef = useRef<AbortController | null>(null);
@@ -342,13 +345,7 @@ export const MainLayout = () => {
   // equivalent for dataset browsing, so that path stays as-is).
   useEffect(() => {
     const fetchWav2vecPrediction = async () => {
-      const isUploadedFile = !!selectedFile?.file_path && (
-        selectedFile.file_path.includes('uploads/') ||
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && !selectedFile.message.includes("Selected from");
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setWav2vecPrediction(null);
@@ -408,13 +405,7 @@ export const MainLayout = () => {
   // make for uploads.
   useEffect(() => {
     const fetchWhisperPrediction = async () => {
-      const isUploadedFile = !!selectedFile?.file_path && (
-        selectedFile.file_path.includes('uploads/') ||
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && !selectedFile.message.includes("Selected from");
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (!model?.includes("whisper") || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setWhisperPrediction(null);
@@ -502,13 +493,7 @@ export const MainLayout = () => {
   // they're registered there.
   useEffect(() => {
     const fetchAddPrediction = async () => {
-      const isUploadedFile = !!selectedFile?.file_path && (
-        selectedFile.file_path.includes('uploads/') ||
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && !selectedFile.message.includes("Selected from");
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (!ADD_MODEL_KEYS.includes(model) || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setAddPrediction(null);
@@ -560,11 +545,7 @@ export const MainLayout = () => {
     return () => { if (addRequestRef.current) { addRequestRef.current.abort(); addRequestRef.current = null; } };
   }, [selectedFile, selectedEmbeddingFile, model, dataset]);
 
-  const effectiveDataset = (() => {
-    if (dataset.startsWith('custom:')) return dataset;
-    if (uploadedFiles && uploadedFiles.length > 0) return "custom";
-    return dataset;
-  })();
+  const effectiveDataset = dataset;
 
   const [predictionMap, setPredictionMap] = useState<Record<string, string>>({});
 
@@ -572,46 +553,42 @@ export const MainLayout = () => {
     setPredictionMap(prev => ({ ...prev, [fileId]: prediction }));
   };
 
-  // Hook up upload action to the RQ multi-task endpoint
-  const startMultiTaskInference = async (file: UploadedFile) => {
-    // Only ASR/SER/ADD are real multitask fan-out families (task_orchestrator's
-    // _TASK_FUNCS has no XAI entry - attribution is a separate job kind,
-    // enqueued via POST /api/inference/attribution, SAD Use Case 3). Including
-    // "xai" here used to make every upload 500 with a backend KeyError before
-    // the job could even start - fixed as part of LIT-233's task selector.
-    const tasks = (Object.keys(selectedTasks) as Array<keyof SelectedTasks>).filter(
-      (task) => selectedTasks[task]
-    );
-    if (tasks.length === 0) return;
-
-    // Route the Model dropdown's chosen ADD checkpoint into the "add" task
-    // (task_orchestrator.add_task defaults to melody-machine when omitted).
-    const model_ids: Record<string, string> = {};
-    if (ADD_MODEL_KEYS.includes(model)) model_ids.add = model;
-
-    try {
-      const response = await fetch(`${API_BASE}/api/inference/multitask`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          audio_ref: file.file_path,
-          tasks,
-          ...(Object.keys(model_ids).length > 0 ? { model_ids } : {}),
-        }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setActiveTaskId(data.job_id); // Start WebSocket polling
-      }
-    } catch (error) {
-      console.error("Failed to start multi-task inference:", error);
-    }
+  const handleUploadSuccess = (uploadResponse: UploadedFile) => {
+    setUploadedFiles(prev => [uploadResponse, ...prev.filter(f => f.file_id !== uploadResponse.file_id)]);
+    setSelectedFile(uploadResponse);
   };
 
-  const handleUploadSuccess = (uploadResponse: UploadedFile) => {
-    setUploadedFiles(prev => [...prev, uploadResponse]);
-    setSelectedFile(uploadResponse);
-    startMultiTaskInference(uploadResponse); // Trigger RQ Job
+  const handleDeleteLiveRecording = (fileId: string) => {
+    setUploadedFiles(prev => prev.filter(f => f.file_id !== fileId));
+    if (selectedFile?.file_id === fileId) {
+      setSelectedFile(null);
+    }
+    toast.success("Live recording removed from session");
+  };
+
+  const handleSaveLiveToCustom = async (file: UploadedFile) => {
+    try {
+      const datasetName = window.prompt(
+        `Save live recording "${file.filename}" to a custom dataset (enter dataset name):`,
+        "my_recordings"
+      );
+      if (!datasetName || !datasetName.trim()) return;
+
+      const trimmedName = datasetName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+      
+      // Ensure custom dataset exists
+      await fetch(`${API_BASE}/dataset/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ dataset_name: trimmedName }),
+        credentials: "include"
+      }).catch(() => {});
+
+      toast.success(`Saved "${file.filename}" to custom dataset "${trimmedName}"`);
+    } catch (err) {
+      console.error("Failed to save live recording to custom dataset:", err);
+      toast.error("Failed to save live recording to custom dataset");
+    }
   };
 
   const handleFileSelection = (file: UploadedFile) => {
@@ -655,11 +632,12 @@ export const MainLayout = () => {
 
     const abortController = new AbortController();
     const idleTimer = setTimeout(() => {
-      const isCustomDataset = dataset?.startsWith('custom:');
+      const sfAny = selectedFile as any;
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
       const filename = selectedFile?.filename || selectedEmbeddingFile;
-      if (!filename) return;
+      if (!filename && !selectedFile?.file_path) return;
 
-      const requestBody = isCustomDataset
+      const requestBody = isUploadedFile
         ? { file_path: selectedFile?.file_path }
         : { dataset: dataset, dataset_file: filename };
 
@@ -673,12 +651,10 @@ export const MainLayout = () => {
       }).catch(() => {});
 
       // Prefetch Saliency Map in background silently
-      const saliencyBody = {
-        model: model,
-        dataset: dataset,
-        dataset_file: filename,
-        method: "gradcam",
-      };
+      const saliencyBody = isUploadedFile
+        ? { model: model, file_path: selectedFile?.file_path, method: "gradcam" }
+        : { model: model, dataset: dataset, dataset_file: filename, method: "gradcam" };
+
       fetch(`${API_BASE}/saliency/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -707,7 +683,7 @@ export const MainLayout = () => {
       <div className="h-screen flex flex-col bg-background">
         <Toolbar
           apiData={apiData} setApiData={setApiData} selectedFile={selectedFile} uploadedFiles={uploadedFiles}
-          onFileSelect={setSelectedFile} model={model} setModel={setModel} dataset={dataset} setDataset={setDataset}
+          onFileSelect={setSelectedFile} onUploadSuccess={handleUploadSuccess} model={model} setModel={setModel} dataset={dataset} setDataset={setDataset}
           onBatchInference={handleBatchInference}
           selectedTasks={selectedTasks} setSelectedTasks={setSelectedTasks}
           onWarmupClick={() => { setIsWarmupMinimized(false); setIsWarmupModalOpen(true); }}
@@ -794,10 +770,11 @@ export const MainLayout = () => {
                 <Panel defaultSize={30} minSize={20}>
                   <AudioDatasetPanel
                     apiData={apiData} uploadedFiles={uploadedFiles} selectedFile={selectedFile} onFileSelect={handleFileSelection}
-                    onUploadSuccess={handleUploadSuccess} model={model} dataset={effectiveDataset} originalDataset={dataset}
+                    onUploadSuccess={handleUploadSuccess} onDeleteLiveRecording={handleDeleteLiveRecording} onSaveLiveToCustom={handleSaveLiveToCustom} model={model} dataset={effectiveDataset} originalDataset={dataset}
                     batchInferenceStatus={batchInferenceStatus} onBatchInferenceStart={handleBatchInferenceStart}
                     onBatchInferenceComplete={handleBatchInferenceComplete} onAvailableFilesChange={setAvailableFiles}
                     onPredictionUpdate={handlePredictionUpdate} predictionMap={predictionMap}
+                    onActiveInferenceCountChange={setActiveInferenceCount}
                   />
                 </Panel>
               </PanelGroup>
@@ -816,7 +793,7 @@ export const MainLayout = () => {
             </Panel>
           </PanelGroup>
         </main>
-        <StatusBar activeTaskId={activeTaskId} taskState={state} />
+        <StatusBar activeTaskId={activeTaskId} taskState={state} activeInferenceCount={activeInferenceCount} />
       </div>
     </EmbeddingProvider>
   );

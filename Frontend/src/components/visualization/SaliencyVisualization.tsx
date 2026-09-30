@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Download, Loader2 } from "lucide-react";
 import { API_BASE } from '@/lib/api';
 import { XAIOverlayCanvas, XAIResult } from './XAIOverlayCanvas';
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface SaliencySegment {
   start_time: number;
@@ -93,13 +94,7 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
         _file_id: fileIdentifier,
       };
 
-      const isUploadedFile = typeof selectedFile === 'object' && selectedFile.file_path && (
-        selectedFile.file_path.includes('uploads/') || 
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && selectedFile.message !== "Selected from embeddings" && selectedFile.message !== "Selected from dataset";
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (isUploadedFile) {
         requestBody.file_path = selectedFile.file_path;
