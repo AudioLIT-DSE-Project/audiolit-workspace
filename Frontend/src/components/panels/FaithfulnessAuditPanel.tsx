@@ -121,7 +121,7 @@ export const FaithfulnessAuditPanel: React.FC<FaithfulnessAuditPanelProps> = ({
                   </TooltipTrigger>
                 <TooltipContent className="space-y-1">
                   <p className="text-xs">Masks the highest-saliency regions of the audio at increasing thresholds,</p>
-                  <p className="text-xs">re-runs the model on each masked clip, and measures the confidence drop -</p>
+                  <p className="text-xs">re-runs the model on each masked clip to measure the confidence drop:</p>
                   <p className="text-xs">a real, measured degradation curve, not a simulated estimate.</p>
                 </TooltipContent>
               </Tooltip>
