@@ -85,6 +85,7 @@ export const MainLayout = () => {
   const [predictionError, setPredictionError] = useState<string | null>(null);
   const [perturbedPredictions, setPerturbedPredictions] = useState<Wav2Vec2Prediction | WhisperPrediction | null>(null);
   const [isLoadingPerturbed, setIsLoadingPerturbed] = useState(false);
+  const [activeInferenceCount, setActiveInferenceCount] = useState(0);
 
   // Refs to track ongoing requests and prevent duplicates
   const wav2vecRequestRef = useRef<AbortController | null>(null);
@@ -791,6 +792,7 @@ export const MainLayout = () => {
                     batchInferenceStatus={batchInferenceStatus} onBatchInferenceStart={handleBatchInferenceStart}
                     onBatchInferenceComplete={handleBatchInferenceComplete} onAvailableFilesChange={setAvailableFiles}
                     onPredictionUpdate={handlePredictionUpdate} predictionMap={predictionMap}
+                    onActiveInferenceCountChange={setActiveInferenceCount}
                   />
                 </Panel>
               </PanelGroup>
@@ -809,7 +811,7 @@ export const MainLayout = () => {
             </Panel>
           </PanelGroup>
         </main>
-        <StatusBar activeTaskId={activeTaskId} taskState={state} />
+        <StatusBar activeTaskId={activeTaskId} taskState={state} activeInferenceCount={activeInferenceCount} />
       </div>
     </EmbeddingProvider>
   );

@@ -70,6 +70,7 @@ interface AudioDatasetPanelProps {
   onAvailableFilesChange?: (files: string[]) => void;
   onPredictionUpdate?: (fileId: string, prediction: string) => void;
   predictionMap?: Record<string, string>;
+  onActiveInferenceCountChange?: (count: number) => void;
 }
 
 export const AudioDatasetPanel = ({ 
@@ -88,7 +89,8 @@ export const AudioDatasetPanel = ({
   onBatchInferenceComplete,
   onAvailableFilesChange,
   onPredictionUpdate,
-  predictionMap: externalPredictionMap
+  predictionMap: externalPredictionMap,
+  onActiveInferenceCountChange
 }: AudioDatasetPanelProps) => {
   const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -97,6 +99,12 @@ export const AudioDatasetPanel = ({
   // Use external predictionMap from parent
   const predictionMap = externalPredictionMap || {};
   const [inferenceStatus, setInferenceStatus] = useState<Record<string, 'idle' | 'loading' | 'done' | 'error'>>({});
+
+  useEffect(() => {
+    if (!onActiveInferenceCountChange) return;
+    const loadingCount = Object.values(inferenceStatus).filter(s => s === 'loading').length;
+    onActiveInferenceCountChange(loadingCount);
+  }, [inferenceStatus, onActiveInferenceCountChange]);
   
   // Batch inference state
   const [currentInferenceIndex, setCurrentInferenceIndex] = useState(0);
