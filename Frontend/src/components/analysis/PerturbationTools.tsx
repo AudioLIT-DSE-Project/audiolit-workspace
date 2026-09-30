@@ -12,6 +12,7 @@ import { WaveformViewer } from "../audio/WaveformViewer"
 import { API_BASE } from '@/lib/api'
 import { useTaskStatus } from '@/hooks/useTaskStatus'
 import { GlobalTaskProgress } from '../layout/GlobalTaskProgress'
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -49,18 +50,7 @@ interface PerturbationToolsProps {
 
 const getAudioUrl = (selectedFile: UploadedFile, dataset?: string, originalDataset?: string): string => {
   const sfAny = selectedFile as any;
-  const isUploadedFile = Boolean(
-    selectedFile.file_path && (
-      dataset?.startsWith("custom:") ||
-      selectedFile.file_path.includes('uploads/') || 
-      selectedFile.file_path.includes('uploads\\') ||
-      selectedFile.file_path.includes('live_recording') ||
-      sfAny?.message === "Perturbed file" ||
-      sfAny?.message === "File uploaded successfully" ||
-      sfAny?.message === "File uploaded and processed successfully" ||
-      (sfAny?.message && !sfAny.message.includes("Selected from"))
-    )
-  );
+  const isUploadedFile = isUploadedAudio(selectedFile, dataset);
   
   if (isUploadedFile) {
     return `${API_BASE}/upload/file/${selectedFile.file_id}`;
@@ -596,18 +586,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       if (selectedPerturbations.timeStretch) perturbations.push({ type: "time_stretch", params: { stretch_factor: timeStretch[0] / 100.0 } });
 
       const sfAny = selectedFile as any;
-      const isUploadedFile = Boolean(
-        selectedFile.file_path && (
-          dataset?.startsWith("custom:") ||
-          selectedFile.file_path.includes('uploads/') || 
-          selectedFile.file_path.includes('uploads\\') ||
-          selectedFile.file_path.includes('live_recording') ||
-          sfAny?.message === "Perturbed file" ||
-          sfAny?.message === "File uploaded successfully" ||
-          sfAny?.message === "File uploaded and processed successfully" ||
-          (sfAny?.message && !sfAny.message.includes("Selected from"))
-        )
-      );
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       // Enqueue mutation job via RQ
       const response = await fetch(`${API_BASE}/api/inference/mutation`, {
@@ -650,18 +629,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       const perturbation = buildFrameMutationPayload(activeFrame, frameMutationType, frameNoiseLevel[0]);
 
       const sfAny = selectedFile as any;
-      const isUploadedFile = Boolean(
-        selectedFile.file_path && (
-          dataset?.startsWith("custom:") ||
-          selectedFile.file_path.includes('uploads/') || 
-          selectedFile.file_path.includes('uploads\\') ||
-          selectedFile.file_path.includes('live_recording') ||
-          sfAny?.message === "Perturbed file" ||
-          sfAny?.message === "File uploaded successfully" ||
-          sfAny?.message === "File uploaded and processed successfully" ||
-          (sfAny?.message && !sfAny.message.includes("Selected from"))
-        )
-      );
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       const response = await fetch(`${API_BASE}/api/inference/mutation`, {
         method: "POST",

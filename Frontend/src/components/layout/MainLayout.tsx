@@ -21,6 +21,7 @@ import {
   clearActiveWarmupJobId,
   isTerminalWarmupStatus,
 } from "@/lib/warmupJob";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -344,13 +345,7 @@ export const MainLayout = () => {
   // equivalent for dataset browsing, so that path stays as-is).
   useEffect(() => {
     const fetchWav2vecPrediction = async () => {
-      const isUploadedFile = !!selectedFile?.file_path && (
-        selectedFile.file_path.includes('uploads/') ||
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && !selectedFile.message.includes("Selected from");
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setWav2vecPrediction(null);
@@ -410,13 +405,7 @@ export const MainLayout = () => {
   // make for uploads.
   useEffect(() => {
     const fetchWhisperPrediction = async () => {
-      const isUploadedFile = !!selectedFile?.file_path && (
-        selectedFile.file_path.includes('uploads/') ||
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && !selectedFile.message.includes("Selected from");
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (!model?.includes("whisper") || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setWhisperPrediction(null);
@@ -504,13 +493,7 @@ export const MainLayout = () => {
   // they're registered there.
   useEffect(() => {
     const fetchAddPrediction = async () => {
-      const isUploadedFile = !!selectedFile?.file_path && (
-        selectedFile.file_path.includes('uploads/') ||
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && !selectedFile.message.includes("Selected from");
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (!ADD_MODEL_KEYS.includes(model) || (!selectedFile && !selectedEmbeddingFile) || isUploadedFile) {
         setAddPrediction(null);
@@ -650,15 +633,7 @@ export const MainLayout = () => {
     const abortController = new AbortController();
     const idleTimer = setTimeout(() => {
       const sfAny = selectedFile as any;
-      const isUploadedFile = Boolean(
-        selectedFile && typeof selectedFile === 'object' && selectedFile.file_path && (
-          dataset?.startsWith("custom:") ||
-          selectedFile.file_path.includes("uploads/") ||
-          selectedFile.file_path.includes("uploads\\") ||
-          selectedFile.file_path.includes("live_recording") ||
-          (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
-        )
-      );
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
       const filename = selectedFile?.filename || selectedEmbeddingFile;
       if (!filename && !selectedFile?.file_path) return;
 

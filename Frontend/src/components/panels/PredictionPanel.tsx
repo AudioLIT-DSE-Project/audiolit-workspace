@@ -27,6 +27,7 @@ import {
 import { API_BASE } from "@/lib/api";
 import { ProvenanceBadge, provenanceOverlayStyle } from "../ui/ProvenanceBadge";
 import { DeepfakeForensicPanel } from "./DeepfakeForensicPanel";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface UploadedFile {
   file_id: string;
@@ -164,15 +165,7 @@ export const PredictionPanel = ({
     setXaiError(null);
 
     const sfAny = selectedFile as any;
-    const isUploadedFile = Boolean(
-      selectedFile && typeof selectedFile === 'object' && selectedFile.file_path && (
-        dataset?.startsWith("custom:") ||
-        selectedFile.file_path.includes("uploads/") ||
-        selectedFile.file_path.includes("uploads\\") ||
-        selectedFile.file_path.includes("live_recording") ||
-        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
-      )
-    );
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
     const saliencyBody = isUploadedFile
       ? { file_path: selectedFile?.file_path, model, method: activeXAIMethod }
@@ -250,15 +243,7 @@ export const PredictionPanel = ({
     }
 
     const sfAny = selectedFile as any;
-    const isUploadedFile = Boolean(
-      selectedFile && typeof selectedFile === 'object' && selectedFile.file_path && (
-        dataset?.startsWith("custom:") ||
-        selectedFile.file_path.includes("uploads/") ||
-        selectedFile.file_path.includes("uploads\\") ||
-        selectedFile.file_path.includes("live_recording") ||
-        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
-      )
-    );
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
     const body = isUploadedFile
       ? { file_path: selectedFile?.file_path }

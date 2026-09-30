@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState, useEffect } from "react";
 import { API_BASE } from "@/lib/api";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface AttentionPair {
   from_word: string;
@@ -62,13 +63,7 @@ export const AttentionVisualization = ({ selectedFile, model, dataset }: Attenti
       };
 
       const sfAny = selectedFile as any;
-      const isUploadedFile = typeof selectedFile === 'object' && selectedFile?.file_path && (
-        dataset?.startsWith("custom:") ||
-        selectedFile.file_path.includes("uploads/") ||
-        selectedFile.file_path.includes("uploads\\") ||
-        selectedFile.file_path.includes("live_recording") ||
-        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
-      );
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (isUploadedFile) {
         requestBody.file_path = selectedFile.file_path;

@@ -9,6 +9,7 @@ import {
 } from "recharts";
 import { API_BASE } from "@/lib/api";
 import { usePlayback } from "@/contexts/PlaybackContext";
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface TimelineWindow {
   start_s: number;
@@ -44,15 +45,7 @@ export const DeepfakeForensicPanel = ({
 
   const requestBody = useCallback((cacheOnly: boolean) => {
     const sfAny = selectedFile as any;
-    const isUploadedFile = Boolean(
-      selectedFile?.file_path && (
-        dataset?.startsWith("custom:") ||
-        selectedFile.file_path.includes("uploads/") ||
-        selectedFile.file_path.includes("uploads\\") ||
-        selectedFile.file_path.includes("live_recording") ||
-        (sfAny?.message && sfAny.message !== "Selected from dataset" && sfAny.message !== "Selected from embeddings")
-      )
-    );
+    const isUploadedFile = isUploadedAudio(selectedFile, dataset);
     if (isUploadedFile) {
       return { file_path: selectedFile?.file_path, cache_only: cacheOnly };
     }
