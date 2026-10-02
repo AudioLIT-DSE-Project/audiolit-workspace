@@ -134,3 +134,47 @@ describe("WaveformViewer", () => {
     expect(onProgress).toHaveBeenCalledWith(0, 5);
   });
 });
+
+describe("WaveformViewer controlled selection", () => {
+  const fillRect = jest.fn();
+  const clearRect = jest.fn();
+
+  beforeEach(() => {
+    fillRect.mockReset();
+    clearRect.mockReset();
+    jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+      () => ({ fillRect, clearRect, strokeRect: jest.fn() }) as unknown as CanvasRenderingContext2D,
+    );
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  const overlayWidth = (container: HTMLElement) =>
+    (container.querySelector("canvas") as HTMLCanvasElement).width;
+
+  it("draws a selection it is given, at the matching fraction of its width", () => {
+    const { container } = render(
+      <WaveformViewer audioUrl="/test-audio.wav" selectionRange={{ start: 0.25, end: 0.5 }} />,
+    );
+    const width = overlayWidth(container);
+    const [x, , w] = fillRect.mock.calls[fillRect.mock.calls.length - 1];
+    expect(x).toBeCloseTo(0.25 * width, 5);
+    expect(w).toBeCloseTo(0.25 * width, 5);
+  });
+
+  it("follows the selection when it changes, and clears it on null", () => {
+    const { container, rerender } = render(
+      <WaveformViewer audioUrl="/test-audio.wav" selectionRange={{ start: 0.25, end: 0.5 }} />,
+    );
+    const width = overlayWidth(container);
+
+    rerender(<WaveformViewer audioUrl="/test-audio.wav" selectionRange={{ start: 0.5, end: 1 }} />);
+    const [x] = fillRect.mock.calls[fillRect.mock.calls.length - 1];
+    expect(x).toBeCloseTo(0.5 * width, 5);
+
+    fillRect.mockClear();
+    rerender(<WaveformViewer audioUrl="/test-audio.wav" selectionRange={null} />);
+    expect(clearRect).toHaveBeenCalled();
+    expect(fillRect).not.toHaveBeenCalled();
+  });
+});

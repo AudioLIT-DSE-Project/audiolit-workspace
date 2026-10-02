@@ -387,6 +387,20 @@ class AudioLITWorker(SimpleWorker):
             if result is False:
                 error = getattr(job, "exc_info", None) or "job failed (no traceback captured)"
                 self._record_task_failure(job, queue, started, error)
+                # The failure also has to reach the client. This is the path
+                # every ordinary task exception takes (RQ catches it, so the
+                # `except` below never runs), and it published nothing: the
+                # socket stayed open and the UI sat on "Processing..." forever.
+                state = "RETRYING" if (getattr(job, "retries_left", 0) or 0) > 0 else "FAILURE"
+                summary = [line for line in str(error).splitlines() if line.strip()]
+                publish_progress(
+                    job.id,
+                    state,
+                    {
+                        "duration_s": round(time.monotonic() - started, 3),
+                        "error": summary[-1].strip() if summary else "job failed",
+                    },
+                )
                 return result
             duration_s = time.monotonic() - started
             try:
@@ -773,8 +787,15 @@ def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[s
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "asr.running", {"model": model_id})
     try:
-        from ..domain.model_loader_service import transcribe_asr
-        res = transcribe_asr(audio_ref)
+        # This imported `transcribe_asr`, a name that has never existed in
+        # model_loader_service. The ImportError landed in the `except` below, so
+        # every asynchronous ASR job "succeeded" in under a millisecond with an
+        # empty transcript and status "scaffold" - and nothing said why.
+        from ..domain.model_loader_service import transcribe_whisper_base
+
+        # "default" is the enqueue API's placeholder for "no model chosen".
+        selected = None if model_id in (None, "", "default") else model_id
+        res = transcribe_whisper_base(audio_ref, selected)
         return {
             "task": "asr",
             "model_id": model_id,
@@ -782,7 +803,9 @@ def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[s
             "transcript": res.get("text", "") if isinstance(res, dict) else str(res),
             "status": "success",
         }
-    except Exception:
+    except Exception as exc:
+        # Only the exception type: its message can carry the audio path (SR6).
+        logger.warning("task.asr.fallback error=%s", type(exc).__name__)
         return {"task": "asr", "model_id": model_id, "device": ctx.device, "transcript": "", "status": "scaffold"}
 
 
@@ -875,13 +898,19 @@ def mutation_task(audio_ref: str, mutation: Mapping[str, Any]) -> dict[str, Any]
     )
     from ..domain.perturbation_service import perturb_and_save
 
-    return perturb_and_save(
+    result = perturb_and_save(
         file_path=audio_ref,
         perturbations=perturbations,
         output_dir="uploads",
         dataset=mutation.get("dataset"),
         session_id=None,
     )
+    # The derived clip is on disk and served by /upload/file; a job result is
+    # stored in Redis and sent to the browser as JSON. Carrying the WAV bytes in
+    # it cost a copy of the audio per job and made the result impossible to
+    # encode, so no finished mutation could be delivered.
+    result.pop("preview_bytes", None)
+    return result
 
 
 def accent_bias_task(

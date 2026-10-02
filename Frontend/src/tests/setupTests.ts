@@ -30,6 +30,7 @@ if (typeof HTMLCanvasElement !== "undefined") {
     arc: jest.fn(),
     fill: jest.fn(),
     measureText: jest.fn().mockReturnValue({ width: 0 }),
+    setLineDash: jest.fn(),
     transform: jest.fn(),
     rect: jest.fn(),
     clip: jest.fn(),

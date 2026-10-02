@@ -22,6 +22,16 @@ interface UseTaskStatusResult {
   error: string | null;
 }
 
+const KNOWN_STATES: readonly TaskState[] = ['QUEUED', 'PROCESSING', 'RETRYING', 'SUCCESS', 'FAILURE', 'UNKNOWN'];
+
+/**
+ * Workers also publish finer-grained stages ("asr.running", "aggregated"...).
+ * They all mean the job is under way; passing them through as the state left
+ * every consumer that switches on TaskState showing its "unknown" branch.
+ */
+const toTaskState = (value: unknown): TaskState =>
+  KNOWN_STATES.includes(value as TaskState) ? (value as TaskState) : 'PROCESSING';
+
 export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
   const [state, setState] = useState<TaskState>('QUEUED');
   const [result, setResult] = useState<any>(null);
@@ -36,12 +46,39 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
   useEffect(() => {
     if (!taskId) return;
 
+    // Set on cleanup, so a late response for a previous task id cannot write
+    // its outcome into the state of the task that replaced it.
+    let cancelled = false;
     isManualClose.current = false;
     retryCountRef.current = 0;
     setState('QUEUED');
     // Clear the previous task's outcome, or it renders briefly under the new id.
     setResult(null);
     setError(null);
+
+    /** One read of the job's final state from the polling route. */
+    const fetchOutcome = async (): Promise<boolean> => {
+      try {
+        const res = await fetch(`${API_BASE}/api/tasks/${taskId}/status`);
+        const data = await res.json();
+        if (cancelled) return true;
+        const polled = toTaskState(data.state);
+        if (polled === 'SUCCESS') {
+          setResult(data.result ?? null);
+          setState('SUCCESS');
+          return true;
+        }
+        if (polled === 'FAILURE') {
+          setError(data.error || 'Task failed');
+          setState('FAILURE');
+          return true;
+        }
+        setState(polled);
+      } catch (e) {
+        console.error('[Polling] Failed to fetch status', e);
+      }
+      return false;
+    };
 
     const connectWs = () => {
       const ws = new WebSocket(`${wsOrigin()}/api/ws/tasks/${taskId}`);
@@ -55,18 +92,32 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          const currentState = data.state || data.stage;
-          
-          if (currentState) {
-            setState(currentState as TaskState);
-            
-            if (currentState === 'SUCCESS') {
-              setResult(data.payload?.result || data.payload);
-              isManualClose.current = true;
-            } else if (currentState === 'FAILURE') {
-              setError(data.payload?.error || 'Task failed');
-              isManualClose.current = true;
+          const rawState = data.state || data.stage;
+          if (!rawState) return;
+          const currentState = toTaskState(rawState);
+
+          if (currentState === 'SUCCESS') {
+            isManualClose.current = true;
+            const taskResult = data.payload?.result;
+            if (taskResult === undefined || taskResult === null) {
+              // The result is `payload.result` and nothing else. This used to
+              // fall back to `data.payload`, which for a live SUCCESS event is
+              // the worker's `{duration_s}` - so consumers were handed timing
+              // metadata as their result. A SUCCESS without one is fetched.
+              void fetchOutcome().then((finished) => {
+                if (!finished && !cancelled) startPolling();
+              });
+              return;
             }
+            // Result before state: consumers act on `SUCCESS && result`.
+            setResult(taskResult);
+            setState('SUCCESS');
+          } else if (currentState === 'FAILURE') {
+            isManualClose.current = true;
+            setError(data.payload?.error || 'Task failed');
+            setState('FAILURE');
+          } else {
+            setState(currentState);
           }
         } catch (e) {
           console.error('[WS] Failed to parse message', e);
@@ -97,25 +148,15 @@ export const useTaskStatus = (taskId: string | null): UseTaskStatusResult => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
       
       pollIntervalRef.current = setInterval(async () => {
-        try {
-          const res = await fetch(`${API_BASE}/api/tasks/${taskId}/status`);
-          const data = await res.json();
-          setState(data.state as TaskState);
-          
-          if (data.state === 'SUCCESS' || data.state === 'FAILURE') {
-            if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-            if (data.error) setError(data.error);
-            if (data.result) setResult(data.result);
-          }
-        } catch (e) {
-          console.error('[Polling] Failed to fetch status', e);
-        }
+        const finished = await fetchOutcome();
+        if (finished && pollIntervalRef.current) clearInterval(pollIntervalRef.current);
       }, 2000);
     };
 
     connectWs();
 
     return () => {
+      cancelled = true;
       isManualClose.current = true;
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
