@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from rq.job import JobStatus
 
 from ...infrastructure.rq_connection import get_redis_connection
@@ -32,6 +33,55 @@ def _map_rq_status(job: Any) -> str:
         return "QUEUED" # Waiting on dependency
     return "UNKNOWN"
 
+
+TERMINAL_STATES = ("SUCCESS", "FAILURE")
+
+
+def _job_result(job: Any) -> Any:
+    """The job's return value in a form that survives JSON encoding.
+
+    A task result is whatever the task function returned, and nothing stops one
+    carrying raw bytes: the mutation result used to include the derived clip as
+    WAV bytes, which made both this module's encoders raise on every finished
+    mutation job. Bytes are dropped rather than base64'd - a result is a
+    description of the work, and the audio itself is served by /upload/file.
+    """
+    if job is None or not job.is_finished:
+        return None
+    try:
+        return jsonable_encoder(job.result, custom_encoder={bytes: lambda _: None})
+    except Exception:
+        logger.warning("task.result.unserialisable job_id=%s", job.id, exc_info=True)
+        return None
+
+
+def _job_error(job: Any) -> str | None:
+    """The last line of the job's traceback: the exception, without the stack."""
+    if job is None or not job.is_failed:
+        return None
+    lines = [line for line in str(job.exc_info or "").splitlines() if line.strip()]
+    return lines[-1].strip() if lines else "Task failed"
+
+
+def terminal_event(event: dict[str, Any], job: Any) -> dict[str, Any]:
+    """Attach the job's outcome to a worker's SUCCESS/FAILURE progress event.
+
+    The worker publishes only ``{"duration_s": ...}`` with a terminal stage -
+    results can be megabytes and do not belong on a pub/sub channel. The client
+    was reading that payload as the result, so every panel that waits on a job
+    (accent bias, mutation, the multitask fan-in) received ``{"duration_s"}``
+    in place of its data. The gateway already holds the job, so it adds the
+    result here, in the same ``state`` + ``payload.result`` shape the socket's
+    initial message uses.
+    """
+    stage = event.get("stage")
+    payload = dict(event.get("payload") or {})
+    if stage == "SUCCESS":
+        payload["result"] = _job_result(job)
+    elif stage == "FAILURE":
+        payload["error"] = payload.get("error") or _job_error(job) or "Task failed"
+    return {**event, "state": stage, "payload": payload}
+
 @router.get("/api/tasks/{task_id}/status")
 async def get_task_status(task_id: str) -> dict[str, Any]:
     """HTTP long-polling fallback for task state (SRS FR3.2)."""
@@ -41,8 +91,8 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
     return {
         "task_id": task_id,
         "state": _map_rq_status(job),
-        "result": job.result if job.is_finished else None,
-        "error": str(job.exc_info) if job.is_failed else None,
+        "result": _job_result(job),
+        "error": _job_error(job),
     }
 
 @router.websocket("/api/ws/tasks/{task_id}")
@@ -65,11 +115,11 @@ async def task_progress_ws(websocket: WebSocket, task_id: str) -> None:
         await websocket.send_text(json.dumps({
             "task_id": task_id,
             "state": initial_state,
-            "payload": {"result": job.result if job and job.is_finished else None}
+            "payload": {"result": _job_result(job), "error": _job_error(job)}
         }))
 
         # If job is already done, close socket after sending final state
-        if initial_state in ["SUCCESS", "FAILURE"]:
+        if initial_state in TERMINAL_STATES:
             await websocket.close()
             return
 
@@ -77,15 +127,18 @@ async def task_progress_ws(websocket: WebSocket, task_id: str) -> None:
             # Use run_in_executor so redis-py's blocking get_message doesn't block event loop
             msg = await loop.run_in_executor(None, ps.get_message, 1.0)
             if msg is not None and msg.get("type") == "message":
-                await websocket.send_text(msg["data"].decode())
-                # If the message indicates a final state, close the socket cleanly
                 try:
                     parsed = json.loads(msg["data"])
-                    if parsed.get("stage") in ["SUCCESS", "FAILURE"]:
-                        await websocket.close()
-                        break
                 except Exception:
-                    pass
+                    parsed = None
+                if isinstance(parsed, dict) and parsed.get("stage") in TERMINAL_STATES:
+                    # A final state carries the outcome, then the socket closes.
+                    await websocket.send_text(
+                        json.dumps(terminal_event(parsed, fetch_job(task_id)))
+                    )
+                    await websocket.close()
+                    break
+                await websocket.send_text(msg["data"].decode())
             
             # Allow event loop to process sends / disconnects
             await asyncio.sleep(0.01)

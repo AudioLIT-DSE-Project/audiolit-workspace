@@ -16,6 +16,18 @@ const WHISPER_MODEL_IDS: Record<string, string> = {
   "whisper-base": "openai/whisper-base",
 };
 
+/**
+ * The Hugging Face id to transcribe with, or null when the selected model
+ * cannot produce a transcript. A custom model is listed in the toolbar under
+ * its own Hugging Face id, so a Whisper checkpoint added that way is passed
+ * through as it is.
+ */
+const resolveWhisperModelId = (model?: string): string | null => {
+  if (!model) return null;
+  if (WHISPER_MODEL_IDS[model]) return WHISPER_MODEL_IDS[model];
+  return model.includes("/") && model.toLowerCase().includes("whisper") ? model : null;
+};
+
 interface CohortSummary {
   accent: string;
   sample_count: number;
@@ -41,10 +53,11 @@ interface AccentBiasPanelProps {
 export const AccentBiasPanel: React.FC<AccentBiasPanelProps> = ({ model }) => {
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const { state, result } = useTaskStatus(jobId);
-  const report = state === 'SUCCESS' ? (typeof result === 'string' ? JSON.parse(result) : result) as AccentBiasReport : null;
+  const { state, result, error: taskError } = useTaskStatus(jobId);
+  const parsed = state === 'SUCCESS' ? (typeof result === 'string' ? JSON.parse(result) : result) : null;
+  const report = parsed && Array.isArray(parsed.cohorts) ? (parsed as AccentBiasReport) : null;
 
-  const whisperModelId = WHISPER_MODEL_IDS[model || ""] || null;
+  const whisperModelId = resolveWhisperModelId(model);
   const isRunning = jobId !== null && state !== 'SUCCESS' && state !== 'FAILURE';
 
   const handleRun = async () => {
@@ -70,6 +83,9 @@ export const AccentBiasPanel: React.FC<AccentBiasPanelProps> = ({ model }) => {
 
   const worstWer = chartData.length > 0 ? Math.max(...chartData.map((c) => c.mean_wer)) : 0;
   const bestWer = chartData.length > 0 ? Math.min(...chartData.map((c) => c.mean_wer)) : 0;
+  // WER is not capped at 1: insertions can outnumber the reference words. A
+  // fixed 0..1 axis clipped exactly the cohorts the chart exists to expose.
+  const axisMax = Math.max(1, Math.ceil(worstWer * 10) / 10);
 
   return (
     <TooltipProvider>
@@ -92,7 +108,7 @@ export const AccentBiasPanel: React.FC<AccentBiasPanelProps> = ({ model }) => {
           <CardContent className="space-y-3">
             {!whisperModelId && (
               <div className="text-xs text-muted-foreground">
-                Select a Whisper model (Whisper Base or Whisper Large) to run the accent-bias diagnostic.
+                Select a Whisper model to run the accent-bias diagnostic. It measures word error rate, so it needs a model that transcribes.
               </div>
             )}
 
@@ -105,14 +121,21 @@ export const AccentBiasPanel: React.FC<AccentBiasPanelProps> = ({ model }) => {
 
             {isRunning && <GlobalTaskProgress taskId={jobId} onComplete={() => {}} />}
             {error && <div className="text-xs text-destructive">{error}</div>}
-            {state === 'FAILURE' && <div className="text-xs text-destructive">Diagnostic failed in the worker.</div>}
+            {state === 'FAILURE' && (
+              <div className="text-xs text-destructive">Diagnostic failed: {taskError || "the worker reported an error."}</div>
+            )}
+            {report && chartData.length === 0 && (
+              <div className="text-xs text-muted-foreground">
+                The diagnostic finished but no cohort could be scored. Check that the L2-ARCTIC corpus is provisioned under Backend/data/l2arctic.
+              </div>
+            )}
 
             {report && chartData.length > 0 && (
               <>
                 <ResponsiveContainer width="100%" height={Math.max(120, chartData.length * 28)}>
                   <BarChart data={chartData} layout="vertical" margin={{ left: 8 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                    <XAxis type="number" domain={[0, 1]} tick={{ fontSize: 10 }} />
+                    <XAxis type="number" domain={[0, axisMax]} tick={{ fontSize: 10 }} />
                     <YAxis type="category" dataKey="accent" tick={{ fontSize: 10 }} width={70} />
                     <RechartsTooltip contentStyle={{ fontSize: 11 }} formatter={(v: number) => v.toFixed(3)} />
                     <Bar dataKey="mean_wer">
@@ -136,6 +159,12 @@ export const AccentBiasPanel: React.FC<AccentBiasPanelProps> = ({ model }) => {
                   <Badge variant="outline" className="text-[10px]">cohorts: {chartData.length}</Badge>
                   <Badge variant="destructive" className="text-[10px]">
                     worst: {chartData.find((c) => c.mean_wer === worstWer)?.accent} ({worstWer.toFixed(3)})
+                  </Badge>
+                  <Badge variant="outline" className="text-[10px]">
+                    best: {chartData.find((c) => c.mean_wer === bestWer)?.accent} ({bestWer.toFixed(3)})
+                  </Badge>
+                  <Badge variant="outline" className="text-[10px]">
+                    disparity: {(worstWer - bestWer).toFixed(3)}
                   </Badge>
                 </div>
               </>

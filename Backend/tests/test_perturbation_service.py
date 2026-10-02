@@ -14,6 +14,7 @@ import torch
 from pathlib import Path
 import pytest
 
+from app.domain import perturbation_service
 from app.domain.perturbation_service import (
     _load_waveform,
     _save_waveform,
@@ -219,3 +220,130 @@ class TestMutationEngines:
         
         # Check non-destructive: original file should still exist
         assert sample_audio_file.exists()
+
+
+class TestRegionScopedPerturbations:
+    """A perturbation with a ``region`` changes that region and nothing else.
+
+    Region-scoped noise used to be sent without its region and was added to the
+    whole clip; these pin each perturbation to the box it was asked for.
+    """
+
+    SR = 16000
+    REGION = {"t_start_ms": 500, "t_end_ms": 1500}
+
+    @pytest.fixture
+    def clip(self):
+        # 2 s of a 440 Hz + 3 kHz mix, so both a low and a high band carry energy.
+        t = np.linspace(0, 2.0, 2 * self.SR, endpoint=False)
+        y = 0.4 * np.sin(2 * np.pi * 440 * t) + 0.2 * np.sin(2 * np.pi * 3000 * t)
+        return torch.from_numpy(y.astype(np.float32)).unsqueeze(0)
+
+    @staticmethod
+    def _diff(a: torch.Tensor, b: torch.Tensor) -> np.ndarray:
+        return np.abs(a[0].numpy() - b[0].numpy())
+
+    @staticmethod
+    def _band_energy(y: np.ndarray, sr: int, low: float, high: float) -> float:
+        spectrum = np.abs(np.fft.rfft(y))
+        freqs = np.fft.rfftfreq(len(y), 1 / sr)
+        return float(np.sum(spectrum[(freqs >= low) & (freqs <= high)] ** 2))
+
+    def _apply(self, clip, perturbation):
+        return perturbation_service.apply_perturbations(clip, self.SR, [perturbation])
+
+    def test_noise_stays_inside_the_time_span(self, clip):
+        out, applied = self._apply(
+            clip, {"type": "noise", "params": {"noise_level": 0.1}, "region": self.REGION}
+        )
+        assert applied[0]["status"] == "applied"
+        assert applied[0]["region"] == self.REGION
+        assert out.shape == clip.shape
+
+        diff = self._diff(out, clip)
+        assert diff[: int(0.5 * self.SR)].max() == 0.0
+        assert diff[int(1.5 * self.SR):].max() == 0.0
+        assert diff[int(0.6 * self.SR): int(1.4 * self.SR)].mean() > 0.01
+
+    def test_noise_without_a_region_still_covers_the_whole_clip(self, clip):
+        out, _ = self._apply(clip, {"type": "noise", "params": {"noise_level": 0.1}})
+        diff = self._diff(out, clip)
+        assert diff[: int(0.4 * self.SR)].mean() > 0.01
+        assert diff[int(1.6 * self.SR):].mean() > 0.01
+
+    def test_noise_with_a_band_is_confined_in_frequency_too(self, clip):
+        region = {**self.REGION, "f_low_hz": 5000, "f_high_hz": 7000}
+        out, applied = self._apply(clip, {"type": "noise", "params": {"noise_level": 0.1}, "region": region})
+        assert applied[0]["status"] == "applied"
+
+        inside = out[0].numpy()[int(0.7 * self.SR): int(1.3 * self.SR)]
+        before = clip[0].numpy()[int(0.7 * self.SR): int(1.3 * self.SR)]
+        added_in_band = self._band_energy(inside, self.SR, 5200, 6800) - self._band_energy(before, self.SR, 5200, 6800)
+        added_below = self._band_energy(inside, self.SR, 1000, 2000) - self._band_energy(before, self.SR, 1000, 2000)
+        assert added_in_band > 50 * max(added_below, 1e-9)
+
+        outside = self._diff(out, clip)[: int(0.3 * self.SR)]
+        assert outside.max() < 1e-3
+
+    def test_band_pass_keeps_the_band_only_inside_the_time_span(self, clip):
+        region = {**self.REGION, "f_low_hz": 200, "f_high_hz": 1000}
+        out, applied = self._apply(clip, {"type": "band_pass_filter", "params": {}, "region": region})
+        assert applied[0]["status"] == "applied"
+        y = out[0].numpy()
+
+        inside = y[int(0.7 * self.SR): int(1.3 * self.SR)]
+        # The 3 kHz tone is gone inside the region; the 440 Hz tone survives.
+        assert self._band_energy(inside, self.SR, 2800, 3200) < 0.01 * self._band_energy(inside, self.SR, 400, 480)
+        # Outside the region the 3 kHz tone is still there.
+        outside = y[: int(0.3 * self.SR)]
+        assert self._band_energy(outside, self.SR, 2800, 3200) > 0.1 * self._band_energy(outside, self.SR, 400, 480)
+
+    def test_band_pass_without_a_band_is_reported_not_applied(self, clip):
+        out, applied = self._apply(clip, {"type": "band_pass_filter", "params": {}, "region": self.REGION})
+        assert applied[0]["status"] == "failed"
+        assert "frequency band" in applied[0]["error"]
+        assert torch.equal(out, clip)
+
+    def test_pitch_shift_changes_only_the_region_and_keeps_the_length(self, clip):
+        out, applied = self._apply(
+            clip, {"type": "pitch_shift", "params": {"pitch_shift_semitones": 4}, "region": self.REGION}
+        )
+        assert applied[0]["status"] == "applied"
+        assert out.shape == clip.shape
+        diff = self._diff(out, clip)
+        assert diff[: int(0.5 * self.SR)].max() == 0.0
+        assert diff[int(1.5 * self.SR):].max() == 0.0
+        assert diff[int(0.6 * self.SR): int(1.4 * self.SR)].mean() > 0.01
+
+    def test_time_stretch_replaces_the_region_and_shifts_what_follows(self, clip):
+        out, applied = self._apply(
+            clip, {"type": "time_stretch", "params": {"stretch_factor": 2.0}, "region": self.REGION}
+        )
+        assert applied[0]["status"] == "applied"
+        # A 1 s region played twice as fast is 0.5 s: the clip is 0.5 s shorter.
+        assert abs(out.shape[-1] - int(1.5 * self.SR)) < 0.02 * self.SR
+        y, original = out[0].numpy(), clip[0].numpy()
+        np.testing.assert_array_equal(y[: int(0.5 * self.SR)], original[: int(0.5 * self.SR)])
+        np.testing.assert_array_equal(y[-int(0.5 * self.SR):], original[-int(0.5 * self.SR):])
+
+    def test_an_empty_region_is_reported_not_applied(self, clip):
+        out, applied = self._apply(
+            clip,
+            {"type": "noise", "params": {"noise_level": 0.1}, "region": {"t_start_ms": 5000, "t_end_ms": 6000}},
+        )
+        assert applied[0]["status"] == "failed"
+        assert "region" in applied[0]["error"].lower()
+        assert torch.equal(out, clip)
+
+    def test_region_perturbations_run_through_perturb_and_save(self, sample_audio_file: Path, tmp_path: Path):
+        result = perturbation_service.perturb_and_save(
+            file_path=str(sample_audio_file),
+            perturbations=[
+                {"type": "noise", "params": {"noise_level": 0.05}, "region": {"t_start_ms": 1000, "t_end_ms": 2000}},
+                {"type": "time_freq_mask", "params": {"t_start_ms": 1000, "t_end_ms": 2000, "f_low_hz": 300, "f_high_hz": 900}},
+            ],
+            output_dir=str(tmp_path),
+        )
+        assert result["success"] is True
+        assert [p["status"] for p in result["applied_perturbations"]] == ["applied", "applied"]
+        assert result["sample_rate"] == 16000

@@ -368,8 +368,12 @@ export const PredictionPanel = ({
       freq_hz: pt.f0_hz,
     }),
   );
-  // librosa's mel ceiling is sr/2; the canvas would otherwise assume 8 kHz.
-  const maxFreqHz = acoustic?.sample_rate ? acoustic.sample_rate / 2 : 8000;
+  // The mel ceiling of the spectrogram this canvas draws. That image is the
+  // saliency response's `base_spectrogram`, which the backend always computes
+  // on audio resampled to 16 kHz, so its top is 8 kHz whatever the file's own
+  // rate. Using the file's rate here put the pitch line at the wrong height on
+  // anything not recorded at 16 kHz.
+  const maxFreqHz = 8000;
   // One peak per frame, so it shares the spectrogram's time axis. Nothing in
   // the backend produced a waveform before, so this layer never drew.
   const waveformData: number[] = acoustic?.waveform || [];
@@ -842,6 +846,7 @@ export const PredictionPanel = ({
                 model={model}
                 dataset={dataset}
                 originalDataset={originalDataset}
+                acousticProfile={acoustic}
               />
             </div>
           </TabsContent>

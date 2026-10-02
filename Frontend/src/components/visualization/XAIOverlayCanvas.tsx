@@ -1,6 +1,8 @@
 import { getHeatmapColor } from "@/lib/heatmap";
 import React, { useEffect, useRef } from 'react';
 import { usePlayback } from '@/contexts/PlaybackContext';
+import { hzToAxisFraction } from '@/lib/melScale';
+import { renderSpectrogramImage } from '@/lib/spectrogramImage';
 
 export type XAIMethod = 'gradcam' | 'integrated_gradients' | 'lime' | 'shap';
 
@@ -66,11 +68,8 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
   });
 
   const mapTimeToX = (timeMs: number) => (timeMs / 1000 / audioDuration) * width;
-  const mapHzToY = (hz: number, maxFreq = maxFreqHz) => {
-    const mel = 2595 * Math.log10(1 + hz / 500);
-    const maxMel = 2595 * Math.log10(1 + maxFreq / 500);
-    return height - (mel / maxMel) * height;
-  };
+  const mapHzToY = (hz: number, maxFreq = maxFreqHz) =>
+    height - hzToAxisFraction(hz, maxFreq) * height;
 
   // 1. Render Base Spectrogram
   useEffect(() => {
@@ -78,29 +77,12 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
     const ctx = baseCanvasRef.current.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, width, height);
-    
-    const melBins = baseSpectrogram.length;
-    const timeFrames = baseSpectrogram[0]?.length || 0;
-    if (timeFrames === 0) return;
-    
-    const imgData = ctx.createImageData(timeFrames, melBins);
-    for (let y = 0; y < melBins; y++) {
-      for (let x = 0; x < timeFrames; x++) {
-        const val = baseSpectrogram[y][x];
-        const idx = (y * timeFrames + x) * 4;
-        const c = Math.floor(val * 255);
-        imgData.data[idx] = c;
-        imgData.data[idx + 1] = c;
-        imgData.data[idx + 2] = c;
-        imgData.data[idx + 3] = 255;
-      }
-    }
-    
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = timeFrames;
-    tempCanvas.height = melBins;
-    tempCanvas.getContext('2d')!.putImageData(imgData, 0, 0);
-    ctx.drawImage(tempCanvas, 0, 0, width, height);
+
+    // Greyscale, so the coloured attribution layer above it stays readable.
+    // The shared renderer puts the lowest mel band at the bottom; this layer
+    // used to draw it at the top, upside-down against the pitch line.
+    const image = renderSpectrogramImage(baseSpectrogram, 'grey');
+    if (image) ctx.drawImage(image, 0, 0, width, height);
   }, [baseSpectrogram, width, height]);
 
   // 2. Render Waveform Overlay (Raw Amplitude Map)
@@ -155,8 +137,10 @@ export const XAIOverlayCanvas: React.FC<XAIOverlayCanvasProps> = ({
       const imgData = ctx.createImageData(timeFrames, melBins);
 
       for (let y = 0; y < melBins; y++) {
+        // Lowest mel band at the bottom, matching the base spectrogram.
+        const row = targetMatrix[melBins - 1 - y];
         for (let x = 0; x < timeFrames; x++) {
-          const normVal = targetMatrix[y][x] / maxVal;
+          const normVal = row[x] / maxVal;
           const [r, g, b] = getHeatmapColor(normVal);
           const idx = (y * timeFrames + x) * 4;
           imgData.data[idx] = r;
