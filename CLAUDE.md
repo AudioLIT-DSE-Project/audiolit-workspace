@@ -129,6 +129,7 @@ Every attribution payload carries `provenance` (`measured` | `fallback` | `unava
 - Custom models are limited to Whisper and Wav2Vec2 architectures, must ship `safetensors` weights (checked before any download), and are pinned to a commit revision.
 - Audio I/O is `soundfile` only, resampling via librosa; `torchaudio` was removed on purpose, as was Celery.
 - `infrastructure/dataset_ingestion.py` holds `CORPUS_REGISTRY` and the `DatasetLoader` interface for the seven benchmark corpora; `dataset_service.py` is what the routes call and falls through to it. Loaders resolve the corpus root from their module path (`Backend/data/`, mounted at `/app/data` in containers). Corpora are not in git; `datasets.lock` pins the Hugging Face dataset revision.
+- Bias profiling (`POST /evaluation/accent-bias`) runs on three corpora only: word error rate per accent on L2-ARCTIC (`accent_bias_runner.py`, Whisper, ASR queue) and emotion accuracy per speaker group on CREMA-D (race, sex or ethnicity) and ESD (language) (`emotion_bias_runner.py`, SER model, SER queue). Any other corpus is a 400, and the panel says so.
 - Uploads are stored under `uploads/` with UUID filenames and purged on a TTL (on each upload and at startup).
 - Mongo (`infrastructure/metadata_store.py`) stores metadata only, never audio or tensors, and every call degrades to a no-op when it is unconfigured or unreachable. Inference must never depend on it.
 - Logs are single-line JSON (`LOG_FORMAT=json`) and must not contain filenames, session ids or transcripts.
