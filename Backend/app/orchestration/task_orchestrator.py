@@ -227,6 +227,7 @@ _TASK_MODEL_ID_ARG_INDEX: dict[str, int | None] = {
     "add_task": 1,
     "xai_task": 1,
     "accent_bias_task": 0,
+    "emotion_bias_task": 0,
     "mutation_task": None,
     "aggregator_task": None,
 }
@@ -387,6 +388,20 @@ class AudioLITWorker(SimpleWorker):
             if result is False:
                 error = getattr(job, "exc_info", None) or "job failed (no traceback captured)"
                 self._record_task_failure(job, queue, started, error)
+                # The failure also has to reach the client. This is the path
+                # every ordinary task exception takes (RQ catches it, so the
+                # `except` below never runs), and it published nothing: the
+                # socket stayed open and the UI sat on "Processing..." forever.
+                state = "RETRYING" if (getattr(job, "retries_left", 0) or 0) > 0 else "FAILURE"
+                summary = [line for line in str(error).splitlines() if line.strip()]
+                publish_progress(
+                    job.id,
+                    state,
+                    {
+                        "duration_s": round(time.monotonic() - started, 3),
+                        "error": summary[-1].strip() if summary else "job failed",
+                    },
+                )
                 return result
             duration_s = time.monotonic() - started
             try:
@@ -773,8 +788,15 @@ def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[s
     ctx = get_worker_context()
     publish_progress(_current_job_id(), "asr.running", {"model": model_id})
     try:
-        from ..domain.model_loader_service import transcribe_asr
-        res = transcribe_asr(audio_ref)
+        # This imported `transcribe_asr`, a name that has never existed in
+        # model_loader_service. The ImportError landed in the `except` below, so
+        # every asynchronous ASR job "succeeded" in under a millisecond with an
+        # empty transcript and status "scaffold" - and nothing said why.
+        from ..domain.model_loader_service import transcribe_whisper_base
+
+        # "default" is the enqueue API's placeholder for "no model chosen".
+        selected = None if model_id in (None, "", "default") else model_id
+        res = transcribe_whisper_base(audio_ref, selected)
         return {
             "task": "asr",
             "model_id": model_id,
@@ -782,7 +804,9 @@ def asr_task(audio_ref: str, model_id: str, params: Mapping[str, Any]) -> dict[s
             "transcript": res.get("text", "") if isinstance(res, dict) else str(res),
             "status": "success",
         }
-    except Exception:
+    except Exception as exc:
+        # Only the exception type: its message can carry the audio path (SR6).
+        logger.warning("task.asr.fallback error=%s", type(exc).__name__)
         return {"task": "asr", "model_id": model_id, "device": ctx.device, "transcript": "", "status": "scaffold"}
 
 
@@ -875,13 +899,19 @@ def mutation_task(audio_ref: str, mutation: Mapping[str, Any]) -> dict[str, Any]
     )
     from ..domain.perturbation_service import perturb_and_save
 
-    return perturb_and_save(
+    result = perturb_and_save(
         file_path=audio_ref,
         perturbations=perturbations,
         output_dir="uploads",
         dataset=mutation.get("dataset"),
         session_id=None,
     )
+    # The derived clip is on disk and served by /upload/file; a job result is
+    # stored in Redis and sent to the browser as JSON. Carrying the WAV bytes in
+    # it cost a copy of the audio per job and made the result impossible to
+    # encode, so no finished mutation could be delivered.
+    result.pop("preview_bytes", None)
+    return result
 
 
 def accent_bias_task(
@@ -907,6 +937,65 @@ def accent_bias_task(
     )
     _write_bias_report(model_id, report)
     publish_progress(_current_job_id(), "accent_bias.completed", {"model": model_id})
+    return report.to_json_dict()
+
+
+def _write_emotion_bias_report(model_id: str, report: Any) -> None:
+    """Write-through one ``bias_reports`` document per group for an emotion
+    bias run. Same collection and same never-raises contract as
+    ``_write_bias_report``; ``WER`` is ``None`` because the measure here is
+    accuracy, which travels in ``disparity_metrics``."""
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    for cohort in getattr(report, "cohorts", []) or []:
+        try:
+            store.insert_bias_report(
+                {
+                    "report_id": f"{model_id}:{report.corpus}:{report.group_by}:{cohort.group}",
+                    "model_id": model_id,
+                    "cohort": cohort.group,
+                    "WER": None,
+                    "disparity_metrics": {
+                        "metric": "emotion_accuracy",
+                        "group_by": report.group_by,
+                        "accuracy": cohort.accuracy,
+                        "sample_count": cohort.sample_count,
+                        "scored_count": cohort.scored_count,
+                        "correct_count": cohort.correct_count,
+                        "corpus": report.corpus,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=bias_reports: %s", exc)
+
+
+def emotion_bias_task(
+    model_id: str, corpus: str, group_by: Optional[str], samples_per_cohort: Optional[int]
+) -> dict[str, Any]:
+    """Group-wise emotion accuracy for the SER corpora (FR15; CREMA-D, ESD).
+
+    The counterpart of ``accent_bias_task``: the same batch-over-a-corpus
+    shape, with the SER model and accuracy in place of Whisper and WER.
+    """
+    publish_progress(
+        _current_job_id(), "emotion_bias.running", {"model": model_id, "corpus": corpus}
+    )
+    from ..domain.emotion_bias_runner import make_ser_predictor, run_emotion_bias_diagnostic
+
+    report = run_emotion_bias_diagnostic(
+        make_ser_predictor(model_id),
+        corpus=corpus,
+        model_id=model_id,
+        group_by=group_by,
+        samples_per_cohort=samples_per_cohort,
+    )
+    _write_emotion_bias_report(model_id, report)
+    publish_progress(_current_job_id(), "emotion_bias.completed", {"model": model_id})
     return report.to_json_dict()
 
 
@@ -1102,6 +1191,33 @@ def enqueue_accent_bias(
         job_id=job.id,
         websocket_url=_ws_url(job.id, ws_base_url),
         family_jobs={"accent_bias": job.id},
+    )
+
+
+def enqueue_emotion_bias(
+    model_id: str,
+    corpus: str,
+    group_by: Optional[str] = None,
+    samples_per_cohort: Optional[int] = None,
+    *,
+    ws_base_url: str | None = None,
+) -> EnqueueResult:
+    # On the SER queue for the same reason accent bias is on the ASR one: it is
+    # a batch of SER inferences and must not run beside another SER job.
+    job = get_queue(WorkerFamily.SER).enqueue(
+        emotion_bias_task,
+        model_id,
+        corpus,
+        group_by,
+        samples_per_cohort,
+        job_timeout=ACCENT_BIAS_JOB_TIMEOUT,
+        result_ttl=DEFAULT_RESULT_TTL,
+        failure_ttl=DEFAULT_FAILURE_TTL,
+    )
+    return EnqueueResult(
+        job_id=job.id,
+        websocket_url=_ws_url(job.id, ws_base_url),
+        family_jobs={"emotion_bias": job.id},
     )
 
 

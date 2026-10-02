@@ -580,6 +580,19 @@ class TestMutationTask:
         result = mutation_task("uploads/original.wav", {"perturbations": []})
         assert "_scaffold" not in result
 
+    def test_result_carries_no_audio_bytes(self, broker, monkeypatch):
+        """A job result is stored in Redis and delivered as JSON."""
+        from app.domain import perturbation_service
+
+        monkeypatch.setattr(
+            perturbation_service,
+            "perturb_and_save",
+            lambda **kwargs: {"success": True, "preview_bytes": b"RIFF\xfa"},
+        )
+        result = mutation_task("uploads/original.wav", {"perturbations": []})
+        assert result == {"success": True}
+        json.dumps(result)
+
 
 class TestStripArrayPayloads:
     """LIT-258: `_strip_array_fields` is the C4/SR4 boundary - tensor/heatmap

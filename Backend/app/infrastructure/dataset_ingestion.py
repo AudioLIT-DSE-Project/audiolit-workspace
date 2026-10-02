@@ -844,6 +844,9 @@ class CremaDLoader(DatasetLoader):
     DEFAULT_DIR = DATA_DIR / "crema_d"
     AUDIO_SUBDIR = "AudioWAV"
     DEMOGRAPHICS_FILE = "VideoDemographics.csv"
+    #: The provisioned flat sample ships this catalog instead of the corpus's
+    #: own VideoDemographics.csv; it carries the same per-actor fields.
+    SAMPLE_CATALOG_NAME = "crema_d_test_120_metadata.csv"
 
     def __init__(self, root_dir: Optional[Path | str] = None, *, name: str = "crema-d"):
         super().__init__(name=name, task_family=TaskFamily.SER, license=CREMA_D_LICENSE)
@@ -902,24 +905,36 @@ class CremaDLoader(DatasetLoader):
         )
 
     def _load_demographics(self) -> Dict[str, Dict[str, str]]:
-        path = self.root_dir / self.DEMOGRAPHICS_FILE
-        if not path.exists():
-            return {}
-        out: Dict[str, Dict[str, str]] = {}
-        with path.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
-                actor = (row.get("ActorID") or "").strip()
-                if not actor:
-                    continue
-                out[actor] = {
-                    key: (row.get(column) or "").strip()
-                    for key, column in (
-                        ("age", "Age"), ("sex", "Sex"),
-                        ("race", "Race"), ("ethnicity", "Ethnicity"),
-                    )
-                    if (row.get(column) or "").strip()
-                }
-        return out
+        """Per-actor age/sex/race/ethnicity.
+
+        Read from the corpus's own ``VideoDemographics.csv`` when it is there,
+        otherwise from the flat sample's catalog. Only the first was read
+        before, and the provisioned sample does not include it, so every clip
+        came back with no demographics and the corpus could not be grouped.
+        """
+        sources = (
+            (self.DEMOGRAPHICS_FILE, "utf-8", "ActorID",
+             (("age", "Age"), ("sex", "Sex"), ("race", "Race"), ("ethnicity", "Ethnicity"))),
+            (self.SAMPLE_CATALOG_NAME, "utf-8-sig", "actor_id",
+             (("age", "age"), ("sex", "sex"), ("race", "race"), ("ethnicity", "ethnicity"))),
+        )
+        for filename, encoding, actor_column, fields in sources:
+            path = self.root_dir / filename
+            if not path.exists():
+                continue
+            out: Dict[str, Dict[str, str]] = {}
+            with path.open(newline="", encoding=encoding) as handle:
+                for row in csv.DictReader(handle):
+                    actor = (row.get(actor_column) or "").strip()
+                    if not actor:
+                        continue
+                    out[actor] = {
+                        key: (row.get(column) or "").strip()
+                        for key, column in fields
+                        if (row.get(column) or "").strip()
+                    }
+            return out
+        return {}
 
 
 class RavdessLoader(DatasetLoader):
@@ -1078,8 +1093,33 @@ class ESDLoader(CsvCatalogLoader):
             encoding="utf-8-sig",
         )
 
+    @staticmethod
+    def _speaker_language(speaker_id: Optional[str]) -> Optional[tuple[str, str]]:
+        """``(code, name)`` of the language an ESD speaker recorded in.
+
+        The corpus has ten native Mandarin speakers (0001-0010) and ten native
+        English speakers (0011-0020). The catalog does not carry a language
+        column, so the speaker id is the only place this is recorded.
+        """
+        try:
+            number = int(str(speaker_id))
+        except (TypeError, ValueError):
+            return None
+        if 1 <= number <= 10:
+            return ("zh", "Mandarin")
+        if 11 <= number <= 20:
+            return ("en", "English")
+        return None
+
     def iter_metadata(self) -> Iterator[SampleMetadata]:
         for meta in super().iter_metadata():
+            language = self._speaker_language(meta.speaker_id)
+            if language is not None:
+                meta = replace(
+                    meta,
+                    language=language[0],
+                    demographic={**meta.demographic, "language": language[1]},
+                )
             if meta.label is None:
                 yield meta
                 continue
