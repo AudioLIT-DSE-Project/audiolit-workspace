@@ -7,6 +7,7 @@ import { HelpCircle, Loader2 } from "lucide-react";
 import { API_BASE } from "@/lib/api";
 import { isUploadedAudio } from "@/lib/audioSelection";
 import { MelSpectrogram } from "../visualization/MelSpectrogram";
+import { timeTicks } from "@/lib/spectrogramImage";
 
 interface UploadedFile {
   file_id: string;
@@ -109,11 +110,19 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
   // FR10.2: the same playhead the player and the XAI overlay use.
   const { currentTime, seek } = usePlayback();
   const chartData = (profile?.timeline || []).map((p) => ({
-    t: +(p.t_ms / 1000).toFixed(2),
+    t: +(p.t_ms / 1000).toFixed(3),
     f0: p.f0_hz,
     rms: p.rms,
   }));
   const hasSpectrogram = (profile?.spectrogram?.[0]?.length ?? 0) > 0;
+  // A numeric time axis, 0 to the clip's duration, with the spectrogram's own
+  // ticks. It was a category axis (one slot per frame), which had two effects:
+  // the playhead only drew when the playback time happened to equal a frame's
+  // rounded timestamp, so it was almost never visible, and the axis stopped at
+  // the last frame rather than the end of the clip, out of line with the
+  // spectrogram above it.
+  const durationSec = profile?.duration_s ?? 0;
+  const xTicks = timeTicks(durationSec);
 
   return (
     <TooltipProvider>
@@ -168,11 +177,11 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
                   if (Number.isFinite(t)) seek(t);
                 }}>
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                  <XAxis dataKey="t" tick={{ fontSize: 10 }} unit="s" />
+                  <XAxis dataKey="t" type="number" domain={[0, durationSec]} ticks={xTicks} tick={{ fontSize: 10 }} unit="s" />
                   <YAxis tick={{ fontSize: 10 }} unit="Hz" domain={['auto', 'auto']} />
-                  <RechartsTooltip contentStyle={{ fontSize: 11 }} />
+                  <RechartsTooltip contentStyle={{ fontSize: 11 }} labelFormatter={(t: number) => `${Number(t).toFixed(2)} s`} formatter={(v: number) => (typeof v === "number" ? v.toFixed(v < 10 ? 3 : 1) : v)} />
                   <Line type="monotone" dataKey="f0" stroke="hsl(var(--waveform-primary))" dot={false} strokeWidth={1.5} connectNulls={false} isAnimationActive={false} />
-                  <ReferenceLine x={Number(currentTime.toFixed(2))} stroke="hsl(var(--foreground))" strokeWidth={1} />
+                  <ReferenceLine x={Math.min(currentTime, durationSec)} stroke="hsl(var(--foreground))" strokeWidth={1} />
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -202,11 +211,11 @@ export const AcousticProfilePanel: React.FC<AcousticProfilePanelProps> = ({
                   if (Number.isFinite(t)) seek(t);
                 }}>
                   <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                  <XAxis dataKey="t" tick={{ fontSize: 10 }} unit="s" />
+                  <XAxis dataKey="t" type="number" domain={[0, durationSec]} ticks={xTicks} tick={{ fontSize: 10 }} unit="s" />
                   <YAxis tick={{ fontSize: 10 }} />
-                  <RechartsTooltip contentStyle={{ fontSize: 11 }} />
+                  <RechartsTooltip contentStyle={{ fontSize: 11 }} labelFormatter={(t: number) => `${Number(t).toFixed(2)} s`} formatter={(v: number) => (typeof v === "number" ? v.toFixed(v < 10 ? 3 : 1) : v)} />
                   <Line type="monotone" dataKey="rms" stroke="hsl(var(--waveform-secondary))" dot={false} strokeWidth={1.5} isAnimationActive={false} />
-                  <ReferenceLine x={Number(currentTime.toFixed(2))} stroke="hsl(var(--foreground))" strokeWidth={1} />
+                  <ReferenceLine x={Math.min(currentTime, durationSec)} stroke="hsl(var(--foreground))" strokeWidth={1} />
                 </LineChart>
               </ResponsiveContainer>
             )}
