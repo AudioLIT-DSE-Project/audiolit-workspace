@@ -47,6 +47,53 @@ class TestTrackPitchContour:
         f0 = track_pitch_contour(silence, sr=SR)
         assert np.all(np.isnan(f0))
 
+    def test_a_tone_in_noise_is_still_tracked(self):
+        """A pitched signal in realistic noise must keep its contour.
+
+        pYIN's `voiced_prob` is around 0.1-0.4 on such frames, as it is on real
+        speech. The default threshold was 0.5, which dropped every one of them
+        here and left real clips with a few disconnected dashes of pitch.
+        """
+        rng = np.random.default_rng(0)
+        audio = (0.3 * _sine(220.0, duration_s=2.0) + 0.07 * rng.standard_normal(2 * SR)).astype(np.float32)
+
+        f0 = track_pitch_contour(audio, sr=SR)
+        voiced = f0[~np.isnan(f0)]
+        assert voiced.size >= 0.9 * f0.size
+        assert np.allclose(voiced, 220.0, atol=5.0)
+
+        # The threshold this replaced, for the record of what it did.
+        assert np.all(np.isnan(track_pitch_contour(audio, sr=SR, voiced_prob_threshold=0.5)))
+
+    def test_noise_alone_has_no_pitch(self):
+        """The threshold is not simply removed: pYIN's own voiced flag calls a
+        good share of white-noise frames voiced, and a pitch line over noise
+        would be an invented one."""
+        rng = np.random.default_rng(0)
+        noise = (0.1 * rng.standard_normal(2 * SR)).astype(np.float32)
+        assert np.all(np.isnan(track_pitch_contour(noise, sr=SR)))
+        assert not np.all(np.isnan(track_pitch_contour(noise, sr=SR, voiced_prob_threshold=0.0)))
+
+    def test_a_faint_background_tone_is_not_reported_as_pitch(self):
+        """pYIN tracks periodicity, not level. A quiet steady tone ahead of the
+        speech was drawn as a 650 Hz pitch segment and stretched the chart's
+        scale; pitch is only reported where the clip actually has signal."""
+        loud = 0.5 * _sine(180.0, duration_s=1.0)
+        faint = 0.005 * _sine(650.0, duration_s=1.0)  # 1% of the loud part
+        f0 = track_pitch_contour(np.concatenate([faint, loud]).astype(np.float32), sr=SR)
+
+        frames_per_second = SR // 512
+        assert np.all(np.isnan(f0[: frames_per_second - 4]))
+        voiced = f0[~np.isnan(f0)]
+        assert voiced.size > 0
+        assert np.allclose(voiced, 180.0, atol=5.0)
+
+        # Without the gate the faint tone is tracked.
+        ungated = track_pitch_contour(
+            np.concatenate([faint, loud]).astype(np.float32), sr=SR, silence_threshold=0.0
+        )
+        assert np.nanmax(ungated) > 600.0
+
     def test_stricter_voiced_threshold_yields_no_more_voiced_frames(self):
         audio = _sine(220.0)
         lenient = track_pitch_contour(audio, sr=SR, voiced_prob_threshold=0.1)
