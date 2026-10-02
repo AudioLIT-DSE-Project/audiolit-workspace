@@ -227,6 +227,7 @@ _TASK_MODEL_ID_ARG_INDEX: dict[str, int | None] = {
     "add_task": 1,
     "xai_task": 1,
     "accent_bias_task": 0,
+    "emotion_bias_task": 0,
     "mutation_task": None,
     "aggregator_task": None,
 }
@@ -939,6 +940,65 @@ def accent_bias_task(
     return report.to_json_dict()
 
 
+def _write_emotion_bias_report(model_id: str, report: Any) -> None:
+    """Write-through one ``bias_reports`` document per group for an emotion
+    bias run. Same collection and same never-raises contract as
+    ``_write_bias_report``; ``WER`` is ``None`` because the measure here is
+    accuracy, which travels in ``disparity_metrics``."""
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+
+    for cohort in getattr(report, "cohorts", []) or []:
+        try:
+            store.insert_bias_report(
+                {
+                    "report_id": f"{model_id}:{report.corpus}:{report.group_by}:{cohort.group}",
+                    "model_id": model_id,
+                    "cohort": cohort.group,
+                    "WER": None,
+                    "disparity_metrics": {
+                        "metric": "emotion_accuracy",
+                        "group_by": report.group_by,
+                        "accuracy": cohort.accuracy,
+                        "sample_count": cohort.sample_count,
+                        "scored_count": cohort.scored_count,
+                        "correct_count": cohort.correct_count,
+                        "corpus": report.corpus,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning("metadata.write_failed collection=bias_reports: %s", exc)
+
+
+def emotion_bias_task(
+    model_id: str, corpus: str, group_by: Optional[str], samples_per_cohort: Optional[int]
+) -> dict[str, Any]:
+    """Group-wise emotion accuracy for the SER corpora (FR15; CREMA-D, ESD).
+
+    The counterpart of ``accent_bias_task``: the same batch-over-a-corpus
+    shape, with the SER model and accuracy in place of Whisper and WER.
+    """
+    publish_progress(
+        _current_job_id(), "emotion_bias.running", {"model": model_id, "corpus": corpus}
+    )
+    from ..domain.emotion_bias_runner import make_ser_predictor, run_emotion_bias_diagnostic
+
+    report = run_emotion_bias_diagnostic(
+        make_ser_predictor(model_id),
+        corpus=corpus,
+        model_id=model_id,
+        group_by=group_by,
+        samples_per_cohort=samples_per_cohort,
+    )
+    _write_emotion_bias_report(model_id, report)
+    publish_progress(_current_job_id(), "emotion_bias.completed", {"model": model_id})
+    return report.to_json_dict()
+
+
 def aggregator_task(
     family_job_ids: Sequence[str],
     cache_key: str | None,
@@ -1131,6 +1191,33 @@ def enqueue_accent_bias(
         job_id=job.id,
         websocket_url=_ws_url(job.id, ws_base_url),
         family_jobs={"accent_bias": job.id},
+    )
+
+
+def enqueue_emotion_bias(
+    model_id: str,
+    corpus: str,
+    group_by: Optional[str] = None,
+    samples_per_cohort: Optional[int] = None,
+    *,
+    ws_base_url: str | None = None,
+) -> EnqueueResult:
+    # On the SER queue for the same reason accent bias is on the ASR one: it is
+    # a batch of SER inferences and must not run beside another SER job.
+    job = get_queue(WorkerFamily.SER).enqueue(
+        emotion_bias_task,
+        model_id,
+        corpus,
+        group_by,
+        samples_per_cohort,
+        job_timeout=ACCENT_BIAS_JOB_TIMEOUT,
+        result_ttl=DEFAULT_RESULT_TTL,
+        failure_ttl=DEFAULT_FAILURE_TTL,
+    )
+    return EnqueueResult(
+        job_id=job.id,
+        websocket_url=_ws_url(job.id, ws_base_url),
+        family_jobs={"emotion_bias": job.id},
     )
 
 

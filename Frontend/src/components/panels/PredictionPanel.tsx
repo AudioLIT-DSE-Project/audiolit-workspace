@@ -813,7 +813,7 @@ export const PredictionPanel = ({
               forceMount
               className="m-0 h-full data-[state=inactive]:hidden"
             >
-              <AccentBiasPanel model={model} />
+              <AccentBiasPanel model={model} dataset={originalDataset || dataset} />
             </TabsContent>
           )}
 
