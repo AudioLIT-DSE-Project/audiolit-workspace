@@ -28,6 +28,7 @@ import { API_BASE } from "@/lib/api";
 import { ProvenanceBadge, provenanceOverlayStyle } from "../ui/ProvenanceBadge";
 import { DeepfakeForensicPanel } from "./DeepfakeForensicPanel";
 import { isUploadedAudio } from "@/lib/audioSelection";
+import { getModelTaskFamily } from "@/lib/modelTask";
 
 interface UploadedFile {
   file_id: string;
@@ -324,11 +325,30 @@ export const PredictionPanel = ({
 
   const hasAttention = !!model && model.includes("whisper");
 
+  // Which cards the selected model is entitled to.
+  //
+  // A result reaches this panel two ways. `unifiedResult` is the multi-task job
+  // the user ran on an upload: it shows whatever tasks that job ran. Everything
+  // else is recovered - from the result cache, or from the per-model fetches -
+  // and the cache is keyed by clip, not by what is selected. A dataset warmup
+  // caches ASR, SER and acoustic results for every clip, so on a warmed-up
+  // corpus (Common Voice) an ASR model's clip came back with an emotion result
+  // too, and the Emotion Analytics card appeared beside a Whisper transcript.
+  // On a corpus that was never warmed up there was nothing cached to show,
+  // which is why it looked specific to one dataset. Recovered results are
+  // therefore limited to the selected model's own task.
+  const modelFamily = getModelTaskFamily(model || "whisper-base");
+  const recovered = {
+    asr: modelFamily === "ASR" ? cachedTaskResults?.asr : undefined,
+    ser: modelFamily === "SER" ? cachedTaskResults?.ser : undefined,
+    add: modelFamily === "DEEPFAKE" ? cachedTaskResults?.add : undefined,
+  };
+
   // Synchronize ADD (Deepfake Warning Banner & Card)
-  const rawAdd = unifiedResult?.tasks?.add || cachedTaskResults?.add;
+  const rawAdd = unifiedResult?.tasks?.add || recovered.add;
   const addResult =
     rawAdd ||
-    (addPrediction?.probabilities
+    (modelFamily === "DEEPFAKE" && addPrediction?.probabilities
       ? {
           label: addPrediction.predicted_label,
           synthetic_probability: addPrediction.synthetic_probability,
@@ -338,10 +358,10 @@ export const PredictionPanel = ({
       : undefined);
 
   // Synchronize SER (Emotion Analytics)
-  const rawSer = unifiedResult?.tasks?.ser || cachedTaskResults?.ser;
+  const rawSer = unifiedResult?.tasks?.ser || recovered.ser;
   const serResult =
     rawSer ||
-    (wav2vecPrediction?.probabilities
+    (modelFamily === "SER" && wav2vecPrediction?.probabilities
       ? {
           predicted_emotion: wav2vecPrediction.predicted_emotion,
           probabilities: wav2vecPrediction.probabilities,
@@ -350,14 +370,14 @@ export const PredictionPanel = ({
       : undefined);
 
   // Synchronize ASR (Transcription Timeline)
-  const rawAsr = unifiedResult?.tasks?.asr || cachedTaskResults?.asr;
+  const rawAsr = unifiedResult?.tasks?.asr || recovered.asr;
   const fileTranscript =
     whisperPrediction?.predicted_transcript ||
     selectedFile?.prediction ||
     selectedFile?.predicted_transcript;
   const asrResult =
     rawAsr ||
-    (fileTranscript ? { transcript: fileTranscript, tokens: [] } : undefined);
+    (modelFamily === "ASR" && fileTranscript ? { transcript: fileTranscript, tokens: [] } : undefined);
 
   // extract_acoustic_profile returns `timeline: [{t_ms, f0_hz, rms}]`. It has no
   // top-level `f0` key, which is why this contour was empty on every file.
