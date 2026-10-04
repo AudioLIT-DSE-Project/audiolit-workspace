@@ -549,9 +549,14 @@ export const MainLayout = () => {
 
   const [predictionMap, setPredictionMap] = useState<Record<string, string>>({});
 
-  const handlePredictionUpdate = (fileId: string, prediction: string) => {
+  // Stable identity. AudioDatasetPanel's cached-prediction check lists this
+  // callback as an effect dependency and calls it with each cached result. As
+  // a plain function it was new on every render, so the check re-ran after its
+  // own state update and never stopped: about 30 POST /inferences/batch-check a
+  // second for as long as a dataset with cached predictions was on screen.
+  const handlePredictionUpdate = useCallback((fileId: string, prediction: string) => {
     setPredictionMap(prev => ({ ...prev, [fileId]: prediction }));
-  };
+  }, []);
 
   const handleUploadSuccess = (uploadResponse: UploadedFile) => {
     setUploadedFiles(prev => [uploadResponse, ...prev.filter(f => f.file_id !== uploadResponse.file_id)]);

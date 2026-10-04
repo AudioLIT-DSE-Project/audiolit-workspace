@@ -7,12 +7,16 @@ not duplicate that surface.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ...infrastructure.dataset_service import resolve_audio_reference, resolve_file
+from ..dependencies import get_session_id
 from ...orchestration.task_orchestrator import (
     TaskFamily,
     enqueue_attribution,
@@ -84,9 +88,43 @@ async def post_attribution(req: AttributionRequest) -> JobResponse:
     )
     return JobResponse(**result.as_response())
 
+def _resolve_mutation_audio(req: MutationRequest, session_id: str | None) -> Path:
+    """Turn the client's audio reference into the file the worker will read.
+
+    ``mutation.dataset`` names the corpus when ``audio_ref`` is a dataset row;
+    ``mutation.is_uploaded`` marks an upload or live recording, whose
+    ``audio_ref`` is already a path. Both travel inside ``mutation`` because
+    that is the shape the frontend has always sent.
+    """
+    dataset = req.mutation.get("dataset")
+    if dataset and not req.mutation.get("is_uploaded"):
+        return resolve_file(str(dataset), req.audio_ref, session_id)
+    return resolve_audio_reference(file_path=req.audio_ref, session_id=session_id)
+
+
 @router.post("/inference/mutation", response_model=JobResponse)
-async def post_mutation(req: MutationRequest) -> JobResponse:
-    result = enqueue_mutation(audio_ref=req.audio_ref, mutation=req.mutation)
+async def post_mutation(http_request: Request, req: MutationRequest) -> JobResponse:
+    # The audio is resolved here, not in the worker. The worker has no session,
+    # so it could not resolve a custom dataset at all, and it treated every
+    # reference that arrived with a `dataset` as a row of that corpus - an
+    # upload selected while a corpus was active was looked up inside the corpus
+    # and reported "not found". Resolving first also lets a bad reference fail
+    # this request with a clear message (SAD Use Case 4, fail post-condition)
+    # rather than a job that fails later. It is a catalogue lookup, not model
+    # work, but it does touch the disk, so it runs off the event loop.
+    try:
+        audio_path = await asyncio.to_thread(
+            _resolve_mutation_audio, req, get_session_id(http_request)
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not audio_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Audio file not found: {req.audio_ref}")
+
+    mutation = {k: v for k, v in req.mutation.items() if k not in ("dataset", "is_uploaded")}
+    result = enqueue_mutation(audio_ref=str(audio_path.resolve()), mutation=mutation)
     return JobResponse(**result.as_response())
 
 

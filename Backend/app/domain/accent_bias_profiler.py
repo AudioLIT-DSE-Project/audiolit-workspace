@@ -62,9 +62,15 @@ def load_accent_cohorts(
     corpus: str = "l2-arctic",
     samples_per_cohort: Optional[int] = None,
     seed: int = 0,
+    group_key: Optional[Callable[[SampleMetadata], Optional[str]]] = None,
     **loader_kwargs,
 ) -> Dict[str, List[SampleMetadata]]:
     """Load ``corpus`` samples grouped by accent/L1.
+
+    ``group_key`` swaps the grouping for another field (race, language, ...)
+    for corpora that have no accent label; a sample it returns ``None`` for is
+    left out. The default groups by accent, with unlabelled samples under
+    ``"unknown"``.
 
     Without ``samples_per_cohort``, returns every sample per accent group.
     With it, reservoir-samples each cohort independently in a single pass
@@ -90,14 +96,21 @@ def load_accent_cohorts(
 
     samples = loader.validated_stream(deep=True, on_reject=_on_reject)
 
+    if group_key is None:
+        group_key = lambda meta: meta.accent or "unknown"  # noqa: E731
+
     if samples_per_cohort is None:
         for meta in samples:
-            cohorts.setdefault(meta.accent or "unknown", []).append(meta)
+            key = group_key(meta)
+            if key is not None:
+                cohorts.setdefault(key, []).append(meta)
     else:
         rng = random.Random(seed)
         seen: Dict[str, int] = {}
         for meta in samples:
-            key = meta.accent or "unknown"
+            key = group_key(meta)
+            if key is None:
+                continue
             reservoir = cohorts.setdefault(key, [])
             i = seen.get(key, 0)
             seen[key] = i + 1

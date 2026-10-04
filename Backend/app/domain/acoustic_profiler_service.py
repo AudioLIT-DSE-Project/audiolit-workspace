@@ -17,6 +17,26 @@ DEFAULT_HOP_LENGTH = 512
 # pYIN example range for speech (C2-C7).
 DEFAULT_FMIN = librosa.note_to_hz("C2")
 DEFAULT_FMAX = librosa.note_to_hz("C7")
+# The voicing confidence below which a frame pYIN called voiced is dropped.
+#
+# pYIN's own voiced/unvoiced decision is not enough on its own: it marks about
+# a quarter of white-noise frames as voiced. Its `voiced_prob` separates the two
+# cases cleanly, but the scale is not what the name suggests - on real speech it
+# sits around 0.1-0.35 for voiced frames, against 0.01 for noise. This was 0.5,
+# which kept 3-26% of the frames on Common Voice clips whose speech is 48-66%
+# voiced: the contour came out as a few disconnected dashes. At 0.1 the frames
+# kept agree with an independent pYIN configuration to within 50 cents on
+# 98-100% of them, and noise is still rejected with a tenfold margin.
+DEFAULT_VOICED_PROB_THRESHOLD = 0.1
+# Frames quieter than this fraction of the clip's loudest frame carry no pitch.
+#
+# pYIN looks only at periodicity, not level, so a faint steady tone in the
+# background of an otherwise silent stretch is tracked as confidently as a
+# voice. On one Common Voice clip that put a 650 Hz segment ahead of the first
+# word, at 1.5% of the clip's peak level, and stretched the chart's scale until
+# the actual speech contour was a flat line. 0.03 is the silence threshold Praat
+# uses for the same purpose.
+DEFAULT_SILENCE_THRESHOLD = 0.03
 
 
 def track_pitch_contour(
@@ -26,7 +46,8 @@ def track_pitch_contour(
     fmax: float = DEFAULT_FMAX,
     frame_length: int = DEFAULT_FRAME_LENGTH,
     hop_length: int = DEFAULT_HOP_LENGTH,
-    voiced_prob_threshold: float = 0.5,
+    voiced_prob_threshold: float = DEFAULT_VOICED_PROB_THRESHOLD,
+    silence_threshold: float = DEFAULT_SILENCE_THRESHOLD,
 ) -> np.ndarray:
     """Frame-wise fundamental-frequency (F0) trajectory via pYIN (LIT-145, FR10).
 
@@ -48,6 +69,13 @@ def track_pitch_contour(
     f0 = np.asarray(f0, dtype=np.float64)
     unvoiced = ~np.asarray(voiced_flag, dtype=bool) | (np.asarray(voiced_prob) < voiced_prob_threshold)
     f0[unvoiced] = np.nan
+
+    # Silence gate, on the same frames the pitch was estimated over.
+    if silence_threshold > 0:
+        rms = librosa.feature.rms(y=audio, frame_length=frame_length, hop_length=hop_length)[0]
+        peak = float(rms.max()) if rms.size else 0.0
+        if peak > 0:
+            f0[: len(rms)][rms[: len(f0)] < silence_threshold * peak] = np.nan
     return f0
 
 
@@ -77,7 +105,7 @@ def extract_acoustic_profile(
     fmax: float = DEFAULT_FMAX,
     frame_length: int = DEFAULT_FRAME_LENGTH,
     hop_length: int = DEFAULT_HOP_LENGTH,
-    voiced_prob_threshold: float = 0.5,
+    voiced_prob_threshold: float = DEFAULT_VOICED_PROB_THRESHOLD,
 ) -> dict:
     """Combined DSP acoustic profile (LIT-125, FR10): the STFT + pYIN F0 + RMS
     engine, packaged as one aligned, JSON-serializable timeline for the API

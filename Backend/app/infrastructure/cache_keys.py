@@ -166,7 +166,7 @@ def deepfake_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]:
 # `spectrogram` without one, so every entry cached before it kept being served
 # without a spectrogram for the whole 24 h TTL - a correct computation the UI
 # could never see (FR4.1: a shape change must not be serveable under an old key).
-ACOUSTIC_SCHEMA_VERSION = "v3"
+ACOUSTIC_SCHEMA_VERSION = "v5"  # v4/v5: pitch voicing threshold 0.5 -> 0.1, then a silence gate; older cached contours are wrong
 
 
 def add_timeline_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]:
