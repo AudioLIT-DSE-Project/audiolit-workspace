@@ -162,6 +162,150 @@ def apply_time_stretch(waveform: torch.Tensor, stretch_factor: float) -> torch.T
         logger.error(f"Time stretch failed: {e}. Returning original waveform.")
         return waveform
 
+# --- Region-scoped perturbation (FR12: mutate the selected region only) -------
+#
+# A perturbation may carry a ``region``:
+#
+#     {"t_start_ms": 500, "t_end_ms": 1500, "f_low_hz": 300, "f_high_hz": 2500}
+#
+# The time span is required; the frequency band is optional and means "the whole
+# band" when absent. Without a region a perturbation acts on the whole clip, as
+# it always has. Before this, only the mute could be confined to a region: noise
+# requested "for the selected region" was added to the entire clip.
+
+_REGION_STFT_N_FFT = 2048
+_REGION_STFT_HOP = 512
+# Edge ramp for a time-only splice, so the region does not start and stop with
+# a click. 5 ms is inaudible as a fade and long enough to remove the step.
+_REGION_FADE_SECONDS = 0.005
+
+#: Perturbations whose frequency band can be confined. Pitch shift and time
+#: stretch act on the whole spectrum by definition, so they use the time span.
+REGION_BAND_TYPES = ("noise", "band_pass_filter")
+
+
+def _mono(waveform: torch.Tensor) -> np.ndarray:
+    return (waveform[0] if waveform.dim() > 1 else waveform).detach().cpu().numpy().astype(np.float32)
+
+
+def _region_samples(region: Dict[str, Any], n_samples: int, sample_rate: int) -> Tuple[int, int]:
+    """The region's time span as a clamped ``[start, end)`` sample range."""
+    start = int(round(float(region.get("t_start_ms", 0)) / 1000.0 * sample_rate))
+    end = int(round(float(region.get("t_end_ms", n_samples / sample_rate * 1000.0)) / 1000.0 * sample_rate))
+    start = max(0, min(start, n_samples))
+    end = max(0, min(end, n_samples))
+    if end <= start:
+        raise ValueError("The selected region is empty or lies outside the clip.")
+    return start, end
+
+
+def _region_band(region: Dict[str, Any], sample_rate: int) -> Tuple[float, float] | None:
+    """The region's frequency band, or None when it spans the whole spectrum."""
+    if region.get("f_low_hz") is None and region.get("f_high_hz") is None:
+        return None
+    nyquist = sample_rate / 2.0
+    low = max(0.0, float(region.get("f_low_hz") or 0.0))
+    high = min(nyquist, float(region.get("f_high_hz") if region.get("f_high_hz") is not None else nyquist))
+    if high <= low:
+        raise ValueError("The selected frequency band is empty or lies above the clip's bandwidth.")
+    return (low, high) if (low > 0.0 or high < nyquist) else None
+
+
+def _splice_time_region(original: np.ndarray, perturbed: np.ndarray, start: int, end: int, sample_rate: int) -> np.ndarray:
+    """Take ``perturbed`` inside ``[start, end)`` and ``original`` elsewhere.
+
+    Both arrays are the same length. The switch is ramped over a few
+    milliseconds just inside each edge of the region.
+    """
+    weight = np.zeros(len(original), dtype=np.float32)
+    weight[start:end] = 1.0
+    fade = min(int(_REGION_FADE_SECONDS * sample_rate), (end - start) // 2)
+    if fade > 0:
+        ramp = np.linspace(0.0, 1.0, fade, endpoint=False, dtype=np.float32)
+        weight[start:start + fade] = ramp
+        weight[end - fade:end] = ramp[::-1]
+    return original * (1.0 - weight) + perturbed * weight
+
+
+def _stft_region_mask(n_frames: int, sample_rate: int, start: int, end: int, band: Tuple[float, float]) -> Tuple[np.ndarray, np.ndarray]:
+    """Boolean frequency-bin and frame masks for a time-frequency region."""
+    freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=_REGION_STFT_N_FFT)
+    times = librosa.frames_to_time(np.arange(n_frames), sr=sample_rate, hop_length=_REGION_STFT_HOP)
+    freq_mask = (freqs >= band[0]) & (freqs <= band[1])
+    time_mask = (times >= start / sample_rate) & (times <= end / sample_rate)
+    return freq_mask, time_mask
+
+
+def _istft_to_length(stft: np.ndarray, length: int) -> np.ndarray:
+    audio = librosa.istft(stft, hop_length=_REGION_STFT_HOP, length=length)
+    return audio.astype(np.float32)
+
+
+def apply_region_perturbation(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    perturbation_type: str,
+    params: Dict[str, Any],
+    region: Dict[str, Any],
+) -> torch.Tensor:
+    """Apply one perturbation inside ``region`` and leave the rest of the clip alone.
+
+    Raises ``ValueError`` for an empty region or a type that cannot be scoped;
+    the caller records that against the perturbation instead of failing the job.
+    """
+    original = _mono(waveform)
+    start, end = _region_samples(region, len(original), sample_rate)
+    band = _region_band(region, sample_rate)
+
+    if perturbation_type == "noise":
+        noise_level = float(params.get("noise_level", 0.005))
+        noisy = original + np.random.randn(len(original)).astype(np.float32) * noise_level
+        if band is None:
+            result = _splice_time_region(original, noisy, start, end, sample_rate)
+        else:
+            # Band-limited noise: swap in the noisy signal's spectrum for the
+            # cells inside the box only.
+            stft = librosa.stft(original, n_fft=_REGION_STFT_N_FFT, hop_length=_REGION_STFT_HOP)
+            noisy_stft = librosa.stft(noisy, n_fft=_REGION_STFT_N_FFT, hop_length=_REGION_STFT_HOP)
+            freq_mask, time_mask = _stft_region_mask(stft.shape[1], sample_rate, start, end, band)
+            cells = np.outer(freq_mask, time_mask)
+            stft[cells] = noisy_stft[cells]
+            result = _istft_to_length(stft, len(original))
+
+    elif perturbation_type == "band_pass_filter":
+        # Keep only the band, for the duration of the region: everything outside
+        # the band is silenced inside the time span and untouched outside it.
+        keep = band or _region_band(
+            {"f_low_hz": params.get("f_low_hz"), "f_high_hz": params.get("f_high_hz")}, sample_rate
+        )
+        if keep is None:
+            raise ValueError("A band-pass filter needs a frequency band: draw the region on the spectrogram.")
+        stft = librosa.stft(original, n_fft=_REGION_STFT_N_FFT, hop_length=_REGION_STFT_HOP)
+        freq_mask, time_mask = _stft_region_mask(stft.shape[1], sample_rate, start, end, keep)
+        stft[np.outer(~freq_mask, time_mask)] = 0.0
+        result = _istft_to_length(stft, len(original))
+
+    elif perturbation_type == "pitch_shift":
+        semitones = max(-6.0, min(6.0, float(params.get("pitch_shift_semitones", 2))))
+        shifted = original.copy()
+        shifted[start:end] = librosa.effects.pitch_shift(
+            y=original[start:end], sr=sample_rate, n_steps=semitones
+        )[: end - start]
+        result = _splice_time_region(original, shifted, start, end, sample_rate)
+
+    elif perturbation_type == "time_stretch":
+        # The one perturbation that changes the clip's length: the region is
+        # replaced by its stretched version and everything after it moves.
+        factor = float(params.get("stretch_factor", 1.1))
+        stretched = librosa.effects.time_stretch(y=original[start:end], rate=factor)
+        result = np.concatenate([original[:start], stretched.astype(np.float32), original[end:]])
+
+    else:
+        raise ValueError(f"'{perturbation_type}' cannot be applied to a region.")
+
+    return torch.from_numpy(np.ascontiguousarray(result, dtype=np.float32)).unsqueeze(0)
+
+
 def apply_perturbations(waveform: torch.Tensor, sample_rate: int, perturbations: List[Dict[str, Any]]) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
     """Apply multiple perturbations to a waveform sequentially."""
     perturbed_waveform = waveform.clone()
@@ -170,9 +314,18 @@ def apply_perturbations(waveform: torch.Tensor, sample_rate: int, perturbations:
     for perturbation in perturbations:
         perturbation_type = perturbation.get("type")
         params = perturbation.get("params", {})
+        region = perturbation.get("region")
         
         try:
-            if perturbation_type == "noise":
+            if region:
+                perturbed_waveform = apply_region_perturbation(
+                    perturbed_waveform, sample_rate, perturbation_type, params, region
+                )
+                applied_perturbations.append(
+                    {"type": perturbation_type, "params": params, "region": region, "status": "applied"}
+                )
+
+            elif perturbation_type == "noise":
                 noise_level = params.get("noise_level", 0.005)
                 perturbed_waveform = add_gaussian_noise(perturbed_waveform, noise_level)
                 applied_perturbations.append({"type": "noise", "params": {"noise_level": noise_level}, "status": "applied"})
@@ -224,7 +377,9 @@ def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output
             resolved_path = Path(file_path)
             if not resolved_path.exists():
                 raise FileNotFoundError(f"Audio file not found: {file_path}")
-    except FileNotFoundError as e:
+    # ValueError as well: resolve_file raises it for an unknown corpus and for a
+    # custom dataset without a session, and it used to escape this function.
+    except (FileNotFoundError, ValueError) as e:
         return {
             "original_file": file_path, "perturbed_file": "", "filename": "", "duration_ms": 0,
             "sample_rate": 0, "applied_perturbations": [], "success": False, "error": str(e)

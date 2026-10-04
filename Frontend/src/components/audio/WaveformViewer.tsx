@@ -22,9 +22,17 @@ interface WaveformViewerProps {
   onReady?: (wavesurfer: WaveSurfer) => void;
   onProgress?: (currentTime: number, duration: number) => void;
   onSelectionChange?: (selection: WaveformSelection | null) => void;
+  /**
+   * The selection to display, as fractions (0..1) of the waveform's width.
+   * Pass it to make the selection controlled: the viewer then shows this range
+   * rather than its own last drag, so a region chosen in another view (the
+   * spectrogram) appears here too. `null` shows none; leaving the prop out
+   * keeps the viewer's own selection, as before.
+   */
+  selectionRange?: { start: number; end: number } | null;
 }
 
-export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSelectionChange }: WaveformViewerProps) => {
+export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSelectionChange, selectionRange }: WaveformViewerProps) => {
   // FR10.2: this component owns the wavesurfer instance, so it is the single
   // source of playback time for every other time-aligned view.
   const { publish, registerSeek } = usePlayback();
@@ -38,6 +46,8 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSel
   const rafIdRef = useRef<number | null>(null);
   const onSelectionChangeRef = useRef(onSelectionChange);
   onSelectionChangeRef.current = onSelectionChange;
+  const selectionRangeRef = useRef(selectionRange);
+  selectionRangeRef.current = selectionRange;
 
   // Initialize WaveSurfer instance
   useEffect(() => {
@@ -143,11 +153,20 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSel
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const drag = dragStateRef.current;
-    if (!drag) return;
-
+    const controlled = selectionRangeRef.current;
     const dpr = window.devicePixelRatio || 1;
-    const x1 = Math.min(drag.startX, drag.currentX) * dpr;
-    const x2 = Math.max(drag.startX, drag.currentX) * dpr;
+    let x1: number;
+    let x2: number;
+    if (drag && (drag.dragging || controlled === undefined)) {
+      // A drag in progress always shows; a finished one only when uncontrolled.
+      x1 = Math.min(drag.startX, drag.currentX) * dpr;
+      x2 = Math.max(drag.startX, drag.currentX) * dpr;
+    } else if (controlled) {
+      x1 = clamp(controlled.start, 0, 1) * canvas.width;
+      x2 = clamp(controlled.end, 0, 1) * canvas.width;
+    } else {
+      return;
+    }
 
     ctx.fillStyle = 'rgba(59, 130, 246, 0.25)'; // blue-500 @ 25% — semi-transparent fill
     ctx.fillRect(x1, 0, x2 - x1, canvas.height);
@@ -215,6 +234,13 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onSel
     window.addEventListener('mouseup', handleWindowMouseUp);
     rafIdRef.current = requestAnimationFrame(renderSelectionFrame);
   }, [isLoading, error, audioUrl, handleWindowMouseMove, handleWindowMouseUp, renderSelectionFrame]);
+
+  // Redraw when the controlled selection changes from outside.
+  const selectionStart = selectionRange?.start;
+  const selectionEnd = selectionRange?.end;
+  useEffect(() => {
+    drawSelection();
+  }, [selectionStart, selectionEnd, drawSelection]);
 
   // Unmount safety net in case a drag is still in progress.
   useEffect(() => {

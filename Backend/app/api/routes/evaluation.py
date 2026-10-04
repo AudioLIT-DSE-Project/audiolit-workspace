@@ -23,7 +23,11 @@ from app.api.dependencies import get_session_id
 from app.domain.perturbation_service import evaluate_downstream_degradation
 from app.domain.saliency_service import generate_saliency
 from app.infrastructure.dataset_service import resolve_file
-from app.orchestration.task_orchestrator import enqueue_accent_bias
+from app.domain.emotion_bias_runner import EMOTION_BIAS_GROUPS, resolve_group_field
+from app.orchestration.task_orchestrator import enqueue_accent_bias, enqueue_emotion_bias
+
+#: The corpus the accent (word error rate) diagnostic runs on.
+ACCENT_BIAS_CORPUS = "l2-arctic"
 
 router = APIRouter()
 logger = logging.getLogger("audiolit.api.evaluation")
@@ -107,6 +111,9 @@ class AccentBiasRequest(BaseModel):
     # this route defaults to a bounded run so a UI click doesn't accidentally
     # kick off a full-corpus pass - pass null explicitly to run everything.
     samples_per_cohort: Optional[int] = 10
+    # Emotion corpora only: which speaker attribute to group by (CREMA-D: race,
+    # sex or ethnicity; ESD: language). Omitted means the corpus's default.
+    group_by: Optional[str] = None
 
 
 class JobResponse(BaseModel):
@@ -119,9 +126,31 @@ class JobResponse(BaseModel):
 
 @router.post("/evaluation/accent-bias", response_model=JobResponse)
 def evaluation_accent_bias(request: AccentBiasRequest) -> JobResponse:
-    result = enqueue_accent_bias(
-        model_id=request.model_id,
-        corpus=request.corpus,
-        samples_per_cohort=request.samples_per_cohort,
-    )
+    """Group-wise bias diagnostic. What is measured depends on the corpus:
+    word error rate per accent on L2-ARCTIC, emotion accuracy per speaker
+    group on CREMA-D and ESD. Any other corpus has no group labels to compare."""
+    corpus = request.corpus.strip().lower()
+
+    if corpus == ACCENT_BIAS_CORPUS:
+        result = enqueue_accent_bias(
+            model_id=request.model_id,
+            corpus=corpus,
+            samples_per_cohort=request.samples_per_cohort,
+        )
+    elif corpus in EMOTION_BIAS_GROUPS:
+        try:
+            group_by = resolve_group_field(corpus, request.group_by)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        result = enqueue_emotion_bias(
+            model_id=request.model_id,
+            corpus=corpus,
+            group_by=group_by,
+            samples_per_cohort=request.samples_per_cohort,
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Bias profiling is available for the L2-ARCTIC, CREMA-D and ESD datasets only.",
+        )
     return JobResponse(**result.as_response())
