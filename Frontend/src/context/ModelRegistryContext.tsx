@@ -7,6 +7,10 @@ export interface ResolvedModel {
   family: string;
   weights_sha256: string;
   available_layers: string[];
+  /** Class names in index order; empty unless the checkpoint is a classifier. */
+  labels?: string[];
+  /** The checkpoint ships only LABEL_0..LABEL_n, so the names must be entered. */
+  labels_are_placeholders?: boolean;
 }
 
 export interface ResolveError {
@@ -25,6 +29,8 @@ interface ModelRegistryContextType {
   resolvedCustomModels: string[];
   resolveModel: (modelId: string, revision?: string) => Promise<ResolvedModel | null>;
   cancelResolution: () => Promise<void>;
+  /** Store class names for the resolved model; resolves to an error message, or null on success. */
+  saveModelLabels: (labels: string[]) => Promise<string | null>;
   clearState: () => void;
 }
 
@@ -121,6 +127,28 @@ export const ModelRegistryProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, [activeModelId]);
 
+  const saveModelLabels = useCallback(async (labels: string[]): Promise<string | null> => {
+    if (!resolvedModel) return "No model resolved";
+    try {
+      const response = await fetch(`${API_BASE}/models/labels`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_id: resolvedModel.model_id, revision: resolvedModel.revision, labels }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        const detail = body?.detail;
+        return typeof detail === "string" ? detail : detail?.message || "Failed to save class names";
+      }
+      setResolvedModel((prev) =>
+        prev && prev.model_id === body.model_id ? { ...prev, labels: body.labels } : prev,
+      );
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : "Failed to save class names";
+    }
+  }, [resolvedModel]);
+
   const clearState = useCallback(() => {
     setStatus("idle");
     setActiveModelId(null);
@@ -139,6 +167,7 @@ export const ModelRegistryProvider: React.FC<{ children: React.ReactNode }> = ({
         resolvedCustomModels,
         resolveModel,
         cancelResolution,
+        saveModelLabels,
         clearState,
       }}
     >

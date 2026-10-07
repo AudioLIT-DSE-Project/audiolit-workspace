@@ -30,6 +30,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from .model_labels import label_fingerprint
+
 # Bumped when a stored shape changes incompatibly (FR4.1).
 CACHE_SCHEMA_VERSION = "v2"
 
@@ -125,6 +127,17 @@ def attention_keys(model: str, hashes: tuple[str, ...]) -> list[tuple[str, str]]
 DEFAULT_SER_MODEL = "firdhokk/speech-emotion-recognition-with-facebook-wav2vec2-large-xlsr-53"
 
 
+def ser_model_suffix(model: str | None) -> str:
+    """The model part of an SER key: "" for the default checkpoint.
+
+    Carries the label fingerprint too, so entering class names for a checkpoint
+    that shipped only ``LABEL_n`` stops serving the entries cached under them.
+    """
+    if model in (None, "", DEFAULT_SER_MODEL):
+        return ""
+    return f"_{model}{label_fingerprint(model)}"
+
+
 def ser_keys(hashes: tuple[str, ...], model: str | None = None) -> list[tuple[str, str]]:
     """SER. Payload: ``{"prediction": <ser dict>}``.
 
@@ -138,7 +151,7 @@ def ser_keys(hashes: tuple[str, ...], model: str | None = None) -> list[tuple[st
     before this change stay readable.
     """
     keys: list[tuple[str, str]] = []
-    suffix = "" if model in (None, DEFAULT_SER_MODEL) else f"_{model}"
+    suffix = ser_model_suffix(model)
     for h in hashes:
         keys.append(("wav2vec2", f"wav2vec2_detailed{suffix}_{h}"))
         keys.append(("wav2vec2", f"wav2vec2_detailed_attention_v3{suffix}_{h}"))
