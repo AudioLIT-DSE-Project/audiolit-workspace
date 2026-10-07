@@ -50,6 +50,15 @@ def _no_pipeline_finaliser():
     finally:
         Pipeline.__del__ = original
 
+@pytest.fixture(autouse=True)
+def isolated_model_labels(tmp_path, monkeypatch):
+    """Keep the custom-model class-name file out of the developer's HF cache."""
+    from app.infrastructure import model_labels
+
+    monkeypatch.setattr(model_labels, "labels_path", lambda: tmp_path / "model_labels.json")
+    monkeypatch.setattr(model_labels, "_cached", None)
+
+
 @pytest.fixture(autouse=True, scope="function")
 async def fake_redis(monkeypatch):
     """

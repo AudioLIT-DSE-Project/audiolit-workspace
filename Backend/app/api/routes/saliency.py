@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.domain.saliency_service import generate_saliency
 from app.infrastructure.dataset_service import resolve_file, resolve_audio_reference
 from app.infrastructure.redis import get_result, cache_result
+from app.infrastructure.model_labels import label_fingerprint
 from app.api.dependencies import get_session_id
 
 router = APIRouter()
@@ -76,7 +77,9 @@ async def generate_saliency_endpoint(http_request: Request, request: SaliencyReq
     file_content_hash = hashlib.md5(
         f"{str(resolved_path)}_{file_stat.st_size}_{file_stat.st_mtime}".encode()
     ).hexdigest()
-    cache_key = f"saliency_{SALIENCY_SCHEMA_VERSION}_{request.model}_{request.method}_{file_content_hash}"
+    # The payload names the target class, so it follows the label fingerprint:
+    # a map cached under LABEL_n must not be served once real names are entered.
+    cache_key = f"saliency_{SALIENCY_SCHEMA_VERSION}_{request.model}{label_fingerprint(request.model)}_{request.method}_{file_content_hash}"
     
     if not request.no_cache:
         cached_result = await get_result("saliency", cache_key)
@@ -112,7 +115,7 @@ async def generate_saliency_endpoint(http_request: Request, request: SaliencyReq
 @router.get("/saliency/{method}/{model}/{file_id}")
 async def get_saliency(method: str, model: str, file_id: str):
     # Match cache key lookup from generate_saliency_endpoint
-    cache_key = f"saliency_{SALIENCY_SCHEMA_VERSION}_{model}_{method}_{file_id}"
+    cache_key = f"saliency_{SALIENCY_SCHEMA_VERSION}_{model}{label_fingerprint(model)}_{method}_{file_id}"
     
     cached_result = await get_result("saliency", cache_key)
     if cached_result is None:
