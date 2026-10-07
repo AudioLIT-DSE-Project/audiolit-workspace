@@ -107,6 +107,20 @@ interface PredictionPanelProps {
   addPrediction?: any;
 }
 
+// The Analytics tab is hidden: for an ASR model it showed nothing but the
+// transcript, which the dataset table already carries. Its content stays
+// mounted (and tested) so setting this back to true restores the tab.
+const SHOW_ANALYTICS_TAB = false;
+
+// Tailwind only emits classes it can read as literals.
+const TAB_GRID_COLS: Record<number, string> = {
+  3: "grid-cols-3",
+  4: "grid-cols-4",
+  5: "grid-cols-5",
+  6: "grid-cols-6",
+  7: "grid-cols-7",
+};
+
 export const PredictionPanel = ({
   selectedFile,
   selectedEmbeddingFile,
@@ -398,6 +412,9 @@ export const PredictionPanel = ({
   // the backend produced a waveform before, so this layer never drew.
   const waveformData: number[] = acoustic?.waveform || [];
 
+  const tabCount =
+    3 + (SHOW_ANALYTICS_TAB ? 1 : 0) + (showAdvanced ? (hasAttention ? 3 : 2) : 0);
+
   return (
     <div className="h-full bg-panel-background border-t border-border flex flex-col">
       {/* 1. High-Visibility Deepfake (ADD) Warning Banner (Main Viewport Layout) */}
@@ -442,22 +459,17 @@ export const PredictionPanel = ({
           );
         })()}
 
-      <Tabs defaultValue="analytics" className="h-full flex flex-col">
+      <Tabs
+        defaultValue={SHOW_ANALYTICS_TAB ? "analytics" : "saliency"}
+        className="h-full flex flex-col"
+      >
         <div className="bg-panel-header border-b border-border px-3 py-2 flex items-center gap-2">
-          <TabsList
-            className={`h-7 grid flex-1 ${
-              hasAttention
-                ? showAdvanced
-                  ? "grid-cols-7"
-                  : "grid-cols-4"
-                : showAdvanced
-                  ? "grid-cols-6"
-                  : "grid-cols-3"
-            } bg-muted`}
-          >
-            <TabsTrigger value="analytics" className="text-xs">
-              Analytics
-            </TabsTrigger>
+          <TabsList className={`h-7 grid flex-1 ${TAB_GRID_COLS[tabCount]} bg-muted`}>
+            {SHOW_ANALYTICS_TAB && (
+              <TabsTrigger value="analytics" className="text-xs">
+                Analytics
+              </TabsTrigger>
+            )}
             <TabsTrigger value="saliency" className="text-xs">
               Saliency
             </TabsTrigger>
