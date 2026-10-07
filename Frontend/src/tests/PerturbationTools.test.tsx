@@ -337,7 +337,7 @@ describe('PerturbationTools request and failure handling', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /Apply to whole clip/i })).toBeEnabled());
   });
 
-  it("re-runs the selected model's own task on the mutated clip", async () => {
+  it('adds the mutated copy with no prediction and does not re-run the model', async () => {
     mockUseTaskStatus.mockImplementation((taskId: string | null) =>
       taskId === 'job-123'
         ? {
@@ -354,17 +354,24 @@ describe('PerturbationTools request and failure handling', () => {
           }
         : { state: 'QUEUED', result: null, error: null },
     );
-    render(<PerturbationTools selectedFile={SELECTED_FILE} model="melody-machine" />);
+    const onPredictionRefresh = jest.fn();
+    render(<PerturbationTools selectedFile={SELECTED_FILE} model="melody-machine" onPredictionRefresh={onPredictionRefresh} />);
     await applyNoise();
 
-    await waitFor(() => expect((global.fetch as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(2));
-    const [url] = (global.fetch as jest.Mock).mock.calls[1];
-    expect(url).toBe('http://localhost:8000/api/inference/multitask');
-    expect(requestBody(1)).toEqual({
-      audio_ref: 'uploads/clip-1_perturbed_abc123.wav',
-      tasks: ['add'],
-      model_ids: { add: 'melody-machine' },
-    });
+    await waitFor(() => expect(onPredictionRefresh).toHaveBeenCalledTimes(1));
+    // The copy inherits nothing: its row is empty until Regenerate runs the
+    // model on the mutated audio.
+    expect(onPredictionRefresh).toHaveBeenCalledWith(
+      expect.objectContaining({
+        file_id: 'clip-1_perturbed_abc123.wav',
+        file_path: 'uploads/clip-1_perturbed_abc123.wav',
+        message: 'Perturbed file',
+      }),
+      '',
+    );
+    // Only the mutation was requested.
+    expect((global.fetch as jest.Mock).mock.calls).toHaveLength(1);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Apply to whole clip/i })).toBeEnabled());
   });
 });
 
