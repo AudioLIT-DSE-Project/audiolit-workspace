@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Play, ChevronLeft, ChevronRight, RotateCw, FolderPlus, Trash2 } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
+import { getModelTaskFamily, type ModelTaskFamily } from "@/lib/modelTask";
 
 interface UploadedFile {
   file_id: string;
@@ -55,15 +56,17 @@ interface AudioDataTableProps {
   onRegenerateRow?: (rowId: string) => void;
 }
 
-const ADD_MODEL_KEYS = ["melody-machine", "wav2vec2-add"];
-
-// "Predicted"/"Ground Truth" column headers: Transcript for whisper, Label for
-// the deepfake (ADD) models, Emotion for everything else (wav2vec2/custom SER).
-const predictionColumnNoun = (model: string): string => {
-  if (model.startsWith("whisper")) return "Transcript";
-  if (ADD_MODEL_KEYS.includes(model)) return "Label";
-  return "Emotion";
+// "Predicted"/"Ground Truth" column headers: Transcript for ASR, Label for the
+// deepfake (ADD) models, Emotion for SER. Goes through getModelTaskFamily so a
+// custom Hugging Face id ("openai/whisper-tiny") resolves like a built-in key.
+const PREDICTION_COLUMN_NOUN: Record<ModelTaskFamily, string> = {
+  ASR: "Transcript",
+  SER: "Emotion",
+  DEEPFAKE: "Label",
 };
+
+const predictionColumnNoun = (model: string): string =>
+  PREDICTION_COLUMN_NOUN[getModelTaskFamily(model || "whisper-base")];
 
 export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, onDeleteLiveRecording, onSaveLiveToCustom, predictionMap, inferenceStatus, onVisibleRowIdsChange, onRegenerateRow }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +13,9 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { AlertCircle, CheckCircle2, Sparkles, Loader2, XCircle } from "lucide-react";
 import { useModelRegistry } from "@/context/ModelRegistryContext";
+import { getModelTaskFamily } from "@/lib/modelTask";
+
+const PLACEHOLDER_LABEL = /^LABEL_\d+$/;
 
 const ERROR_LABELS: Record<string, string> = {
   UNSUPPORTED_ARCHITECTURE: "Unsupported model architecture",
@@ -30,7 +33,35 @@ export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolve
   const [inputModelId, setInputModelId] = useState("");
   const [inputRevision, setInputRevision] = useState("main");
 
-  const { status, resolvedModel, error, resolveModel, cancelResolution } = useModelRegistry();
+  const { status, resolvedModel, error, resolveModel, cancelResolution, saveModelLabels } = useModelRegistry();
+
+  // Class names for a checkpoint published without them (it reports LABEL_n).
+  // Deepfake models are left out: their labels are normalised to bona fide /
+  // spoof by the backend rather than shown as published.
+  const [classNames, setClassNames] = useState<string[]>([]);
+  const [labelsSaving, setLabelsSaving] = useState(false);
+  const [labelsMessage, setLabelsMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const needsClassNames =
+    !!resolvedModel?.labels_are_placeholders &&
+    (resolvedModel.labels?.length ?? 0) > 0 &&
+    getModelTaskFamily(resolvedModel.model_id) !== "DEEPFAKE";
+
+  useEffect(() => {
+    // Start from names saved earlier; leave the placeholders themselves blank.
+    setClassNames((resolvedModel?.labels ?? []).map((name) => (PLACEHOLDER_LABEL.test(name) ? "" : name)));
+    setLabelsMessage(null);
+  }, [resolvedModel?.model_id, resolvedModel?.revision]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSaveClassNames = async () => {
+    setLabelsSaving(true);
+    const failure = await saveModelLabels(classNames);
+    setLabelsSaving(false);
+    setLabelsMessage(
+      failure
+        ? { ok: false, text: failure }
+        : { ok: true, text: "Saved. Run Get Inferences again to relabel rows already predicted." },
+    );
+  };
 
   const handleResolve = async () => {
     if (!inputModelId.trim()) return;
@@ -154,6 +185,54 @@ export const HFModelSelector: React.FC<HFModelSelectorProps> = ({ onModelResolve
               <div className="text-muted-foreground font-mono text-[10px] break-all">
                 sha256:{resolvedModel.weights_sha256.slice(0, 16)}...
               </div>
+              {needsClassNames && (
+                <div className="pt-2 border-t border-primary/20 space-y-2">
+                  <div>
+                    <div className="font-medium">Class names</div>
+                    <div className="text-muted-foreground mt-0.5">
+                      This checkpoint was published without class names, so predictions show as
+                      LABEL_0, LABEL_1, ... Enter the name for each class index, in the order the
+                      model was trained with (see its model card).
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {classNames.map((name, index) => (
+                      <div key={index} className="flex items-center gap-1.5">
+                        <Label htmlFor={`hf-class-${index}`} className="text-[10px] font-mono w-4 shrink-0">
+                          {index}
+                        </Label>
+                        <Input
+                          id={`hf-class-${index}`}
+                          aria-label={`Name for class ${index}`}
+                          placeholder={`LABEL_${index}`}
+                          value={name}
+                          onChange={(e) =>
+                            setClassNames((prev) => prev.map((v, i) => (i === index ? e.target.value : v)))
+                          }
+                          disabled={labelsSaving}
+                          className="h-7 text-xs"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-[11px] px-2"
+                      onClick={handleSaveClassNames}
+                      disabled={labelsSaving || classNames.some((name) => !name.trim())}
+                    >
+                      {labelsSaving ? "Saving..." : "Save class names"}
+                    </Button>
+                    {labelsMessage && (
+                      <span className={labelsMessage.ok ? "text-muted-foreground" : "text-destructive"}>
+                        {labelsMessage.text}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

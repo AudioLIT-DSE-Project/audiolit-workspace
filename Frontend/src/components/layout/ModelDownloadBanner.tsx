@@ -1,15 +1,21 @@
 import React from "react";
 import { useModelRegistry } from "@/context/ModelRegistryContext";
 import { Button } from "@/components/ui/button";
+import { useDraggable } from "@/hooks/useDraggable";
 import { Loader2, XCircle, CheckCircle2, AlertCircle, Sparkles } from "lucide-react";
 
 export const ModelDownloadBanner: React.FC = () => {
   const { status, activeModelId, resolvedModel, error, cancelResolution, clearState } = useModelRegistry();
 
+  const { dragProps, dragClassName } = useDraggable();
+
   if (status === "idle") return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 max-w-md w-full bg-card/95 backdrop-blur-md border border-border shadow-2xl rounded-xl p-4 transition-all duration-300 animate-in fade-in slide-in-from-bottom-4">
+    <div
+      {...dragProps}
+      className={`fixed bottom-4 right-4 z-50 max-w-md w-full bg-card/95 backdrop-blur-md border border-border shadow-2xl rounded-xl p-4 animate-in fade-in slide-in-from-bottom-4 ${dragClassName}`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2.5">
           {status === "downloading" && (

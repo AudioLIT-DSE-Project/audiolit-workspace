@@ -582,7 +582,7 @@ async def batch_wav2vec2_prediction(request: Request):
                 
                 # Create cache key
                 file_content_hash = hashlib.md5(str(file_path).encode()).hexdigest()
-                _suffix = "" if not batch_ser_model or batch_ser_model == ck.DEFAULT_SER_MODEL else f"_{batch_ser_model}"
+                _suffix = ck.ser_model_suffix(batch_ser_model)
                 cache_key = f"wav2vec2_detailed{_suffix}_{file_content_hash}"
                 
                 # Check cache first
@@ -697,7 +697,7 @@ async def get_wav2vec2_detailed_prediction(
     
     # Create cache key for detailed predictions (v3 after fixing attention extraction)
     file_content_hash = hashlib.md5(str(resolved_path).encode()).hexdigest()
-    _suffix = "" if not ser_model or ser_model == ck.DEFAULT_SER_MODEL else f"_{ser_model}"
+    _suffix = ck.ser_model_suffix(ser_model)
     cache_key = f"wav2vec2_detailed_attention_v3{_suffix}_{file_content_hash}"
     
     # Check if result is cached
