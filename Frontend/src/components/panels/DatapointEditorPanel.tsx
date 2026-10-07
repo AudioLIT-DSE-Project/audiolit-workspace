@@ -323,7 +323,7 @@ export const DatapointEditorPanel = ({
                 <span className="text-gray-500">Perturbed Prediction:</span>
                 <div className="ml-2 mt-1">
                   <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-700 border-blue-200">
-                    {predictionMap[perturbationResult.filename] || "Loading..."}
+                    {predictionMap[perturbationResult.filename] || "Not generated yet"}
                   </Badge>
                 </div>
               </div>

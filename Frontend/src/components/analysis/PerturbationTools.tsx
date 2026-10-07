@@ -13,7 +13,6 @@ import { useTaskStatus } from '@/hooks/useTaskStatus'
 import { GlobalTaskProgress } from '../layout/GlobalTaskProgress'
 import { isUploadedAudio } from "@/lib/audioSelection";
 import { axisFractionToHz, hzToAxisFraction } from "@/lib/melScale";
-import { getModelTaskFamily } from "@/lib/modelTask";
 import { cropSpectrogramToMaxHz, frequencyTicks, renderSpectrogramImage, timeTicks } from "@/lib/spectrogramImage";
 
 interface UploadedFile {
@@ -81,17 +80,6 @@ const buildMutationRequest = (
       ? { perturbations, is_uploaded: true }
       : { perturbations, is_uploaded: false, dataset: originalDataset || dataset },
   };
-};
-
-const MODEL_FAMILY_TASK = { ASR: 'asr', SER: 'ser', DEEPFAKE: 'add' } as const;
-
-/** The one line a re-run on the mutated clip is summarised as. */
-const summarisePrediction = (aggregated: any): string => {
-  const tasks = aggregated?.tasks ?? {};
-  if (tasks.asr?.transcript) return tasks.asr.transcript;
-  if (tasks.ser?.predicted_emotion) return tasks.ser.predicted_emotion;
-  if (tasks.add) return tasks.add.predicted_label || tasks.add.label || '';
-  return '';
 };
 
 const getAudioUrl = (selectedFile: UploadedFile, dataset?: string, originalDataset?: string): string => {
@@ -562,18 +550,14 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
 
   // RQ Task IDs
   const [mutationTaskId, setMutationTaskId] = useState<string | null>(null)
-  const [inferenceTaskId, setInferenceTaskId] = useState<string | null>(null)
 
   // Track mutation job state
   const { state: mutationState, result: mutationResult, error: mutationError } = useTaskStatus(mutationTaskId)
-  // Track inference job state
-  const { state: inferenceState, result: inferenceResult, error: inferenceError } = useTaskStatus(inferenceTaskId)
 
   useEffect(() => {
     setPerturbationResult(null);
     setError(null);
     setMutationTaskId(null);
-    setInferenceTaskId(null);
     setRegion(null);
     setWaveformDurationSec(0);
   }, [selectedFile]);
@@ -628,7 +612,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
   const active = (key: PerturbationKey) => selectedPerturbations[key] && available[key];
   const anyActive = (Object.keys(available) as PerturbationKey[]).some(active);
 
-  // Effect: When mutation job succeeds, trigger inference
+  // Effect: When mutation job succeeds, publish the derived clip
   useEffect(() => {
     if (mutationState === 'SUCCESS' && mutationResult) {
       // Adapt result to expected shape
@@ -656,34 +640,24 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       setPerturbationResult(perturbedData);
       if (onPerturbationComplete) onPerturbationComplete(perturbedData);
 
-      // Start inference on the perturbed file, with the selected model's task.
-      // This was ASR for Whisper and SER for everything else, so a mutation on
-      // a deepfake detector re-ran an emotion model.
-      const task = MODEL_FAMILY_TASK[getModelTaskFamily(model || 'whisper-base')];
-      const runInference = async () => {
-        try {
-          const response = await fetch(`${API_BASE}/api/inference/multitask`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              audio_ref: perturbedData.perturbed_file,
-              tasks: [task],
-              model_ids: model ? { [task]: model } : {},
-            })
-          });
-          if (response.ok) {
-            const data = await response.json();
-            setInferenceTaskId(data.job_id);
-          } else {
-            setError("Failed to enqueue inference job for perturbed audio.");
-            setMutationTaskId(null);
-          }
-        } catch (err) {
-          setError("Error triggering inference job.");
-          setMutationTaskId(null);
-        }
-      };
-      runInference();
+      // Hand the derived clip to the table with no prediction. It used to be
+      // re-run automatically and the row filled in from that job, which could
+      // show the previous clip's transcript on the new copy. The row stays
+      // empty until its Regenerate button runs the model on the mutated audio.
+      if (onPredictionRefresh) {
+        onPredictionRefresh(
+          {
+            file_id: perturbedData.filename,
+            filename: perturbedData.filename,
+            file_path: perturbedData.perturbed_file,
+            message: "Perturbed file",
+            duration: perturbedData.duration_ms / 1000,
+            sample_rate: perturbedData.sample_rate,
+          },
+          "",
+        );
+      }
+      setMutationTaskId(null);
     } else if (mutationState === 'FAILURE') {
       setError(mutationError || "Perturbation task failed in worker.");
       // Release the controls. The id was left set, so one failed job disabled
@@ -691,29 +665,6 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       setMutationTaskId(null);
     }
   }, [mutationState, mutationResult, mutationError]);
-
-  // Effect: When inference job succeeds, notify parent
-  useEffect(() => {
-    if (inferenceState === 'SUCCESS' && inferenceResult && perturbationResult) {
-      const perturbedFile: UploadedFile = {
-        file_id: perturbationResult.filename,
-        filename: perturbationResult.filename,
-        file_path: perturbationResult.perturbed_file,
-        message: "Perturbed file",
-        duration: perturbationResult.duration_ms / 1000,
-        sample_rate: perturbationResult.sample_rate
-      };
-      if (onPredictionRefresh) {
-        onPredictionRefresh(perturbedFile, summarisePrediction(inferenceResult));
-      }
-      setInferenceTaskId(null);
-      setMutationTaskId(null);
-    } else if (inferenceState === 'FAILURE') {
-      setError(inferenceError || "Inference task failed in worker.");
-      setInferenceTaskId(null);
-      setMutationTaskId(null);
-    }
-  }, [inferenceState, inferenceResult, inferenceError, perturbationResult]);
 
   /**
    * The checked perturbations, each scoped to the selected region when there
@@ -781,7 +732,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
     }
   };
 
-  const isProcessing = mutationTaskId !== null || inferenceTaskId !== null;
+  const isProcessing = mutationTaskId !== null;
   const checkboxClass = "border-blue-400 data-[state=checked]:bg-blue-600 data-[state=checked]:border-blue-600";
   const sliderClass = "w-full [&_[role=slider]]:border-blue-500 [&_[role=slider]]:bg-blue-600";
   const timeOnlyNote = region?.band
@@ -804,7 +755,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       {/* Show dynamic progress bar when processing */}
       {isProcessing && (
         <GlobalTaskProgress 
-          taskId={inferenceTaskId || mutationTaskId} 
+          taskId={mutationTaskId} 
           onComplete={() => {}} 
         />
       )}
