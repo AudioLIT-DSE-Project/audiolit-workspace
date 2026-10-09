@@ -57,7 +57,7 @@ in milliseconds either way.
 ## Install
 
 ```bash
-git clone <your-repository-url> audiolit
+git clone https://github.com/AudioLIT-DSE-Project/audiolit-workspace.git audiolit
 cd audiolit
 docker compose up --build -d
 ```
