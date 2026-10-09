@@ -23,7 +23,7 @@ const App = () => (
         <PlaybackProvider>
         <TooltipProvider>
           <Toaster />
-          <Sonner />
+          <Sonner closeButton />
           <ModelDownloadBanner />
           <ErrorBoundary>
             <BrowserRouter>

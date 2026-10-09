@@ -184,7 +184,7 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
           <CardTitle className="text-sm">Saliency Overlay</CardTitle>
           <div className="flex items-center gap-2">
             <Select value={selectedMethod} onValueChange={setSelectedMethod}>
-              <SelectTrigger className="w-24 h-6 text-xs">
+              <SelectTrigger className="w-24 h-6 text-xs" aria-label="Saliency method">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -194,7 +194,7 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
                 <SelectItem value="shap">SHAP</SelectItem>
               </SelectContent>
             </Select>
-            <Button size="sm" variant="outline" className="h-6" onClick={fetchSaliencyData} disabled={loading}>
+            <Button size="sm" variant="outline" className="h-6" onClick={fetchSaliencyData} disabled={loading} aria-label="Load saliency">
               {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
             </Button>
           </div>

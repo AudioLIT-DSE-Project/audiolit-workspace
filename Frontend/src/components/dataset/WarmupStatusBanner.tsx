@@ -1,6 +1,7 @@
 import React from "react";
 import { WarmupProgress } from "./WarmupModal";
 import { Button } from "@/components/ui/button";
+import { useDraggable } from "@/hooks/useDraggable";
 import { Flame, Maximize2, XCircle, CheckCircle2, AlertCircle, Clock } from "lucide-react";
 
 interface WarmupStatusBannerProps {
@@ -22,6 +23,8 @@ export const WarmupStatusBanner: React.FC<WarmupStatusBannerProps> = ({
   onCancel,
   onDismiss,
 }) => {
+  const { dragProps, dragClassName } = useDraggable();
+
   if (!warmupJobId || !isMinimized) return null;
 
   const isRunning = warmupProgress?.status === "running";
@@ -34,7 +37,10 @@ export const WarmupStatusBanner: React.FC<WarmupStatusBannerProps> = ({
     warmupProgress?.status === "cancelled" || warmupProgress?.status === "cancelling" || isInterrupted;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 max-w-md w-full bg-card/95 backdrop-blur-md border border-border shadow-2xl rounded-xl p-4 transition-all duration-300 animate-in fade-in slide-in-from-bottom-4">
+    <div
+      {...dragProps}
+      className={`fixed bottom-4 right-4 z-50 max-w-md w-full bg-card/95 backdrop-blur-md border border-border shadow-2xl rounded-xl p-4 animate-in fade-in slide-in-from-bottom-4 ${dragClassName}`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2.5">
           {isRunning && (

@@ -23,6 +23,7 @@ import umap
 
 from app.domain.model_registry_service import registry as _model_registry
 from app.domain.provenance import Provenance, provenance_fields
+from app.infrastructure.model_labels import get_label_override
 
 transformers.logging.set_verbosity_error()
 logger = logging.getLogger(__name__)
@@ -657,7 +658,37 @@ def ensure_emo_model_loaded(model_id: str | None = None, revision: str | None = 
             ).model,
         )
     custom_extractor, custom_model = _emo_model_cache[target]
+    _apply_label_override(target, custom_model)
     return custom_extractor, custom_model, emo_device
+
+
+#: id2label as the checkpoint published it, per custom model id, so removing
+#: the user's class names restores it.
+_emo_checkpoint_labels: dict = {}
+
+
+def _apply_label_override(model_id: str, model) -> None:
+    """Give a custom SER checkpoint the class names its user entered.
+
+    Checkpoints published without ``id2label`` report ``LABEL_0 .. LABEL_n``.
+    Every reader (prediction, saliency target, bias scoring) takes names from
+    ``config.id2label``, so setting them there relabels all of them at once.
+    Called on every load rather than once: the names can be entered after the
+    model is already cached in this process, and a worker only learns of them
+    from the shared file.
+    """
+    config = getattr(model, "config", None)
+    if not isinstance(getattr(config, "id2label", None), dict):
+        return
+    original = _emo_checkpoint_labels.setdefault(model_id, dict(config.id2label))
+    override = get_label_override(model_id)
+    if override and len(override) != len(original):
+        logger.warning("model_labels.count_mismatch: ignoring stored class names")
+        override = None
+    wanted = dict(enumerate(override)) if override else original
+    if config.id2label != wanted:
+        config.id2label = dict(wanted)
+        config.label2id = {name: idx for idx, name in wanted.items()}
 
 
 #: SER attention leaves the model pooled to at most this many frames per axis.
