@@ -90,3 +90,17 @@ docs/evaluation/api-reports/
 docs/evaluation/results/
 docs/evaluation/results_fr16/
 
+# --- Non-production artefacts (local-only) ----------------------------------
+# These directories hold presentation materials, demo videos, posters, the
+# learning guide, and the final report.  They are kept on developer machines
+# for convenience but must never enter the production codebase or the release
+# branch.  Excluding them here prevents accidental `git add .` commits.
+presentation/
+poster/
+learning-guide/
+video/
+report/
+audio/
+
+# Playwright MCP browser-automation scratchpad (developer tool, not source)
+.playwright-mcp/
