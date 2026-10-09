@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Download, Loader2 } from "lucide-react";
 import { API_BASE } from '@/lib/api';
 import { XAIOverlayCanvas, XAIResult } from './XAIOverlayCanvas';
+import { isUploadedAudio } from "@/lib/audioSelection";
 
 interface SaliencySegment {
   start_time: number;
@@ -93,13 +94,7 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
         _file_id: fileIdentifier,
       };
 
-      const isUploadedFile = typeof selectedFile === 'object' && selectedFile.file_path && (
-        selectedFile.file_path.includes('uploads/') || 
-        selectedFile.file_path.startsWith('uploads/') ||
-        selectedFile.message === "Perturbed file" ||
-        selectedFile.message === "File uploaded successfully" ||
-        selectedFile.message === "File uploaded and processed successfully"
-      ) && selectedFile.message !== "Selected from embeddings" && selectedFile.message !== "Selected from dataset";
+      const isUploadedFile = isUploadedAudio(selectedFile, dataset);
 
       if (isUploadedFile) {
         requestBody.file_path = selectedFile.file_path;
@@ -189,16 +184,17 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
           <CardTitle className="text-sm">Saliency Overlay</CardTitle>
           <div className="flex items-center gap-2">
             <Select value={selectedMethod} onValueChange={setSelectedMethod}>
-              <SelectTrigger className="w-24 h-6 text-xs">
+              <SelectTrigger className="w-24 h-6 text-xs" aria-label="Saliency method">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="gradcam">GradCAM</SelectItem>
+                <SelectItem value="gradcam">Grad-CAM</SelectItem>
+                <SelectItem value="integrated_gradients">Integrated Gradients</SelectItem>
                 <SelectItem value="lime">LIME</SelectItem>
                 <SelectItem value="shap">SHAP</SelectItem>
               </SelectContent>
             </Select>
-            <Button size="sm" variant="outline" className="h-6" onClick={fetchSaliencyData} disabled={loading}>
+            <Button size="sm" variant="outline" className="h-6" onClick={fetchSaliencyData} disabled={loading} aria-label="Load saliency">
               {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
             </Button>
           </div>
@@ -248,7 +244,8 @@ export const SaliencyVisualization = ({ selectedFile, model, dataset, originalDa
                   <div key={idx} className="flex items-center justify-between p-2 bg-muted/50 rounded">
                     <div className="flex items-center gap-2">
                       <Badge variant="outline" className="text-[10px]">
-                        {segment.start_time.toFixed(1)}-{segment.end_time.toFixed(1)}s
+                        {typeof segment.start_time === 'number' ? segment.start_time.toFixed(1) : '?'}-
+                        {typeof segment.end_time === 'number' ? segment.end_time.toFixed(1) : '?'}s
                       </Badge>
                       <span className="font-mono">{segment.word || 'segment'}</span>
                     </div>

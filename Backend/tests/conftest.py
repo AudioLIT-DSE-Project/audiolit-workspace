@@ -15,6 +15,50 @@ from fakeredis.aioredis import FakeRedis
 from app.main import app
 from app.infrastructure import redis as redis_module
 
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_pipeline_finaliser():
+    """Stop redis-py's Pipeline finaliser from deadlocking the suite.
+
+    `redis.client.Pipeline.__del__` calls `reset()`, which sends UNWATCH on its
+    connection. When the garbage collector runs that finaliser while fakeredis
+    is part-way through handling another command, the UNWATCH re-enters a socket
+    that is not re-entrant, and the process stops dead: no error, no progress,
+    no traceback until something times it out.
+
+    That is the long-standing "intermittent" hang in this suite. It is
+    intermittent because it depends on when the collector fires, so it surfaces
+    in a full run and never when a module is run on its own. It was previously
+    blamed on coverage instrumentation, which is not the cause: instrumentation
+    only changes the timing, and the hang reproduces without it.
+
+    Suspending collection around the worker drains removed the window for an
+    ordinary run, but coverage tracing moves the window elsewhere, so guarding
+    one call site is not enough. This removes the finaliser instead.
+
+    Dropping it is safe here and only here. Every pipeline the code uses through
+    `with` already resets deterministically on exit; the finaliser only matters
+    for a pipeline abandoned to the collector, and skipping UNWATCH on a
+    throwaway fake connection at interpreter teardown has no observable effect.
+    """
+    from redis.client import Pipeline
+
+    original = Pipeline.__del__
+    Pipeline.__del__ = lambda self: None
+    try:
+        yield
+    finally:
+        Pipeline.__del__ = original
+
+@pytest.fixture(autouse=True)
+def isolated_model_labels(tmp_path, monkeypatch):
+    """Keep the custom-model class-name file out of the developer's HF cache."""
+    from app.infrastructure import model_labels
+
+    monkeypatch.setattr(model_labels, "labels_path", lambda: tmp_path / "model_labels.json")
+    monkeypatch.setattr(model_labels, "_cached", None)
+
+
 @pytest.fixture(autouse=True, scope="function")
 async def fake_redis(monkeypatch):
     """

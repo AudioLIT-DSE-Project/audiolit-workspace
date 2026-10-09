@@ -47,7 +47,7 @@ jest.mock('wavesurfer.js', () => {
 });
 
 // Mock API calls
-const mockFetch = jest.fn();
+const mockFetch = jest.fn() as jest.MockedFunction<typeof fetch>;
 global.fetch = mockFetch;
 
 describe('Audio Component Testing', () => {
@@ -122,9 +122,7 @@ describe('Audio Component Testing', () => {
       expect(playState).toHaveTextContent('paused');
     });
 
-    test('should handle seek functionality', async () => {
-      const user = userEvent.setup();
-      
+    test('should handle seek functionality', () => {
       const MockSeekControl = () => {
         const [currentTime, setCurrentTime] = React.useState(0);
         const duration = 10; // 10 seconds
@@ -149,10 +147,13 @@ describe('Audio Component Testing', () => {
       
       const seekSlider = screen.getByTestId('seek-slider');
       const currentTimeDisplay = screen.getByTestId('current-time');
-      
-      await user.clear(seekSlider);
-      await user.type(seekSlider, '5');
-      
+
+      // user.clear()/user.type() only support editable text elements, not
+      // range inputs (Testing Library throws on .clear() for type="range") --
+      // fireEvent.change matches how this same file's other range-slider
+      // tests (zoom/panel-resizing below) already exercise input[type=range].
+      fireEvent.change(seekSlider, { target: { value: '5' } });
+
       expect(currentTimeDisplay).toHaveTextContent('5s');
     });
 
@@ -293,7 +294,7 @@ describe('Audio Component Testing', () => {
       
       const MockModelSelector = () => {
         const [selectedModel, setSelectedModel] = React.useState('whisper-base');
-        const models = ['whisper-base', 'whisper-large', 'wav2vec2'];
+        const models = ['whisper-base', 'wav2vec2', 'melody-machine', 'wav2vec2-add'];
         
         return (
           <div>
@@ -778,9 +779,9 @@ describe('Accessibility Testing', () => {
           data-testid="volume-slider"
           type="range"
           aria-label="Volume control"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-valuenow="50"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={50}
         />
         
         <div

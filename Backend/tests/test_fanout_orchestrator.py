@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import gc
 import os
 import signal
 import time
@@ -28,12 +29,37 @@ from rq.job import Job, JobStatus
 
 from app.orchestration import fanout_orchestrator_service as fanout
 
-REAL_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/0")
+# DB 15, not DB 0. This test calls flushdb(), and DB 0 is where the running
+# application keeps its dataset-warmup cache - pointing them at the same place
+# meant a plain `pytest` run silently destroyed hours of warmed inference.
+# Override with TEST_REDIS_URL, but never at the app's own REDIS_URL.
+REAL_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
 
 
 def _drain(conn, *queue_names) -> None:
+    """Run the queued jobs to completion against fakeredis.
+
+    Garbage collection is suspended for the duration, and that is load-bearing
+    rather than tidiness. redis-py's `Pipeline.__del__` calls `reset()`, which
+    sends UNWATCH on its connection. If the collector runs that finaliser while
+    fakeredis is part-way through processing another command, the UNWATCH
+    re-enters a socket that is not re-entrant and the process deadlocks with no
+    error: the run simply stops.
+
+    That is the "intermittent hang" this suite has shown for months. It is
+    intermittent because it depends on when the collector happens to fire, which
+    depends on memory pressure, which is why it appears in a full run and never
+    when these tests are run on their own. Suspending collection across the
+    drain removes the window.
+    """
     queues = [Queue(name, connection=conn) for name in queue_names]
-    SimpleWorker(queues, connection=conn).work(burst=True)
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        SimpleWorker(queues, connection=conn).work(burst=True)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
 
 @pytest.fixture
@@ -117,6 +143,27 @@ class TestFanoutProgress:
         assert 1.0 in fractions
 
 
+def _assert_not_the_application_database(conn: Redis) -> None:
+    """Refuse to flush the database the application itself is using.
+
+    A guard, not a formality: this test used to default to DB 0 - the app's
+    own cache - so running the suite wiped every warmed dataset entry.
+    """
+    from app.infrastructure.settings import settings
+
+    app_conn = Redis.from_url(settings.REDIS_URL)
+    app_db = app_conn.connection_pool.connection_kwargs.get("db", 0)
+    test_db = conn.connection_pool.connection_kwargs.get("db", 0)
+    app_host = app_conn.connection_pool.connection_kwargs.get("host")
+    test_host = conn.connection_pool.connection_kwargs.get("host")
+    if (app_host, app_db) == (test_host, test_db):
+        pytest.skip(
+            f"refusing to flushdb() on the application's own Redis database "
+            f"({settings.REDIS_URL}) - that would destroy the dataset-warmup "
+            f"cache. Set TEST_REDIS_URL to a different db index."
+        )
+
+
 def _real_redis_or_skip() -> Redis:
     conn = Redis.from_url(REAL_REDIS_URL)
     try:
@@ -127,6 +174,7 @@ def _real_redis_or_skip() -> Redis:
             "`docker-compose up -d redis` (Backend/docker-compose.yml) to "
             "run the killed-worker recovery test locally"
         )
+    _assert_not_the_application_database(conn)
     conn.flushdb()
     return conn
 
@@ -162,6 +210,11 @@ class TestFanoutRecovery:
             retry=fanout.CHILD_JOB_RETRY,
         )
 
+        if "fork" not in multiprocessing.get_all_start_methods():
+            pytest.skip(
+                "needs a forking start method - RQ's Worker forks a work-horse "
+                "process that this test kills mid-job; unavailable on Windows"
+            )
         ctx = multiprocessing.get_context("fork")
         proc = ctx.Process(target=_run_burst_worker, args=(REAL_REDIS_URL, queue_name))
         proc.start()

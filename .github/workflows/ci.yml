@@ -2,9 +2,11 @@ name: Workspace CI Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    # `testing` is the branch integration work actually lands on, so it has to
+    # be here: without it, every PR into `testing` merged with no CI at all.
+    branches: [ main, develop, testing ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, develop, testing ]
 
 jobs:
   frontend-lint-and-build:
@@ -21,10 +23,41 @@ jobs:
         run: |
           cd Frontend
           npm ci
+      # SR7 - JavaScript dependencies scanned on every build. Scoped to
+      # production dependencies, what actually ships to a user's browser, and
+      # gated at high. Production audits clean as of 2026-09-29: the one high
+      # was lodash 4.17.21 via recharts, cleared by a `lodash: ^4.18.1`
+      # override (every 4.x up to 4.17.23 is vulnerable, 4.18.1 is not, and
+      # recharts asks for ^4.17.21 so nothing else had to move).
+      #
+      # Dev dependencies are deliberately not gated: the remaining high is
+      # vite, whose fix is a three-major bump, and a dev-tool advisory does
+      # not reach a user. It is reported in the test plan rather than gated.
+      - name: Audit npm production dependencies
+        run: |
+          cd Frontend
+          npm audit --omit=dev --audit-level=high
+      # A real typecheck. `vite build` uses esbuild, which strips types without
+      # checking them, and Jest only compiles the files a test imports - so a
+      # type error in a component no test touches reaches production with every
+      # gate green. One did: `setUploadedFiles` survived a refactor that deleted
+      # it, and would have thrown at runtime on the custom-dataset upload path.
+      #
+      # It must be pointed at the app project. The root tsconfig.json has
+      # `"files": []` and only project references, so a bare `tsc --noEmit`
+      # checks ZERO source files and always passes - a green no-op.
+      - name: Typecheck
+        run: |
+          cd Frontend
+          npm run typecheck
       - name: Run ESLint
         run: |
           cd Frontend
           npm run lint
+      - name: Run Jest
+        run: |
+          cd Frontend
+          npm test
       - name: Build Vite App
         run: |
           cd Frontend
@@ -38,21 +71,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          # Cache pip's wheel downloads, keyed on requirements.txt. On a cache
-          # hit the heavy wheels (torch/transformers/umap/...) aren't re-fetched.
+          # Cache pip's wheel downloads, keyed on the dev requirements (which
+          # includes requirements.txt). On a cache hit the heavy wheels
+          # (torch/transformers/umap/...) aren't re-fetched.
           cache: 'pip'
-          cache-dependency-path: Backend/requirements.txt
+          cache-dependency-path: |
+            Backend/requirements.txt
+            Backend/requirements-dev.txt
       - name: Install Dependencies
         run: |
           cd Backend
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools
           # CPU-only torch: the default Linux torch wheel is the multi-GB CUDA
           # build, but the runners are CPU-only. Pull the much smaller CPU wheel
           # from PyTorch's CPU index (its deps resolve from PyPI). requirements'
           # torch>=2.6.0 is then already satisfied, so the -r install won't
           # re-fetch it. This shrinks both the download and the cache entry.
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-          python -m pip install -r requirements.txt pytest httpx
+          python -m pip install -r requirements-dev.txt
       - name: Verify torch is the CPU build
         run: |
           cd Backend
@@ -61,3 +97,86 @@ jobs:
         run: |
           cd Backend
           pytest
+      # SR7 - Python dependencies scanned on every build. Audits the
+      # environment installed above rather than re-resolving requirements.txt,
+      # so what is scanned is exactly what the tests ran against. Runs after
+      # pytest so a new advisory never masks a test failure.
+      - name: Audit Python dependencies
+        run: |
+          cd Backend
+          python -m pip install --upgrade setuptools pip-audit
+          pip-audit
+
+  frontend-e2e:
+    # Playwright was configured in the repo but never run by the pipeline, so
+    # the layout and accessibility suites could regress without anything
+    # noticing. This job runs the two that need no backend.
+    #
+    # The `dataflow` project is deliberately excluded: it needs Redis, the API
+    # and the RQ workers live, and its saliency assertions take tens of seconds
+    # per clip on a CPU runner. It stays an on-demand suite
+    # (`npm run test:e2e:dataflow`) against a running stack.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: Frontend/package-lock.json
+      - name: Install Dependencies
+        run: |
+          cd Frontend
+          npm ci
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('Frontend/package-lock.json') }}
+      - name: Install Playwright browsers
+        run: |
+          cd Frontend
+          npx playwright install --with-deps chromium firefox webkit
+      - name: Cross-browser layout and quick-start
+        run: |
+          cd Frontend
+          npm run test:e2e
+      - name: Accessibility (WCAG 2.1 AA, axe-core)
+        run: |
+          cd Frontend
+          npx playwright test --project=accessibility
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: Frontend/playwright-report/
+          retention-days: 7
+
+  # LIT-203 acceptance: both production images build and scan clean at
+  # CRITICAL severity. ignore-unfixed keeps the gate opinionated: only a
+  # fixable CRITICAL CVE fails the run (an unfixable one in a pinned base
+  # image is a bump-the-tag decision, not a red CI).
+  docker-image-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -f Backend/Dockerfile -t audiolit-backend:ci .
+      - name: Build frontend image
+        run: docker build --build-arg VITE_API_BASE_URL=http://127.0.0.1:8000 -f Frontend/Dockerfile -t audiolit-frontend:ci .
+      - name: Scan backend image (CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: audiolit-backend:ci
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Scan frontend image (CRITICAL)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: audiolit-frontend:ci
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true

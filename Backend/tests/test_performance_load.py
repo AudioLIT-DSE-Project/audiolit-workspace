@@ -6,6 +6,7 @@ Test Plan Section 3.1.4 & 3.1.5 - Performance Profiling and Load Testing
 import pytest
 import asyncio
 import time
+import gc
 import psutil
 import json
 from pathlib import Path
@@ -20,7 +21,14 @@ MAX_WHISPER_INFERENCE_TIME = 15.0  # Increased from 10.0 to 15.0 seconds
 MAX_WAV2VEC2_INFERENCE_TIME = 30.0  # Increased from 10.0 to 30.0 seconds
 MAX_CACHE_RESPONSE_TIME = 0.1
 MAX_API_RESPONSE_TIME = 5.0  # Increased from 2.0 to 5.0 seconds (your system: ~4.1s)
-MAX_MEMORY_USAGE_MB = 2600  # Increased from 2048 to 2600 MB
+MAX_MEMORY_USAGE_MB = 3000  # Increased to 3000 MB for PyTorch 2.6+ CI runner stability
+# LIT-170: growth bound, not an absolute ceiling -- the mocked loop below does
+# no real model work, so it should barely move the RSS. An absolute ceiling
+# instead depends on whichever real-model tests (Captum/Grad-CAM/LIME) happened
+# to run earlier in the same pytest process and already hold GBs of tensors,
+# making this test's pass/fail a function of test *order* rather than of
+# whether transcribe_whisper leaks memory.
+MAX_MEMORY_GROWTH_MB = 300
 MIN_SUCCESS_RATE = 0.7  # Reduced from 0.8 to 0.7 (70%)
 
 class TestPerformanceProfiling:
@@ -86,24 +94,33 @@ class TestPerformanceProfiling:
         assert retrieval_time <= MAX_CACHE_RESPONSE_TIME, f"Cache retrieval took {retrieval_time:.3f}s, max allowed {MAX_CACHE_RESPONSE_TIME}s"
     
     def test_memory_usage_monitoring(self):
-        """Test memory usage stays within acceptable limits during operation."""
+        """Repeated inference calls must not grow the process without bound.
+
+        This asserts the *delta* across the loop, not absolute process RSS. The
+        absolute form measured the whole pytest process, which by this point in
+        a full run is holding real Whisper/wav2vec2 weights loaded by unrelated
+        tests - so it passed or failed on test ordering rather than on anything
+        this loop does, and it started failing the moment the suite loaded one
+        more model. A leak in the call path is what this can actually observe.
+        """
         process = psutil.Process()
+        gc.collect()
         initial_memory = process.memory_info().rss / 1024 / 1024  # MB
-        
-        # Simulate memory-intensive operation
+
         with patch('app.domain.model_loader_service.transcribe_whisper') as mock_transcriber:
             mock_transcriber.return_value = {"text": "memory test"}
-            
-            # Monitor memory during operations
+
             peak_memory = initial_memory
-            
             for i in range(10):
                 from app.domain import model_loader_service
                 result = model_loader_service.transcribe_whisper("test-model", "test_audio.wav")
                 current_memory = process.memory_info().rss / 1024 / 1024
                 peak_memory = max(peak_memory, current_memory)
-        
-        assert peak_memory <= MAX_MEMORY_USAGE_MB, f"Peak memory usage {peak_memory:.1f}MB exceeds limit {MAX_MEMORY_USAGE_MB}MB"
+        growth = peak_memory - initial_memory
+        assert growth <= MAX_MEMORY_GROWTH_MB, (
+            f"Memory grew {growth:.1f}MB during 10 mocked transcribe calls, "
+            f"expected under {MAX_MEMORY_GROWTH_MB}MB (initial {initial_memory:.1f}MB, peak {peak_memory:.1f}MB)"
+        )
     
     @pytest.mark.asyncio
     async def test_api_response_time_performance(self, client):

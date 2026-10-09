@@ -53,6 +53,11 @@ class LoadedModel:
     weights_sha256: str
     model: torch.nn.Module
     available_layers: List[str] = field(default_factory=list)
+    device: str = "cpu"
+    # FR1.4 requires the fallback be *user-visible*, so it travels with the
+    # model rather than living only in a log line.
+    device_fallback: bool = False
+    device_fallback_reason: Optional[str] = None
 
     def attach_hooks(self) -> HookManager:
         """Fresh HookManager for this model, used as a context manager for
@@ -163,6 +168,46 @@ def _sha256_of_safetensors(local_dir: str) -> str:
     return digest.hexdigest()
 
 
+def _is_vram_exhaustion(exc: BaseException) -> bool:
+    """CUDA OOM, however torch chose to spell it this version."""
+    oom_type = getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(exc, oom_type):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+def _record_model_load(loaded: LoadedModel) -> None:
+    """Write-through the loaded model's reproducibility record (LIT-257).
+
+    ``models`` records the resolved revision + weight digest so a model can be
+    reproduced exactly later (SRS §3.10); the document maps the tier's fields
+    onto the registry's: weight_digest <- weights_sha256, architecture <-
+    family, hf_model_id <- model_id, and the unique model_id is
+    ``hf_model_id@revision`` (one document per model+revision).
+
+    Never raises: a failed write is logged and the load proceeds (SRS §3.3.1
+    graceful degradation; SAD §11.1).
+    """
+    from ..infrastructure import metadata_store as metadata_store_module
+
+    store = metadata_store_module.get_metadata_store()
+    if store is None:
+        return
+    try:
+        store.upsert_model(
+            {
+                "model_id": f"{loaded.model_id}@{loaded.revision}",
+                "name": loaded.model_id,
+                "architecture": loaded.family,
+                "revision": loaded.revision,
+                "weight_digest": loaded.weights_sha256,
+                "hf_model_id": loaded.model_id,
+            }
+        )
+    except Exception as exc:
+        logger.warning("metadata.write_failed collection=models: %s", exc)
+
+
 def download_and_load(
     resolved: ResolvedModel,
     attn_implementation: str = "eager",
@@ -196,9 +241,34 @@ def download_and_load(
         _, model_class = _SUPPORTED_MODEL_TYPES[
             next(k for k, v in _SUPPORTED_MODEL_TYPES.items() if v[0] == resolved.family)
         ]
-    model = model_class.from_pretrained(local_dir, attn_implementation=attn_implementation)
+    model = model_class.from_pretrained(local_dir, low_cpu_mem_usage=False, attn_implementation=attn_implementation)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
+    device_fallback_reason = None
+    try:
+        model = model.to(device)
+    except Exception as e:
+        if _is_vram_exhaustion(e) and device != "cpu":
+            # FR1.4: VRAM overflow degrades to CPU rather than failing the load,
+            # and says so. A silent retry would leave the user wondering why a
+            # model that "loaded fine" is suddenly an order of magnitude slower.
+            logger.warning(
+                "model_registry: VRAM exhausted loading %s, falling back to CPU: %s",
+                resolved.model_id, e,
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                logger.debug("empty_cache failed during VRAM fallback", exc_info=True)
+            device = "cpu"
+            device_fallback_reason = (
+                "GPU memory exhausted while loading %s; running on CPU, which is "
+                "substantially slower." % resolved.model_id
+            )
+            model = model.to(device)
+        elif "meta tensor" in str(e):
+            model = model.to_empty(device=device)
+        else:
+            raise
     model.eval()
 
     try:
@@ -221,15 +291,22 @@ def download_and_load(
         len(available_layers),
     )
 
-    return LoadedModel(
+    loaded = LoadedModel(
         model_id=resolved.model_id,
         revision=resolved.revision,
         family=resolved.family,
         weights_sha256=weights_sha256,
         model=model,
         available_layers=available_layers,
+        device=device,
+        device_fallback=device_fallback_reason is not None,
+        device_fallback_reason=device_fallback_reason,
     )
+    _record_model_load(loaded)
+    return loaded
 
+
+import threading
 
 class ModelRegistry:
     """Lazy-loading, LRU-bounded cache of Whisper/Wav2Vec2 models.
@@ -242,29 +319,74 @@ class ModelRegistry:
     def __init__(self, max_cache_size: int = 4):
         self.max_cache_size = max_cache_size
         self._cache: "OrderedDict[str, LoadedModel]" = OrderedDict()
+        self._active_downloads: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def register_download_start(self, model_id: str) -> None:
+        with self._lock:
+            self._active_downloads[model_id] = {
+                "model_id": model_id,
+                "status": "downloading",
+                "start_time": time.time(),
+                "cancelled": False,
+            }
+
+    def cancel_download(self, model_id: str) -> bool:
+        with self._lock:
+            if model_id in self._active_downloads:
+                self._active_downloads[model_id]["cancelled"] = True
+                self._active_downloads[model_id]["status"] = "cancelled"
+
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("model_registry: cancelled download and executed memory cleanup for %s", model_id)
+        return True
+
+    def register_download_end(self, model_id: str) -> None:
+        with self._lock:
+            self._active_downloads.pop(model_id, None)
+
+    def is_cancelled(self, model_id: str) -> bool:
+        with self._lock:
+            download_info = self._active_downloads.get(model_id)
+            return download_info.get("cancelled", False) if download_info else False
+
+    def get_active_downloads(self) -> List[dict]:
+        with self._lock:
+            return list(self._active_downloads.values())
 
     def get(self, model_id: str, revision: str = "main", model_class: Optional[type] = None) -> LoadedModel:
-        """Get a loaded model, resolving `revision` to a pinned commit sha first.
+        """Get a loaded model, resolving `revision` to a pinned commit sha first."""
+        self.register_download_start(model_id)
+        try:
+            resolved = resolve_model_id(model_id, revision=revision)
+            if self.is_cancelled(model_id):
+                raise ModelRegistryError("CANCELLED", f"Model resolution for '{model_id}' was cancelled by user.")
 
-        Always re-resolves (a cheap, circuit-breaker-guarded metadata call) so
-        a moving ref like "main" is checked against the cache by its actual
-        current commit, not by the literal string the caller passed -- caching
-        by the unresolved string would mean a mutable ref never hits the cache
-        and silently re-downloads on every call.
-        """
-        resolved = resolve_model_id(model_id, revision=revision)
-        class_suffix = f"#{model_class.__name__}" if model_class else ""
-        key = f"{resolved.model_id}@{resolved.revision}{class_suffix}"
+            class_suffix = f"#{model_class.__name__}" if model_class else ""
+            key = f"{resolved.model_id}@{resolved.revision}{class_suffix}"
 
-        cached = self._cache.get(key)
-        if cached is not None:
-            self._cache.move_to_end(key)
-            return cached
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
 
-        loaded = download_and_load(resolved, model_class=model_class)
-        self._cache[key] = loaded
-        self._evict_if_needed()
-        return loaded
+            loaded = download_and_load(resolved, model_class=model_class)
+            if self.is_cancelled(model_id):
+                del loaded
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                raise ModelRegistryError("CANCELLED", f"Model loading for '{model_id}' was cancelled by user.")
+
+            self._cache[key] = loaded
+            self._evict_if_needed()
+            return loaded
+        finally:
+            self.register_download_end(model_id)
 
     def _evict_if_needed(self) -> None:
         while len(self._cache) > self.max_cache_size:
@@ -274,6 +396,8 @@ class ModelRegistry:
             except Exception:
                 pass
             del evicted.model
+            import gc
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -282,3 +406,4 @@ class ModelRegistry:
 
 
 registry = ModelRegistry()
+

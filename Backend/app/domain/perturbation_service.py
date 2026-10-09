@@ -7,7 +7,7 @@ import librosa
 import numpy as np
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Sequence
 from ..infrastructure.dataset_service import resolve_file
 
 # Setup logger
@@ -162,6 +162,150 @@ def apply_time_stretch(waveform: torch.Tensor, stretch_factor: float) -> torch.T
         logger.error(f"Time stretch failed: {e}. Returning original waveform.")
         return waveform
 
+# --- Region-scoped perturbation (FR12: mutate the selected region only) -------
+#
+# A perturbation may carry a ``region``:
+#
+#     {"t_start_ms": 500, "t_end_ms": 1500, "f_low_hz": 300, "f_high_hz": 2500}
+#
+# The time span is required; the frequency band is optional and means "the whole
+# band" when absent. Without a region a perturbation acts on the whole clip, as
+# it always has. Before this, only the mute could be confined to a region: noise
+# requested "for the selected region" was added to the entire clip.
+
+_REGION_STFT_N_FFT = 2048
+_REGION_STFT_HOP = 512
+# Edge ramp for a time-only splice, so the region does not start and stop with
+# a click. 5 ms is inaudible as a fade and long enough to remove the step.
+_REGION_FADE_SECONDS = 0.005
+
+#: Perturbations whose frequency band can be confined. Pitch shift and time
+#: stretch act on the whole spectrum by definition, so they use the time span.
+REGION_BAND_TYPES = ("noise", "band_pass_filter")
+
+
+def _mono(waveform: torch.Tensor) -> np.ndarray:
+    return (waveform[0] if waveform.dim() > 1 else waveform).detach().cpu().numpy().astype(np.float32)
+
+
+def _region_samples(region: Dict[str, Any], n_samples: int, sample_rate: int) -> Tuple[int, int]:
+    """The region's time span as a clamped ``[start, end)`` sample range."""
+    start = int(round(float(region.get("t_start_ms", 0)) / 1000.0 * sample_rate))
+    end = int(round(float(region.get("t_end_ms", n_samples / sample_rate * 1000.0)) / 1000.0 * sample_rate))
+    start = max(0, min(start, n_samples))
+    end = max(0, min(end, n_samples))
+    if end <= start:
+        raise ValueError("The selected region is empty or lies outside the clip.")
+    return start, end
+
+
+def _region_band(region: Dict[str, Any], sample_rate: int) -> Tuple[float, float] | None:
+    """The region's frequency band, or None when it spans the whole spectrum."""
+    if region.get("f_low_hz") is None and region.get("f_high_hz") is None:
+        return None
+    nyquist = sample_rate / 2.0
+    low = max(0.0, float(region.get("f_low_hz") or 0.0))
+    high = min(nyquist, float(region.get("f_high_hz") if region.get("f_high_hz") is not None else nyquist))
+    if high <= low:
+        raise ValueError("The selected frequency band is empty or lies above the clip's bandwidth.")
+    return (low, high) if (low > 0.0 or high < nyquist) else None
+
+
+def _splice_time_region(original: np.ndarray, perturbed: np.ndarray, start: int, end: int, sample_rate: int) -> np.ndarray:
+    """Take ``perturbed`` inside ``[start, end)`` and ``original`` elsewhere.
+
+    Both arrays are the same length. The switch is ramped over a few
+    milliseconds just inside each edge of the region.
+    """
+    weight = np.zeros(len(original), dtype=np.float32)
+    weight[start:end] = 1.0
+    fade = min(int(_REGION_FADE_SECONDS * sample_rate), (end - start) // 2)
+    if fade > 0:
+        ramp = np.linspace(0.0, 1.0, fade, endpoint=False, dtype=np.float32)
+        weight[start:start + fade] = ramp
+        weight[end - fade:end] = ramp[::-1]
+    return original * (1.0 - weight) + perturbed * weight
+
+
+def _stft_region_mask(n_frames: int, sample_rate: int, start: int, end: int, band: Tuple[float, float]) -> Tuple[np.ndarray, np.ndarray]:
+    """Boolean frequency-bin and frame masks for a time-frequency region."""
+    freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=_REGION_STFT_N_FFT)
+    times = librosa.frames_to_time(np.arange(n_frames), sr=sample_rate, hop_length=_REGION_STFT_HOP)
+    freq_mask = (freqs >= band[0]) & (freqs <= band[1])
+    time_mask = (times >= start / sample_rate) & (times <= end / sample_rate)
+    return freq_mask, time_mask
+
+
+def _istft_to_length(stft: np.ndarray, length: int) -> np.ndarray:
+    audio = librosa.istft(stft, hop_length=_REGION_STFT_HOP, length=length)
+    return audio.astype(np.float32)
+
+
+def apply_region_perturbation(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    perturbation_type: str,
+    params: Dict[str, Any],
+    region: Dict[str, Any],
+) -> torch.Tensor:
+    """Apply one perturbation inside ``region`` and leave the rest of the clip alone.
+
+    Raises ``ValueError`` for an empty region or a type that cannot be scoped;
+    the caller records that against the perturbation instead of failing the job.
+    """
+    original = _mono(waveform)
+    start, end = _region_samples(region, len(original), sample_rate)
+    band = _region_band(region, sample_rate)
+
+    if perturbation_type == "noise":
+        noise_level = float(params.get("noise_level", 0.005))
+        noisy = original + np.random.randn(len(original)).astype(np.float32) * noise_level
+        if band is None:
+            result = _splice_time_region(original, noisy, start, end, sample_rate)
+        else:
+            # Band-limited noise: swap in the noisy signal's spectrum for the
+            # cells inside the box only.
+            stft = librosa.stft(original, n_fft=_REGION_STFT_N_FFT, hop_length=_REGION_STFT_HOP)
+            noisy_stft = librosa.stft(noisy, n_fft=_REGION_STFT_N_FFT, hop_length=_REGION_STFT_HOP)
+            freq_mask, time_mask = _stft_region_mask(stft.shape[1], sample_rate, start, end, band)
+            cells = np.outer(freq_mask, time_mask)
+            stft[cells] = noisy_stft[cells]
+            result = _istft_to_length(stft, len(original))
+
+    elif perturbation_type == "band_pass_filter":
+        # Keep only the band, for the duration of the region: everything outside
+        # the band is silenced inside the time span and untouched outside it.
+        keep = band or _region_band(
+            {"f_low_hz": params.get("f_low_hz"), "f_high_hz": params.get("f_high_hz")}, sample_rate
+        )
+        if keep is None:
+            raise ValueError("A band-pass filter needs a frequency band: draw the region on the spectrogram.")
+        stft = librosa.stft(original, n_fft=_REGION_STFT_N_FFT, hop_length=_REGION_STFT_HOP)
+        freq_mask, time_mask = _stft_region_mask(stft.shape[1], sample_rate, start, end, keep)
+        stft[np.outer(~freq_mask, time_mask)] = 0.0
+        result = _istft_to_length(stft, len(original))
+
+    elif perturbation_type == "pitch_shift":
+        semitones = max(-6.0, min(6.0, float(params.get("pitch_shift_semitones", 2))))
+        shifted = original.copy()
+        shifted[start:end] = librosa.effects.pitch_shift(
+            y=original[start:end], sr=sample_rate, n_steps=semitones
+        )[: end - start]
+        result = _splice_time_region(original, shifted, start, end, sample_rate)
+
+    elif perturbation_type == "time_stretch":
+        # The one perturbation that changes the clip's length: the region is
+        # replaced by its stretched version and everything after it moves.
+        factor = float(params.get("stretch_factor", 1.1))
+        stretched = librosa.effects.time_stretch(y=original[start:end], rate=factor)
+        result = np.concatenate([original[:start], stretched.astype(np.float32), original[end:]])
+
+    else:
+        raise ValueError(f"'{perturbation_type}' cannot be applied to a region.")
+
+    return torch.from_numpy(np.ascontiguousarray(result, dtype=np.float32)).unsqueeze(0)
+
+
 def apply_perturbations(waveform: torch.Tensor, sample_rate: int, perturbations: List[Dict[str, Any]]) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
     """Apply multiple perturbations to a waveform sequentially."""
     perturbed_waveform = waveform.clone()
@@ -170,9 +314,18 @@ def apply_perturbations(waveform: torch.Tensor, sample_rate: int, perturbations:
     for perturbation in perturbations:
         perturbation_type = perturbation.get("type")
         params = perturbation.get("params", {})
+        region = perturbation.get("region")
         
         try:
-            if perturbation_type == "noise":
+            if region:
+                perturbed_waveform = apply_region_perturbation(
+                    perturbed_waveform, sample_rate, perturbation_type, params, region
+                )
+                applied_perturbations.append(
+                    {"type": perturbation_type, "params": params, "region": region, "status": "applied"}
+                )
+
+            elif perturbation_type == "noise":
                 noise_level = params.get("noise_level", 0.005)
                 perturbed_waveform = add_gaussian_noise(perturbed_waveform, noise_level)
                 applied_perturbations.append({"type": "noise", "params": {"noise_level": noise_level}, "status": "applied"})
@@ -224,7 +377,9 @@ def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output
             resolved_path = Path(file_path)
             if not resolved_path.exists():
                 raise FileNotFoundError(f"Audio file not found: {file_path}")
-    except FileNotFoundError as e:
+    # ValueError as well: resolve_file raises it for an unknown corpus and for a
+    # custom dataset without a session, and it used to escape this function.
+    except (FileNotFoundError, ValueError) as e:
         return {
             "original_file": file_path, "perturbed_file": "", "filename": "", "duration_ms": 0,
             "sample_rate": 0, "applied_perturbations": [], "success": False, "error": str(e)
@@ -269,3 +424,389 @@ def perturb_and_save(file_path: str, perturbations: List[Dict[str, Any]], output
         "preview_bytes": preview_bytes, 
         "success": True
     }
+
+
+def mask_top_k_features(
+    waveform: torch.Tensor,
+    attributions: Sequence[float] | np.ndarray,
+    k_percent: float = 10.0
+) -> torch.Tensor:
+    """Mask the top-K% most salient timesteps/features based on attribution weights (FR16).
+
+    Args:
+        waveform: Input audio tensor of shape (channels, samples) or (samples,).
+        attributions: Saliency/attribution score array matching or resampled to the time dimension.
+        k_percent: Percentage of top salient timesteps to zero out (0.0 to 100.0).
+
+    Returns:
+        Masked waveform tensor with top-K% salient regions zeroed.
+    """
+    masked = waveform.clone()
+    if masked.dim() == 1:
+        masked = masked.unsqueeze(0)
+
+    channels, length = masked.shape
+    attr_np = np.asarray(attributions, dtype=np.float32)
+
+    if len(attr_np) == 0 or length == 0:
+        return masked
+
+    if len(attr_np) != length:
+        attr_np = np.interp(np.linspace(0, 1, length), np.linspace(0, 1, len(attr_np)), attr_np)
+
+    k_percent = max(0.0, min(100.0, k_percent))
+    k_count = int(np.ceil((k_percent / 100.0) * length))
+
+    if k_count > 0:
+        top_k_indices = np.argpartition(np.abs(attr_np), -k_count)[-k_count:]
+        masked[:, top_k_indices] = 0.0
+
+    return masked
+
+
+def compute_deletion_score(
+    audio_path: str,
+    attributions: Sequence[float] | np.ndarray,
+    model_type: str = "ser",
+    model_id: str = "default",
+    k_percent: float = 10.0,
+    output_dir: str = "uploads",
+) -> Dict[str, Any]:
+    """Calculate single-method deletion-score faithfulness (FR16).
+
+    Scrubs top-K% salient features, executes inference on the masked sample,
+    and returns initial vs masked confidence drop and deletion score.
+    """
+    resolved_path = Path(audio_path)
+    if not resolved_path.exists():
+        return {"success": False, "error": f"Audio file not found: {audio_path}"}
+
+    waveform, sample_rate = _load_waveform(str(resolved_path))
+    masked_waveform = mask_top_k_features(waveform, attributions, k_percent=k_percent)
+
+    masked_filename = f"faithfulness_masked_{uuid.uuid4().hex[:8]}.wav"
+    masked_path = Path(output_dir) / masked_filename
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    _save_waveform(str(masked_path), masked_waveform, sample_rate)
+
+    try:
+        if model_type.lower() in ("add", "deepfake"):
+            from .model_loader_service import predict_deepfake
+            orig_res = predict_deepfake(str(resolved_path))
+            masked_res = predict_deepfake(str(masked_path))
+
+            orig_conf = float(orig_res.get("confidence", 0.0))
+            masked_conf = float(masked_res.get("confidence", 0.0))
+            target_class = orig_res.get("predicted_label", "bona-fide")
+        else:
+            from .model_loader_service import predict_ser
+            orig_res = predict_ser(str(resolved_path))
+            masked_res = predict_ser(str(masked_path))
+
+            target_class = orig_res.get("predicted_emotion", "neutral")
+            orig_probs = orig_res.get("probabilities", {})
+            masked_probs = masked_res.get("probabilities", {})
+            orig_conf = float(orig_probs.get(target_class, orig_res.get("confidence", 0.0)))
+            masked_conf = float(masked_probs.get(target_class, 0.0))
+
+        confidence_drop = max(0.0, orig_conf - masked_conf)
+        deletion_score = round(confidence_drop / orig_conf, 4) if orig_conf > 0 else 0.0
+
+        return {
+            "success": True,
+            "model_type": model_type,
+            "model_id": model_id,
+            "target_class": target_class,
+            "k_percent": k_percent,
+            "initial_confidence": round(orig_conf, 4),
+            "masked_confidence": round(masked_conf, 4),
+            "confidence_drop": round(confidence_drop, 4),
+            "deletion_score": deletion_score,
+            "faithfulness_verdict": "faithful" if confidence_drop > 0.05 else "unfaithful",
+            "masked_audio_file": str(masked_path).replace("\\", "/"),
+        }
+    except Exception as exc:
+        return {"success": False, "error": f"Faithfulness evaluation failed: {exc}"}
+
+
+class HighSaliencyMaskingEngine:
+    """Automated Input Perturbation Engine for High-Saliency Feature Masking (FR16 / LIT-183).
+
+    Parses gradient attribution matrices (Captum/LIME/SHAP), extracts top-K% millisecond intervals,
+    and applies systematic zero, noise, or mean-value masking.
+    """
+
+    @staticmethod
+    def extract_top_k_ms_intervals(
+        attributions: Sequence[float] | np.ndarray,
+        sample_rate: int = 16000,
+        k_percent: float = 10.0,
+        total_samples: int | None = None,
+    ) -> List[Tuple[float, float]]:
+        """Locates precise millisecond timestamp ranges [t_start_ms, t_end_ms] matching top-K% saliency."""
+        attr_np = np.asarray(attributions, dtype=np.float32)
+        if len(attr_np) == 0:
+            return []
+
+        if total_samples is None or total_samples <= 0:
+            total_samples = len(attr_np)
+
+        k_percent = max(0.0, min(100.0, k_percent))
+        k_count = int(np.ceil((k_percent / 100.0) * len(attr_np)))
+        if k_count <= 0:
+            return []
+
+        top_k_indices = np.argpartition(np.abs(attr_np), -k_count)[-k_count:]
+        top_k_indices.sort()
+
+        intervals: List[Tuple[float, float]] = []
+        if len(top_k_indices) == 0:
+            return intervals
+
+        step_sec = (total_samples / sample_rate) / len(attr_np)
+        start_idx = top_k_indices[0]
+        prev_idx = top_k_indices[0]
+
+        for idx in top_k_indices[1:]:
+            if idx == prev_idx + 1:
+                prev_idx = idx
+            else:
+                t_start = round(start_idx * step_sec * 1000, 2)
+                t_end = round((prev_idx + 1) * step_sec * 1000, 2)
+                intervals.append((t_start, t_end))
+                start_idx = idx
+                prev_idx = idx
+
+        t_start = round(start_idx * step_sec * 1000, 2)
+        t_end = round((prev_idx + 1) * step_sec * 1000, 2)
+        intervals.append((t_start, t_end))
+
+        return intervals
+
+    @staticmethod
+    def mask_audio_by_intervals(
+        waveform: torch.Tensor,
+        sample_rate: int,
+        intervals: List[Tuple[float, float]],
+        mode: str = "zero",
+        noise_level: float = 0.005,
+    ) -> torch.Tensor:
+        """Applies systematic interval masking to waveform in zero, noise, or mean-blur mode."""
+        masked = waveform.clone()
+        if masked.dim() == 1:
+            masked = masked.unsqueeze(0)
+
+        channels, length = masked.shape
+
+        for t_start_ms, t_end_ms in intervals:
+            start_sample = max(0, int((t_start_ms / 1000.0) * sample_rate))
+            end_sample = min(length, int((t_end_ms / 1000.0) * sample_rate))
+
+            if start_sample >= end_sample:
+                continue
+
+            if mode.lower() == "noise":
+                noise = torch.randn((channels, end_sample - start_sample)) * noise_level
+                masked[:, start_sample:end_sample] = noise
+            elif mode.lower() in ("mean", "blur"):
+                mean_val = float(masked.mean())
+                masked[:, start_sample:end_sample] = mean_val
+            else:
+                masked[:, start_sample:end_sample] = 0.0
+
+        return masked
+
+    @classmethod
+    def process_high_saliency_mask(
+        cls,
+        waveform: torch.Tensor,
+        sample_rate: int,
+        attributions: Sequence[float] | np.ndarray,
+        k_percent: float = 10.0,
+        mode: str = "zero",
+    ) -> Tuple[torch.Tensor, List[Tuple[float, float]]]:
+        """Extracts top-K% intervals and returns masked waveform with interval metadata."""
+        length = waveform.shape[-1]
+        intervals = cls.extract_top_k_ms_intervals(
+            attributions=attributions,
+            sample_rate=sample_rate,
+            k_percent=k_percent,
+            total_samples=length,
+        )
+        masked_waveform = cls.mask_audio_by_intervals(
+            waveform=waveform,
+            sample_rate=sample_rate,
+            intervals=intervals,
+            mode=mode,
+        )
+        return masked_waveform, intervals
+
+
+def apply_high_saliency_mask(
+    audio_path: str,
+    attributions: Sequence[float] | np.ndarray,
+    k_percent: float = 10.0,
+    mode: str = "zero",
+    output_dir: str = "uploads",
+) -> Dict[str, Any]:
+    """High-level service API for applying high-saliency feature masking to an audio file."""
+    resolved_path = Path(audio_path)
+    if not resolved_path.exists():
+        return {"success": False, "error": f"Audio file not found: {audio_path}"}
+
+    try:
+        waveform, sample_rate = _load_waveform(str(resolved_path))
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to load audio file: {exc}"}
+
+    masked_waveform, intervals = HighSaliencyMaskingEngine.process_high_saliency_mask(
+        waveform=waveform,
+        sample_rate=sample_rate,
+        attributions=attributions,
+        k_percent=k_percent,
+        mode=mode,
+    )
+
+    masked_filename = f"saliency_masked_{mode}_{uuid.uuid4().hex[:8]}.wav"
+    output_path = Path(output_dir) / masked_filename
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    try:
+        _save_waveform(str(output_path), masked_waveform, sample_rate)
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to save masked audio: {exc}"}
+
+    preview_bytes = export_to_wav_bytes(masked_waveform, sample_rate)
+    duration_ms = int(masked_waveform.shape[-1] / sample_rate * 1000)
+
+    return {
+        "success": True,
+        "original_file": audio_path,
+        "masked_file": str(output_path).replace("\\", "/"),
+        "filename": masked_filename,
+        "duration_ms": duration_ms,
+        "sample_rate": sample_rate,
+        "k_percent": k_percent,
+        "mode": mode,
+        "masked_intervals_ms": intervals,
+        "preview_bytes": preview_bytes,
+    }
+
+
+def evaluate_downstream_degradation(
+    audio_path: str,
+    attributions: Sequence[float] | np.ndarray,
+    model_type: str = "ser",
+    model_id: str = "default",
+    k_percentages: List[float] | None = None,
+    mode: str = "zero",
+    output_dir: str = "uploads",
+) -> Dict[str, Any]:
+    """Downstream Performance Degradation Scoring Pipeline (FR16 / LIT-184).
+
+    Pipes high-saliency masked speech tracks back through forward model inference across
+    a sequence of top-K percentage thresholds, calculates confidence drops, computes
+    the Area Under Degradation Curve (AUDC), and returns structured faithfulness audit logs.
+    """
+    resolved_path = Path(audio_path)
+    if not resolved_path.exists():
+        return {"success": False, "error": f"Audio file not found: {audio_path}"}
+
+    if k_percentages is None or len(k_percentages) == 0:
+        k_percentages = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 50.0]
+
+    k_percentages = sorted(list(set(max(0.0, min(100.0, float(k))) for k in k_percentages)))
+
+    try:
+        waveform, sample_rate = _load_waveform(str(resolved_path))
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to load audio file: {exc}"}
+
+    try:
+        if model_type.lower() in ("add", "deepfake"):
+            from .model_loader_service import predict_deepfake
+            orig_res = predict_deepfake(str(resolved_path))
+            baseline_conf = float(orig_res.get("confidence", 0.0))
+            target_class = orig_res.get("predicted_label", "bona-fide")
+        else:
+            from .model_loader_service import predict_ser
+            orig_res = predict_ser(str(resolved_path))
+            target_class = orig_res.get("predicted_emotion", "neutral")
+            orig_probs = orig_res.get("probabilities", {})
+            baseline_conf = float(orig_probs.get(target_class, orig_res.get("confidence", 0.0)))
+    except Exception as exc:
+        return {"success": False, "error": f"Baseline model inference failed: {exc}"}
+
+    degradation_steps: List[Dict[str, Any]] = []
+    prev_conf = baseline_conf
+    monotonic_decline = True
+
+    for k_pct in k_percentages:
+        masked_waveform, intervals = HighSaliencyMaskingEngine.process_high_saliency_mask(
+            waveform=waveform,
+            sample_rate=sample_rate,
+            attributions=attributions,
+            k_percent=k_pct,
+            mode=mode,
+        )
+
+        masked_filename = f"degradation_k{int(k_pct)}_{uuid.uuid4().hex[:6]}.wav"
+        masked_path = Path(output_dir) / masked_filename
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        try:
+            _save_waveform(str(masked_path), masked_waveform, sample_rate)
+            if model_type.lower() in ("add", "deepfake"):
+                from .model_loader_service import predict_deepfake
+                m_res = predict_deepfake(str(masked_path))
+                m_conf = float(m_res.get("confidence", 0.0))
+            else:
+                from .model_loader_service import predict_ser
+                m_res = predict_ser(str(masked_path))
+                m_probs = m_res.get("probabilities", {})
+                m_conf = float(m_probs.get(target_class, 0.0))
+        except Exception:
+            m_conf = 0.0
+
+        if m_conf > prev_conf + 1e-4:
+            monotonic_decline = False
+        prev_conf = m_conf
+
+        conf_drop = max(0.0, baseline_conf - m_conf)
+        degradation_ratio = round(conf_drop / baseline_conf, 4) if baseline_conf > 0 else 0.0
+
+        degradation_steps.append({
+            "k_percent": k_pct,
+            "masked_confidence": round(m_conf, 4),
+            "confidence_drop": round(conf_drop, 4),
+            "degradation_ratio": degradation_ratio,
+            "masked_intervals_ms": intervals,
+            "masked_audio_file": str(masked_path).replace("\\", "/"),
+        })
+
+    audc = 0.0
+    if len(degradation_steps) > 1:
+        xs = [s["k_percent"] / 100.0 for s in degradation_steps]
+        ys = [s["degradation_ratio"] for s in degradation_steps]
+        audc = float(np.trapz(ys, xs))
+
+    mean_degradation_score = round(
+        sum(s["degradation_ratio"] for s in degradation_steps) / len(degradation_steps), 4
+    ) if degradation_steps else 0.0
+
+    return {
+        "success": True,
+        "audio_path": audio_path,
+        "model_type": model_type,
+        "model_id": model_id,
+        "target_class": target_class,
+        "baseline_confidence": round(baseline_conf, 4),
+        "degradation_curve": degradation_steps,
+        "audc": round(audc, 4),
+        "mean_degradation_score": mean_degradation_score,
+        "degradation_trend": "monotonic_decline" if monotonic_decline else "non_monotonic",
+        "audit_verdict": "faithful" if (audc >= 0.05 or mean_degradation_score >= 0.10) else "unfaithful",
+    }
+
+
+
