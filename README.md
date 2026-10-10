@@ -178,7 +178,7 @@ docker compose up --build -d
   security notes, operations, troubleshooting, and how to read a provenance
   label.
 - `docker-compose.yml` — every service, port and volume, with the reasoning for
-  each setting in comments.
+  each setting in comments. Please contact developers for the corpuses.
 
 ## Licence
 
