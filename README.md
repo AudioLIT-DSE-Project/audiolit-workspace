@@ -185,3 +185,4 @@ docker compose up --build -d
 See [LICENSE](LICENSE). Note that several of the optional benchmark corpora are
 **research-use only**; the application displays a licence notice when you load
 one. Check each corpus's own terms before using it for anything commercial.
+**Please contact developers for the corpuses.** 
